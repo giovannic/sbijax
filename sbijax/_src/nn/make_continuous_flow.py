@@ -4,7 +4,7 @@ import distrax
 import haiku as hk
 import jax
 from jax import numpy as jnp
-from scipy import integrate
+from jax.experimental.ode import odeint
 
 __all__ = ["CNF", "make_cnf"]
 
@@ -59,7 +59,7 @@ class CNF(hk.Module):
             seed=hk.next_rng_key(), sample_shape=(context.shape[0],)
         )
 
-        def ode_func(time, theta_t):
+        def ode_func(theta_t, time, *_):
             theta_t = theta_t.reshape(-1, self._n_dimension)
             time = jnp.full((theta_t.shape[0], 1), time)
             ret = self.vector_field(
@@ -67,16 +67,15 @@ class CNF(hk.Module):
             )
             return ret.reshape(-1)
 
-        res = integrate.solve_ivp(
+        res = odeint(
             ode_func,
-            (0.0, 1.0),
             theta_0.reshape(-1),
+            jnp.array([0.0, 1.0]),
             rtol=1e-5,
-            atol=1e-5,
-            method="RK45",
+            atol=1e-5
         )
 
-        ret = res.y[:, -1].reshape(-1, self._n_dimension)
+        ret = res[-1].reshape(-1, self._n_dimension)
         return ret
 
     def vector_field(self, theta, time, context, **kwargs):

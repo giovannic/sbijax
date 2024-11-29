@@ -1,19 +1,18 @@
-# pylint: skip-file
-
-import distrax
-import haiku as hk
+import pytest
 from jax import numpy as jnp
 from jax import random as jr
+from jax import jit
 
 from sbijax import FMPE
 from sbijax.nn import make_cnf
 
 
 def test_fmpe(prior_simulator_tuple):
+    tol: float = 1e-3
     y_observed = jnp.array([-1.0, 1.0])
     estim = FMPE(prior_simulator_tuple, make_cnf(2))
     data, params = None, {}
-    for i in range(2):
+    for _ in range(2):
         data, _ = estim.simulate_data_and_possibly_append(
             jr.PRNGKey(1),
             params=params,
@@ -24,8 +23,8 @@ def test_fmpe(prior_simulator_tuple):
             n_samples=200,
             n_warmup=100,
         )
-        params, info = estim.fit(jr.PRNGKey(2), data=data, n_iter=2)
-    _ = estim.sample_posterior(
+        params, _ = estim.fit(jr.PRNGKey(2), data=data, n_iter=2)
+    posterior, _ = estim.sample_posterior(
         jr.PRNGKey(3),
         params,
         y_observed,
@@ -33,3 +32,4 @@ def test_fmpe(prior_simulator_tuple):
         n_samples=200,
         n_warmup=100,
     )
+    assert posterior.posterior.mean() == pytest.approx(1., tol) # type: ignore

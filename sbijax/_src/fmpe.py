@@ -241,33 +241,27 @@ class FMPE(NE):
         """
         observable = jnp.atleast_2d(observable)
 
-        thetas = None
-        n_curr = n_samples
-        n_total_simulations_round = 0
-        _, unravel_fn = ravel_pytree(self.prior_sampler_fn(seed=jr.PRNGKey(1)))
-        while n_curr > 0:
-            n_sim = jnp.minimum(200, jnp.maximum(200, n_curr))
-            n_total_simulations_round += n_sim
-            sample_key, rng_key = jr.split(rng_key)
-            proposal = self.model.apply(
-                params,
-                sample_key,
-                method="sample",
-                context=jnp.tile(observable, [n_sim, 1]),
-                is_training=False,
-            )
-            proposal_probs = self.prior_log_density_fn(
-                jax.vmap(unravel_fn)(proposal)
-            )
-            proposal_accepted = proposal[jnp.isfinite(proposal_probs)]
-            if thetas is None:
-                thetas = proposal_accepted
-            else:
-                thetas = jnp.vstack([thetas, proposal_accepted])
-            n_curr -= proposal_accepted.shape[0]
-        self.n_total_simulations += n_total_simulations_round
+        _, unravel_fn = ravel_pytree(
+            self.prior_sampler_fn(seed=jr.PRNGKey(1))
+        )
+        sample_key, rng_key = jr.split(rng_key)
+        thetas= jax.jit(
+            self.model.apply,
+            static_argnames=("method", "is_training"),
+        )(
+            params,
+            sample_key,
+            method="sample",
+            context=jnp.tile(observable, [n_samples, 1]),
+            is_training=False,
+        )
 
-        ess = float(thetas.shape[0] / n_total_simulations_round)
+        proposal_probs = self.prior_log_density_fn(
+            jax.vmap(unravel_fn)(thetas)
+        )
+        ess = thetas.shape[0] / jnp.sum(
+            jnp.isfinite(proposal_probs)
+        )
         thetas = jax.tree_map(
             lambda x: x.reshape(1, *x.shape),
             jax.vmap(unravel_fn)(thetas[:n_samples]),
