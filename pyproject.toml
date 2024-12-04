@@ -30,7 +30,8 @@ dependencies = [
     "tensorflow==2.15.0",
     "tensorflow-datasets==4.9.3",
     "tfp-nightly>=0.20.0.dev20230404",
-    "tqdm>=4.64.1"
+    "tqdm>=4.64.1",
+    "flax==0.8.5"
 ]
 dynamic = ["version"]
 

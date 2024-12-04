@@ -31,9 +31,13 @@ def _ut(theta_t, theta, times, sigma_min):
     return num / denom
 
 
-# pylint: disable=too-many-locals
 def _cfm_loss(
-    params, rng_key, apply_fn, sigma_min=0.001, is_training=True, **batch
+    params,
+    rng_key,
+    apply_fn,
+    sigma_min=0.001,
+    is_training=True,
+    **batch
 ):
     theta = batch["theta"]
     n, _ = theta.shape
@@ -60,7 +64,6 @@ def _cfm_loss(
     return loss
 
 
-# ruff: noqa: PLR0913, E501
 class FMPE(NE):
     r"""Flow matching posterior estimation.
 
@@ -89,12 +92,23 @@ class FMPE(NE):
         Wildberger, Jonas, et al. "Flow Matching for Scalable Simulation-Based Inference." Advances in Neural Information Processing Systems, 2024.
     """
 
-    def __init__(self, model_fns, density_estimator):
-        super().__init__(model_fns, density_estimator)
+    def __init__(
+        self,
+        model_fns,
+        density_estimator,
+        sample_index=None,
+        index_shape=()
+        ):
+        super().__init__(
+            model_fns,
+            density_estimator,
+            sample_index=sample_index,
+            index_shape=index_shape
+        )
 
     def fit(
         self,
-        rng_key: jr.PRNGKey,
+        rng_key,
         data: PyTree,
         *,
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
@@ -193,7 +207,7 @@ class FMPE(NE):
                 best_loss = validation_loss
                 best_params = params.copy()
 
-        losses = jnp.vstack(losses)[: (i + 1), :]
+        losses = jnp.vstack(losses)[: (i + 1), :] #type: ignore
         return best_params, losses
 
     def _init_params(self, rng_key, **init_data):
@@ -225,7 +239,14 @@ class FMPE(NE):
 
     # ruff: noqa: D417
     def sample_posterior(
-        self, rng_key, params, observable, *, n_samples=4_000, **kwargs
+        self,
+        rng_key,
+        params,
+        observable,
+        *,
+        n_samples=4_000,
+        observed_index=None,
+        **_
     ):
         r"""Sample from the approximate posterior.
 
@@ -242,7 +263,10 @@ class FMPE(NE):
         observable = jnp.atleast_2d(observable)
 
         _, unravel_fn = ravel_pytree(
-            self.prior_sampler_fn(seed=jr.PRNGKey(1))
+            self.prior_sampler_fn(
+                index=observed_index,
+                seed=jr.PRNGKey(1)
+            )
         )
         sample_key, rng_key = jr.split(rng_key)
         thetas= jax.jit(
@@ -257,7 +281,8 @@ class FMPE(NE):
         )
 
         proposal_probs = self.prior_log_density_fn(
-            jax.vmap(unravel_fn)(thetas)
+            jax.vmap(unravel_fn)(thetas),
+            index=observed_index
         )
         ess = thetas.shape[0] / jnp.sum(
             jnp.isfinite(proposal_probs)

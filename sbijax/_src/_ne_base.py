@@ -14,7 +14,7 @@ from sbijax._src.util.data import stack_data
 class NE(SBI, ABC):
     """Sequential neural estimation base class."""
 
-    def __init__(self, model_fns, network):
+    def __init__(self, model_fns, network, sample_index=None, index_shape=()):
         """Construct an SNE object.
 
         Args:
@@ -23,10 +23,14 @@ class NE(SBI, ABC):
                     log-probability of a data point. The second element is a
                     simulator function.
             network: a neural network
+            indices: a dictionary of indices for infinite dimensional
+                    priors or observations
         """
         super().__init__(model_fns)
         self.model = network
         self.n_total_simulations = 0
+        self._sample_index = sample_index
+        self._index_shape = index_shape
 
     def simulate_data_and_possibly_append(
         self,
@@ -65,7 +69,15 @@ class NE(SBI, ABC):
         return d_new, diagnostics
 
     @abc.abstractmethod
-    def sample_posterior(self, rng_key, params, observable, *args, **kwargs):
+    def sample_posterior(
+        self,
+        rng_key,
+        params,
+        observable,
+        observed_index=None,
+        *args,
+        **kwargs
+        ):
         """Sample from the approximate posterior.
 
         Args:
@@ -82,6 +94,7 @@ class NE(SBI, ABC):
         *,
         params=None,
         observable=None,
+        observed_index=None,
         n_simulations=1000,
         **kwargs,
     ):
@@ -94,6 +107,8 @@ class NE(SBI, ABC):
                 posterior using 'observable'.
             observable: an observation. Needs to be given if posterior draws
                 are desired
+            observed_index: (optional) the index at which an observation
+                was made
             n_simulations: number of newly simulated data
             kwargs: dictionary of ey value pairs passed to `sample_posterior`
 
@@ -103,7 +118,13 @@ class NE(SBI, ABC):
         if params is None or len(params) == 0:
             diagnostics = None
             self.n_total_simulations += n_simulations
+            if observed_index is None:
+                index = observed_index
+            else:
+                index_key, rng_key = jr.split(rng_key)
+                index = self.sample_index(index_key, (n_simulations,))
             new_thetas = self.prior_sampler_fn(
+                index=index,
                 seed=rng_key,
                 sample_shape=(n_simulations,),
             )
@@ -119,6 +140,7 @@ class NE(SBI, ABC):
                 rng_key=rng_key,
                 params=params,
                 observable=jnp.atleast_2d(observable),
+                observed_index=observed_index,
                 **kwargs,
             )
             new_thetas = flatten(inference_data.posterior)
@@ -177,5 +199,14 @@ class NE(SBI, ABC):
         return new_data, diagnostics
 
     def simulate_observations(self, rng_key, thetas):
-        new_obs = self.simulator_fn(seed=rng_key, theta=thetas)
+        new_obs = self.simulator_fn(
+            seed=rng_key,
+            theta=thetas,
+            **self.indices
+        )
         return new_obs
+
+    def sample_index(self, key, batch_shape):
+        assert self._sample_index is not None
+        index_shape = batch_shape + self._index_shape
+        return self._sample_index(key, index_shape)

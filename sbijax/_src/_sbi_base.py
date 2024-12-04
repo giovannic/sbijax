@@ -16,13 +16,8 @@ class SBI(abc.ABC):
         Args:
             model_fns: tuple
         """
-        prior = model_fns[0]()
-        self.prior_sampler_fn, self.prior_log_density_fn = (
-            prior.sample,
-            prior.log_prob,
-        )
+        self._prior_fn = model_fns[0]
         self.simulator_fn = model_fns[1]
-        self._len_theta = len(self.prior_sampler_fn(seed=jr.PRNGKey(123)))
 
     @staticmethod
     def as_iterators(
@@ -46,3 +41,15 @@ class SBI(abc.ABC):
             1.0 - percentage_data_as_validation_set,
             True,
         )
+
+    def prior_sampler_fn(self, *args, index=None, **kwargs):
+        if index is None:
+            return self._prior_fn().sample(*args, **kwargs)
+        else:
+            return self._prior_fn(**index).sample(*args, **kwargs)
+
+    def prior_log_density_fn(self, theta, index=None):
+        if index is None:
+            return self._prior_fn().log_prob(theta)
+        else:
+            return self._prior_fn(**index).log_prob(theta)
