@@ -12,7 +12,11 @@ from sbijax.nn import make_cnf
 # - ~create indices (either continuous or set based)~
 # - ~integrate indices into FMPE, SBI and NE~
 # - ~when are these indices variably sized? During training?~
+# - translate CNF to flax
 # - integrate indices into transformer
+#   - init
+#   - vector_field
+#   - __call__
 # - generate realistic y_observed
 # - generate appropriate test
 

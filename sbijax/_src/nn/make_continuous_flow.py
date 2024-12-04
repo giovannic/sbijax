@@ -1,10 +1,11 @@
 from typing import Callable
 
-import distrax
-import haiku as hk
 import jax
 from jax import numpy as jnp
+from jax import random
 from jax.experimental.ode import odeint
+from flax import nnx
+import haiku as hk
 
 __all__ = ["CNF", "make_cnf"]
 
@@ -12,7 +13,7 @@ from sbijax._src.nn.make_resnet import _ResnetBlock
 
 
 # ruff: noqa: PLR0913,D417
-class CNF(hk.Module):
+class CNF(nnx.Module):
     """Conditional continuous normalizing flow.
 
     Args:
@@ -23,44 +24,32 @@ class CNF(hk.Module):
             with the same batch dimensions.
     """
 
-    def __init__(self, n_dimension: int, transform: Callable):
+    def __init__(self, theta_dim, transform: nnx.Module):
         """Conditional continuous normalizing flow.
 
         Args:
-            n_dimension: the dimensionality of the modelled space
-            transform: a haiku module. The transform is a callable that has to
+            transform: an nnx module. The transform is a callable that has to
                 take as input arguments named 'theta', 'time', 'context' and
                 **kwargs. Theta, time and context are two-dimensional arrays
                 with the same batch dimensions.
         """
         super().__init__()
-        self._n_dimension = n_dimension
+        self._theta_dim = theta_dim
         self._network = transform
-        self._base_distribution = distrax.Normal(jnp.zeros(n_dimension), 1.0)
 
-    def __call__(self, method, **kwargs):
-        """Aplpy the flow.
-
-        Args:
-            method (str): method to call
-
-        Keyword Args:
-            keyword arguments for the called method:
-        """
-        return getattr(self, method)(**kwargs)
-
-    def sample(self, context, **kwargs):
+    def sample(self, rngs, context, **kwargs):
         """Sample from the pushforward.
 
         Args:
             context: array of conditioning variables
         """
-        theta_0 = self._base_distribution.sample(
-            seed=hk.next_rng_key(), sample_shape=(context.shape[0],)
+        theta_0 = random.normal(
+            rngs.base_dist(),
+            (context.shape[0], self._theta_dim)
         )
 
         def ode_func(theta_t, time, *_):
-            theta_t = theta_t.reshape(-1, self._n_dimension)
+            theta_t = theta_t.reshape(-1, self._theta_dim)
             time = jnp.full((theta_t.shape[0], 1), time)
             ret = self.vector_field(
                 theta=theta_t, time=time, context=context, **kwargs
@@ -75,7 +64,7 @@ class CNF(hk.Module):
             atol=1e-5
         )
 
-        ret = res[-1].reshape(-1, self._n_dimension)
+        ret = res[-1].reshape(-1, self._theta_dim)
         return ret
 
     def vector_field(self, theta, time, context, **kwargs):
@@ -90,7 +79,12 @@ class CNF(hk.Module):
             keyword arguments that aer passed tothe neural network
         """
         time = jnp.full((theta.shape[0], 1), time)
-        return self._network(theta=theta, time=time, context=context, **kwargs)
+        return self._network(
+            theta=theta,
+            time=time,
+            context=context,
+            **kwargs
+        )
 
 
 # pylint: disable=too-many-arguments
