@@ -6,7 +6,7 @@ class FFLayer(nnx.Module):
 
     activation: Callable
 
-    def __init__(self, dim, dropout, activation, rngs):
+    def __init__(self, dim, dropout, activation, rngs=nnx.Rngs(0)):
         self.linear = nnx.Linear(dim, dim, rngs=rngs)
         self.dropout = nnx.Dropout(dropout, rngs=rngs)
         self.activation = activation
@@ -15,7 +15,7 @@ class FFLayer(nnx.Module):
         x = self.linear(x)
         x = self.dropout(x)
         x = self.activation(x)
-        return x
+        return x, None
 
 class MLP(nnx.Module):
     """Transformer MLP block."""
@@ -28,45 +28,41 @@ class MLP(nnx.Module):
         n_layers,
         dropout,
         activation,
-        rngs
+        rngs=nnx.Rngs(0)
         ):
 
-        @nnx.split_rngs(splits=n_layers) #type: ignore
-        @nnx.vmap(in_axes=(0,), out_axes=0) #type: ignore
-        def create_layers(rngs: nnx.Rngs):
-            return FFlayer(dim, dropout, activation, rngs=rngs)
-
-        self.layers= create_layers(rngs)
-        self.n_layers = n_layers
+        self.layers= nnx.Scan.constructor(FFLayer, length=n_layers)(
+            dim,
+            dropout,
+            activation,
+            rngs=rngs
+        )
 
     def __call__(self, x) -> Array:
-        @nnx.split_rngs(splits=self.num_layers) #type: ignore
-        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)  #type: ignore
-        def forward(x, layer):
-              return layer(x)
-
-        return forward(x, self.layers)
+        y, _ = self.layers(x)
+        return y
 
 class EncoderBlock(nnx.Module):
     """Transformer Encoder Block."""
 
     def __init__(
             self,
-            num_heads,
+            n_heads,
             dim,
             n_ff,
             dropout,
             activation,
-            rngs
+            rngs=nnx.Rngs(0)
         ):
         
         self.attn = nnx.MultiHeadAttention(
             in_features=dim,
-            num_heads=num_heads,
+            num_heads=n_heads,
             qkv_features=dim,
             use_bias=False,
             broadcast_dropout=False,
             dropout_rate=dropout,
+            decode=False,
             rngs=rngs
         )
         self.attn_norm = nnx.LayerNorm(dim, rngs=rngs)
@@ -92,30 +88,32 @@ class EncoderDecoderBlock(nnx.Module):
 
     def __init__(
             self,
-            num_heads,
+            n_heads,
             dim,
             n_ff,
             dropout,
             activation,
-            rngs
+            rngs=nnx.Rngs(0)
         ):
         self.dec_attn = nnx.MultiHeadAttention(
             in_features=dim,
-            num_heads=num_heads,
+            num_heads=n_heads,
             qkv_features=dim,
             use_bias=False,
             broadcast_dropout=False,
             dropout_rate=dropout,
+            decode=False,
             rngs=rngs
         )
         self.dec_norm = nnx.LayerNorm(dim, rngs=rngs)
         self.enc_attn = nnx.MultiHeadAttention(
             in_features=dim,
-            num_heads=num_heads,
+            num_heads=n_heads,
             qkv_features=dim,
             use_bias=False,
             broadcast_dropout=False,
             dropout_rate=dropout,
+            decode=False,
             rngs=rngs
         )
         self.enc_norm= nnx.LayerNorm(dim, rngs=rngs)
