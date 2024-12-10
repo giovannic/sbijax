@@ -1,8 +1,7 @@
 import flax.linen as nn
-import jax.numpy as jnp
-from typing import Tuple, Optional
 from jaxtyping import Array
 from .encoder import Encoder
+from .embedding import Embedding
 
 class Transformer(nn.Module):
     """Transformer with encoder-decoder architecture
@@ -99,22 +98,6 @@ class Transformer(nn.Module):
         obs = self._encode(obs, train=train)
         v_field= self._decode(pos, obs, train=train)
         return v_field
-
-class Embedding(nn.Module):
-    """Embedding layer which allows for masking.
-
-    Attributes:
-    output_dim: output dimension.
-    value: value to use in place of masked values.
-    """
-    output_dim : int
-    value : float
-
-    @nn.compact
-    def __call__(self, x: Array, mask: Array) -> Array: # type: ignore
-        y = nn.Dense(self.output_dim)(x)
-        y = jnp.where(mask, y, jnp.ones_like(y) * self.value)
-        return y #type: ignore
 
 def to_1d(x):
     return x[..., 0]

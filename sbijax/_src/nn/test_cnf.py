@@ -25,3 +25,4 @@ def test_cnf_can_be_initialised_at_correct_size():
             .5, # time
             jnp.zeros((n, n_context)) # context
         ).shape == (n, n_dim)
+

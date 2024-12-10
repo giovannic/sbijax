@@ -199,6 +199,7 @@ class NE(SBI, ABC):
         return new_data, diagnostics
 
     def simulate_observations(self, rng_key, thetas):
+        # TODO: support infinite dimensional observations
         new_obs = self.simulator_fn(
             seed=rng_key,
             theta=thetas,

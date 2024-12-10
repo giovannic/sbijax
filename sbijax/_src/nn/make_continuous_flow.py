@@ -76,7 +76,7 @@ class CNF(nnx.Module):
             context: array of conditioning variables
 
         Keyword Args:
-            keyword arguments that aer passed tothe neural network
+            keyword arguments that are passed to the neural network
         """
         time = jnp.full((theta.shape[0], 1), time)
         return self._network(
