@@ -15,7 +15,7 @@ class FFLayer(nnx.Module):
         x = self.linear(x)
         x = self.dropout(x)
         x = self.activation(x)
-        return x, None
+        return x
 
 class MLP(nnx.Module):
     """Transformer MLP block."""
@@ -31,16 +31,22 @@ class MLP(nnx.Module):
         rngs=nnx.Rngs(0)
         ):
 
-        self.layers= nnx.Scan.constructor(FFLayer, length=n_layers)(
-            dim,
-            dropout,
-            activation,
-            rngs=rngs
-        )
+        @nnx.split_rngs(splits=n_layers)
+        @nnx.vmap(in_axes=(0,), out_axes=0)
+        def create_layer(rngs):
+            return FFLayer(dim, dropout, activation, rngs=rngs)
+
+        self.layers = create_layer(rngs)
+        self.n_layers = n_layers
 
     def __call__(self, x) -> Array:
-        y, _ = self.layers(x)
-        return y
+        @nnx.split_rngs(splits=self.n_layers)
+        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        def forward(x, model):
+            x = model(x)
+            return x
+
+        return forward(x, self.layers)
 
 class EncoderBlock(nnx.Module):
     """Transformer Encoder Block."""

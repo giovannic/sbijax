@@ -1,64 +1,75 @@
 import pytest
 from jax import numpy as jnp
 from flax import nnx
-import numpy as np
 from .transformer import Transformer
 
-@pytest.mark.parameterize('cache_size', 2)
-@pytest.mark.parameterize('keys', [['layer_0', 'layer_1']])
-@pytest.mark.parameterize('k_shape', [(1, 2, 3, 4)])
-@pytest.mark.parameterize('v_shape', [(1, 2, 3, 4)])
-def test_creates_cache(config, cache_size, keys, k_shape, v_shape):
-    transformer = Transformer(
-        config=config,
-        rngs=nnx.Rngs(params=0)
-    )
-    cache = transformer.init_cache(
-        cache_size=cache_size,
-        batch_size=1,
-        dtype=jnp.float32,
-    )
-    assert all(list(cache.keys()) == keys)
-    assert cache['layer_0']['k'].shape == k_shape
-    assert cache['layer_0']['v'].shape == v_shape
-
-@pytest.mark.parameterize('batch_size', 4)
-@pytest.mark.parameterize('seq_size', 10)
-def test_forward_no_cache(
-  self,
-  config,
-  batch_size: int,
-  seq_size: int
+@pytest.mark.parametrize('batch_dim', [4])
+@pytest.mark.parametrize('context_token_dim', [10])
+@pytest.mark.parametrize('latent_dim', [12])
+@pytest.mark.parametrize('n_context_labels', [3])
+@pytest.mark.parametrize('context_index_dim', [2])
+@pytest.mark.parametrize('context_z_stats', [(0, 1)])
+@pytest.mark.parametrize('n_theta_labels', [3])
+@pytest.mark.parametrize('theta_token_dim', [10])
+@pytest.mark.parametrize('theta_index_dim', [2])
+def test_forward(
+  batch_dim,
+  context_token_dim,
+  latent_dim,
+  n_context_labels,
+  context_index_dim,
+  context_z_stats,
+  n_theta_labels,
+  theta_index_dim,
+  theta_token_dim
 ):
-    tol = 1e-5
-    cache_size = 6
 
-    token_input = jnp.ones((batch_size, seq_size), dtype=jnp.int32)
+    config = {
+        'latent_dim': latent_dim,
+        'label_dim': 2,
+        'index_out_dim': 2,
+        'n_encoder': 2,
+        'n_decoder': 2,
+        'n_heads': 2,
+        'n_ff': 2,
+        'dropout': .5,
+        'activation': nnx.relu,
+    }
+
     transformer = Transformer(
-        config=config,
+        config,
+        n_context_labels,
+        context_index_dim,
+        context_z_stats,
+        n_theta_labels,
+        theta_index_dim,
         rngs=nnx.Rngs(params=0)
     )
-    empty_cache = transformer.init_cache(
-        cache_size=cache_size,
-        batch_size=batch_size,
-        dtype=jnp.float32,
-    )
-    attention_mask = jnp.ones(
-        (batch_size, seq_size, cache_size), dtype=jnp.bool
-    )
-    positions = build_positions_from_mask(token_input != 0)
 
-    output_cache, _ = transformer(
-        token_input, positions, empty_cache, attention_mask
+    transformer.eval()
+
+    context = jnp.zeros((batch_dim, context_token_dim))
+    context_label = jnp.zeros((context_token_dim,), dtype=jnp.int32)
+    context_index = jnp.zeros((
+        batch_dim,
+        context_token_dim,
+        context_index_dim
+    ))
+    pos= jnp.zeros((batch_dim, theta_token_dim))
+    pos_label = jnp.zeros((theta_token_dim,), dtype=jnp.int32)
+    pos_index = jnp.zeros((
+        batch_dim,
+        theta_token_dim,
+        theta_index_dim
+    ))
+
+    vector = transformer(
+        context,
+        context_label,
+        context_index,
+        pos,
+        pos_label,
+        pos_index
     )
 
-    attention_mask = jnp.ones(
-        (batch_size, seq_size, seq_size),
-        dtype=jnp.bool
-    )
-    output_none, cache_none = transformer(
-        token_input, positions, None, attention_mask
-    )
-
-    self.assertIsNone(cache_none)
-    np.testing.assert_array_almost_equal(output_cache, output_none, tol)
+    assert vector.shape == (batch_dim, theta_token_dim, 1)

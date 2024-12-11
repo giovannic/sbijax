@@ -1,103 +1,122 @@
-import flax.linen as nn
-from jaxtyping import Array
-from .encoder import Encoder
+from flax import nnx
+from .encoder import EncoderBlock, EncoderDecoderBlock
 from .embedding import Embedding
 
-class Transformer(nn.Module):
+class Transformer(nnx.Module):
     """Transformer with encoder-decoder architecture
     which encodes observations and decodes a vector field
     for flow matching.
-
-    Attributes:
-    num_layers: number of layers.
-    latent_dim: latent dimension.
-    num_heads: number of heads.
-    dim_feedforward: feedforward dimension.
-    dropout_prob: dropout rate.
-    padding_value: padding value.
-    sentinel_value: sentinel value.
     """
 
-    num_layers : int
-    latent_dim : int
-    output_dim: int
-    num_heads : int
-    dim_feedforward : int
-    dropout_prob : float
-    padding_value: float = -1.0
-    rng_collection: str = 'transformer'
-
-    def setup(self):
-        self.embedding = Embedding(self.latent_dim, self.padding_value)
-        self.encoder = Encoder(
-            num_layers=self.num_layers,
-            latent_dim=self.latent_dim,
-            num_heads=self.num_heads,
-            dim_feedforward=self.dim_feedforward,
-            dropout_prob=self.dropout_prob
-        )
-        self.decoder = Encoder(
-            num_layers=self.num_layers,
-            latent_dim=self.latent_dim,
-            num_heads=self.num_heads,
-            dim_feedforward=self.dim_feedforward,
-            dropout_prob=self.dropout_prob
-        )
-        self.y_proj = nn.Dense(self.output_dim)
-
-    def _encode(self, obs: Array, train: bool=True) -> Array:
-        """Encode inputs into the latent space
-
-        Args:
-        inputs: inputs to encode into latent space
-        train: (optional) whether we are training or not
-        """
-        # Embed targets into transformers latent space
-        x = self.embedding(
-            obs,
-            obs[..., :1] != self.padding_value
-        )
-
-        mask = nn.make_attention_mask(
-            to_1d(x) != self.padding_value,
-            to_1d(x) != self.padding_value
-        )
-
-        return self.encoder(x, train=train, encoder_mask=mask)
-
-    def _decode(self, pos: Array, obs: Array, train: bool=True) -> Array:
-        """Decode flow positions into vector field given encoded observations
-
-        Args:
-        pos: Array, encoded positions of variables in flow
-        obs: Array, encoded observations
-        train: bool (optional) whether we are training or not
-        """
-        # Embed targets into transformers latent space
-        targets = self.embedding(
-            pos,
-            pos[..., :1] != self.padding_value
-        )
-
-        # Create mask for decoder
-        mask = nn.make_attention_mask(
-            to_1d(targets) != self.padding_value,
-            to_1d(targets) != self.padding_value
-        )
-
-        # Decode targets
-        y = self.decoder(targets, train=train, encoder_mask=mask)
-        return self.y_proj(y)
-
-    def __call__( # type: ignore
+    def __init__(
         self,
-        obs: Array,
-        pos: Array,
-        train: bool=True
+        config,
+        n_context_labels,
+        context_index_dim,
+        context_z_stats,
+        n_theta_labels,
+        theta_index_dim,
+        rngs=nnx.Rngs(0)
         ):
-        obs = self._encode(obs, train=train)
-        v_field= self._decode(pos, obs, train=train)
-        return v_field
+        self.context_embedding = Embedding(
+            n_context_labels,
+            config['label_dim'],
+            context_index_dim,
+            config['index_out_dim'],
+            config['latent_dim'],
+            context_z_stats,
+            rngs=rngs
+        )
 
-def to_1d(x):
-    return x[..., 0]
+        @nnx.split_rngs(splits=config['n_encoder'])
+        @nnx.vmap(in_axes=(0,), out_axes=0)
+        def create_encoder(rngs):
+            return EncoderBlock(
+                config['n_heads'],
+                config['latent_dim'],
+                config['n_ff'],
+                config['dropout'],
+                config['activation'],
+                rngs=rngs
+            )
+
+        self.encoder = create_encoder(rngs)
+        self.n_encoder = config['n_encoder']
+
+        self.pos_embedding = Embedding(
+            n_theta_labels,
+            config['label_dim'],
+            theta_index_dim,
+            config['index_out_dim'],
+            config['latent_dim'],
+            rngs=rngs
+        )
+
+        @nnx.split_rngs(splits=config['n_decoder'])
+        @nnx.vmap(in_axes=(0,), out_axes=0)
+        def create_decoder(rngs):
+            return EncoderDecoderBlock(
+                config['n_heads'],
+                config['latent_dim'],
+                config['n_ff'],
+                config['dropout'],
+                config['activation'],
+                rngs=rngs
+            )
+
+        self.decoder = create_decoder(rngs)
+        self.n_decoder = config['n_decoder']
+        self.linear = nnx.Linear(config['latent_dim'], 1, rngs=rngs)
+
+    def __call__(
+        self,
+        context,
+        context_label,
+        context_index,
+        pos,
+        pos_label,
+        pos_index
+        ):
+        encoded = self.encode(context, context_label, context_index)
+        decoded = self.decode(pos, pos_label, pos_index, encoded)
+        return decoded
+
+    def encode(
+        self,
+        context,
+        context_label,
+        context_index
+        ):
+        x = self.context_embedding(
+            context,
+            context_label,
+            context_index
+        )
+        @nnx.split_rngs(splits=self.n_encoder)
+        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        def forward(x, model):
+            x = model(x)
+            return x
+
+        return forward(x, self.encoder)
+
+    def decode(
+        self,
+        pos,
+        pos_label,
+        pos_index,
+        encoded
+        ):
+        x = self.pos_embedding(
+            pos,
+            pos_label,
+            pos_index
+        )
+
+        @nnx.split_rngs(splits=self.n_decoder)
+        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        def forward(x, model):
+            x = model(x, encoded)
+            return x
+        x = forward(x, self.decoder)
+        return self.linear(x)

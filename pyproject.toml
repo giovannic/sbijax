@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "arviz>=0.17.1",
     "blackjax-nightly>=1.0.0.post17",
@@ -31,7 +31,7 @@ dependencies = [
     "tensorflow-datasets==4.9.3",
     "tfp-nightly>=0.20.0.dev20230404",
     "tqdm>=4.64.1",
-    "flax==0.8.5"
+    "flax>=0.10.2"
 ]
 dynamic = ["version"]
 
@@ -57,6 +57,7 @@ dependencies = [
     "ruff>=0.3.0",
     "pytest>=7.2.0",
     "pytest-cov>=4.0.0",
+    "jaxtyping>=0.2.36"
 ]
 
 [tool.hatch.envs.test.scripts]
