@@ -96,14 +96,12 @@ class FMPE(NE):
         self,
         model_fns,
         density_estimator,
-        sample_index=None,
-        index_shape=()
+        **kwargs
         ):
         super().__init__(
             model_fns,
             density_estimator,
-            sample_index=sample_index,
-            index_shape=index_shape
+            **kwargs
         )
 
     def fit(

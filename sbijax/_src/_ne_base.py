@@ -4,6 +4,9 @@ from abc import ABC
 import chex
 from jax import numpy as jnp
 from jax import random as jr
+from typing import Tuple
+from jaxtyping import Array
+import arviz as az
 
 from sbijax._src._sbi_base import SBI
 from sbijax._src.util.data import inference_data_as_dictionary as flatten
@@ -14,7 +17,15 @@ from sbijax._src.util.data import stack_data
 class NE(SBI, ABC):
     """Sequential neural estimation base class."""
 
-    def __init__(self, model_fns, network, sample_index=None, index_shape=()):
+    def __init__(
+        self,
+        model_fns,
+        network,
+        sample_theta_index=None,
+        theta_index_shape=(),
+        sample_context_index=None,
+        context_index_shape=(),
+        ):
         """Construct an SNE object.
 
         Args:
@@ -29,8 +40,10 @@ class NE(SBI, ABC):
         super().__init__(model_fns)
         self.model = network
         self.n_total_simulations = 0
-        self._sample_index = sample_index
-        self._index_shape = index_shape
+        self._theta_sampler = sample_theta_index
+        self._theta_index_shape = theta_index_shape
+        self._context_sampler = sample_context_index
+        self._context_index_shape = context_index_shape
 
     def simulate_data_and_possibly_append(
         self,
@@ -77,7 +90,7 @@ class NE(SBI, ABC):
         observed_index=None,
         *args,
         **kwargs
-        ):
+        ) -> Tuple[az.InferenceData, Array]:
         """Sample from the approximate posterior.
 
         Args:
@@ -94,7 +107,8 @@ class NE(SBI, ABC):
         *,
         params=None,
         observable=None,
-        observed_index=None,
+        theta_index=None,
+        context_index=None,
         n_simulations=1000,
         **kwargs,
     ):
@@ -118,16 +132,24 @@ class NE(SBI, ABC):
         if params is None or len(params) == 0:
             diagnostics = None
             self.n_total_simulations += n_simulations
-            if observed_index is None:
-                index = observed_index
+            if self._theta_sampler is None:
+                theta_index = None
+                new_thetas = self.prior_sampler_fn(
+                    index=theta_index,
+                    seed=rng_key,
+                    sample_shape=(n_simulations,),
+                )
             else:
                 index_key, rng_key = jr.split(rng_key)
-                index = self.sample_index(index_key, (n_simulations,))
-            new_thetas = self.prior_sampler_fn(
-                index=index,
-                seed=rng_key,
-                sample_shape=(n_simulations,),
-            )
+                theta_index = self.sample_theta_index(
+                    index_key,
+                    (n_simulations,)
+                )
+                new_thetas = self.prior_sampler_fn(
+                    index=theta_index,
+                    seed=rng_key,
+                    sample_shape=(),
+                )
         else:
             if observable is None:
                 raise ValueError(
@@ -140,21 +162,23 @@ class NE(SBI, ABC):
                 rng_key=rng_key,
                 params=params,
                 observable=jnp.atleast_2d(observable),
-                observed_index=observed_index,
+                context_index=context_index,
+                theta_index=theta_index,
                 **kwargs,
             )
-            new_thetas = flatten(inference_data.posterior)
-            perm_key, rng_key = jr.split(rng_key)
-            first_key = list(new_thetas.keys())[0]
-            idxs = jr.choice(
-                perm_key,
-                new_thetas[first_key].shape[0],
-                shape=(n_simulations,),
-                replace=False,
-            )
-            new_thetas = {k: v[idxs] for k, v in new_thetas.items()}
+            new_thetas = flatten(inference_data.posterior) #type: ignore
+            #NOTE: do we need to shuffle here? it's done in the dataloader
+            # perm_key, rng_key = jr.split(rng_key)
+            # first_key = list(new_thetas.keys())[0]
+            # idxs = jr.choice(
+                # perm_key,
+                # new_thetas[first_key].shape[0],
+                # shape=(n_simulations,),
+                # replace=False,
+            # )
+            # new_thetas = {k: v[idxs] for k, v in new_thetas.items()}
 
-        return new_thetas, diagnostics
+        return (new_thetas, theta_index), diagnostics
 
     def simulate_data(
         self,
@@ -182,7 +206,7 @@ class NE(SBI, ABC):
         """
         theta_key, data_key = jr.split(rng_key)
 
-        new_thetas, diagnostics = self.simulate_parameters(
+        (new_thetas, theta_index), diagnostics = self.simulate_parameters(
             theta_key,
             params=params,
             observable=observable,
@@ -190,24 +214,55 @@ class NE(SBI, ABC):
             **kwargs,
         )
 
-        new_obs = self.simulate_observations(data_key, new_thetas)
+        context_index = kwargs.get("context_index", {})
+
+        new_obs = self.simulate_observations(
+            data_key,
+            new_thetas,
+            context_index=context_index
+        )
         for v in new_thetas.values():
             chex.assert_shape(v, [n_simulations, None])
         chex.assert_shape(new_obs, [n_simulations, None])
-        new_data = {"y": new_obs, "theta": new_thetas}
+        new_data = {
+            "y": new_obs,
+            'y_index': context_index,
+            "theta": new_thetas,
+            "theta_index": theta_index,
+        }
 
         return new_data, diagnostics
 
-    def simulate_observations(self, rng_key, thetas):
-        # TODO: support infinite dimensional observations
+    def simulate_observations(
+        self,
+        rng_key,
+        thetas,
+        context_index=None
+        ):
         new_obs = self.simulator_fn(
             seed=rng_key,
             theta=thetas,
-            **self.indices
+            **context_index
         )
         return new_obs
 
-    def sample_index(self, key, batch_shape):
-        assert self._sample_index is not None
-        index_shape = batch_shape + self._index_shape
-        return self._sample_index(key, index_shape)
+    def sample_theta_index(self, key, batch_shape):
+        return self._sample_index(
+            self._theta_sampler,
+            key,
+            batch_shape,
+            self._theta_index_shape
+        )
+
+    def sample_context_index(self, key, batch_shape):
+        return self._sample_index(
+            self._context_sampler,
+            key,
+            batch_shape,
+            self._context_index_shape
+        )
+
+    def _sample_index(self, sampler, key, batch_shape, index_shape):
+        assert sampler is not None
+        index_shape = batch_shape + index_shape
+        return sampler(key, index_shape)

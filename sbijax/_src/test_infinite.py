@@ -4,9 +4,9 @@ from jax import random as jr
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 from sbijax import FMPE
-from sbijax.nn import make_cnf
 from sbijax._src.nn.make_continuous_flow import CNF
 from sbijax._src.infinite import index_data
+from .nn.transformer.transformer import Transformer
 
 from flax import nnx
 
@@ -16,11 +16,11 @@ from flax import nnx
 # - ~create indices (either continuous or set based)~
 # - ~integrate indices into FMPE, SBI and NE~
 # - ~when are these indices variably sized? During training?~
-# - translate CNF to flax
-# - integrate indices into transformer
-#   - init
-#   - vector_field
-#   - __call__
+# - ~translate CNF to flax
+# - ~integrate indices into transformer~
+#   ~- init~
+#   ~- vector_field~
+#   ~- __call__~
 # - generate realistic y_observed
 # - generate appropriate test
 
@@ -40,13 +40,18 @@ def infinite_simulator_fn(seed, theta, **kwargs):
     t = kwargs['t']
     p_x = tfd.Normal(jnp.zeros_like(theta["x"]), 1.)
     p_y = tfd.Normal(jnp.zeros_like(theta["y"]), 1.)
-    return jnp.stack([
-        t * theta["x"] + p_x.sample(seed=seed),
-        t * theta["y"] + p_y.sample(seed=seed),
+    x_seed, y_seed = jr.split(seed)
+    obs = jnp.stack([
+        theta["x"] @ t + p_x.sample(seed=x_seed),
+        theta["y"] @ t + p_y.sample(seed=y_seed),
     ], axis=-1)
+    return obs.reshape(theta["x"].shape[0], -1)
 
 def sample_index(key, shape):
-    points = jnp.cumsum(jr.lognormal(key, shape=(3,) + shape))
+    points = jnp.cumsum(
+        jr.lognormal(key, shape=(3,) + shape),
+        axis=0
+    )
     return {
         'x': points[0],
         'y': -points[1],
@@ -57,7 +62,6 @@ def test_data_can_be_indexed_in_time_and_space():
     # create a continuous flow with a linear transform
     n = 10
     n_dim = 2
-
 
     indices = {
         's': jnp.concatenate([
@@ -191,11 +195,38 @@ def test_infinite_parameters():
         'y': jnp.array([-1, -2, -3])[:, jnp.newaxis],
         't': jnp.array([3, 4, 5])[:, jnp.newaxis],
     }
+    rngs = nnx.Rngs(0)
+    config = {
+        'latent_dim': 12,
+        'label_dim': 2,
+        'index_out_dim': 4,
+        'n_encoder': 2,
+        'n_decoder': 2,
+        'n_heads': 2,
+        'n_ff': 2,
+        'dropout': .1,
+        'activation': nnx.relu,
+    }
+    nn = Transformer(
+        config,
+        n_context_labels=2,
+        context_index_dim=3,
+        context_z_stats=(
+            jnp.mean(y_observed, axis=0),
+            jnp.std(y_observed, axis=0)
+        ),
+        n_theta_labels=2,
+        theta_index_dim=2,
+        rngs=rngs
+    )
+
     estim = FMPE(
         (infinite_prior_fn, infinite_simulator_fn),
-        make_cnf(2),
-        sample_index=sample_index,
-        index_shape=(3,)
+        nn,
+        sample_context_index=sample_index,
+        context_index_shape=(1,),
+        sample_theta_index=sample_index,
+        theta_index_shape=(3,),
     )
     data, params = None, {}
     for _ in range(2):
@@ -203,6 +234,8 @@ def test_infinite_parameters():
             jr.PRNGKey(1),
             params=params,
             observable=y_observed,
+            context_index=y_indices,
+            theta_index=y_indices,
             data=data,
             n_simulations=100,
             n_chains=2,
@@ -214,10 +247,9 @@ def test_infinite_parameters():
         jr.PRNGKey(3),
         params,
         y_observed,
+        observed_index=y_indices,
         n_chains=2,
         n_samples=200,
         n_warmup=100,
     )
     assert posterior.posterior.mean() == pytest.approx(1., tol) # type: ignore
-
-
