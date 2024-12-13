@@ -13,7 +13,6 @@ class Transformer(nnx.Module):
         config,
         n_context_labels,
         context_index_dim,
-        context_z_stats,
         n_theta_labels,
         theta_index_dim,
         rngs=nnx.Rngs(0)
@@ -24,7 +23,6 @@ class Transformer(nnx.Module):
             context_index_dim,
             config['index_out_dim'],
             config['latent_dim'],
-            context_z_stats,
             rngs=rngs
         )
 
@@ -73,24 +71,38 @@ class Transformer(nnx.Module):
         context,
         context_label,
         context_index,
-        pos,
-        pos_label,
-        pos_index
+        theta,
+        theta_label,
+        theta_index,
+        time
         ):
-        encoded = self.encode(context, context_label, context_index)
-        decoded = self.decode(pos, pos_label, pos_index, encoded)
+        encoded = self.encode(
+            context,
+            context_label,
+            context_index,
+            time
+        )
+        decoded = self.decode(
+            theta,
+            theta_label,
+            theta_index,
+            encoded,
+            time
+        )
         return decoded
 
     def encode(
         self,
         context,
         context_label,
-        context_index
+        context_index,
+        time
         ):
         x = self.context_embedding(
             context,
             context_label,
-            context_index
+            context_index,
+            time
         )
         @nnx.split_rngs(splits=self.n_encoder)
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
@@ -105,12 +117,14 @@ class Transformer(nnx.Module):
         pos,
         pos_label,
         pos_index,
-        encoded
+        encoded,
+        time
         ):
         x = self.pos_embedding(
             pos,
             pos_label,
-            pos_index
+            pos_index,
+            time
         )
 
         @nnx.split_rngs(splits=self.n_decoder)

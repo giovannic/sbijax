@@ -23,10 +23,8 @@ class Embedding(nnx.Module):
         index_in_dim,
         index_out_dim,
         out_dim,
-        z_stats=None,
         rngs=nnx.Rngs(0)
         ):
-        self.z_stats = z_stats
         self.embedding = nnx.Embed(
             n_labels,
             features=label_dim,
@@ -38,12 +36,12 @@ class Embedding(nnx.Module):
             rngs
         )
         self.linear = nnx.Linear(
-            1 + label_dim + index_out_dim,
+            2 + label_dim + index_out_dim, # value + label + index + time
             out_dim,
             rngs=rngs
         )
 
-    def __call__(self, values, labels, indices):
+    def __call__(self, values, labels, indices, time):
         """
         Embed random variables for encoding
 
@@ -53,11 +51,8 @@ class Embedding(nnx.Module):
             indices: the index for the random variable in infinite space
         """
         batch_size = values.shape[0]
+        n_tokens = values.shape[1]
 
-        # embed values
-        if self.z_stats is not None:
-            mean, std = self.z_stats
-            values = (values - mean) / std
         # reshape to batch x tokens x features
         values = values[..., jnp.newaxis]
 
@@ -66,10 +61,14 @@ class Embedding(nnx.Module):
         # reshape to batch x tokens x features
         labels = jnp.tile(labels, (batch_size, 1, 1))
 
+        # gaussian fourier embedding of indices
         indices = self.gf_embedding(indices)
 
+        # fill scalar time to match batch x tokens x features
+        time = jnp.full((batch_size, n_tokens, 1), time)
+
         # reshape into tokens
-        x = jnp.concatenate([values, labels, indices], axis=-1)
+        x = jnp.concatenate([values, labels, indices, time], axis=-1)
 
         # apply linear transform to tokens
         return self.linear(x)

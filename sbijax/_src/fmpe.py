@@ -14,6 +14,7 @@ from sbijax._src.util.data import as_inference_data
 from sbijax._src.util.early_stopping import EarlyStopping
 from sbijax._src.util.types import PyTree
 
+from flax import nnx
 
 def _sample_theta_t(rng_key, times, theta, sigma_min):
     mus = times * theta
@@ -30,14 +31,12 @@ def _ut(theta_t, theta, times, sigma_min):
     denom = 1.0 - (1.0 - sigma_min) * times
     return num / denom
 
-
 def _cfm_loss(
-    params,
+    model,
     rng_key,
-    apply_fn,
+    batch,
+    labels,
     sigma_min=0.001,
-    is_training=True,
-    **batch
 ):
     theta = batch["theta"]
     n, _ = theta.shape
@@ -48,21 +47,19 @@ def _cfm_loss(
     theta_key, rng_key = jr.split(rng_key)
     theta_t = _sample_theta_t(theta_key, times, theta, sigma_min)
 
-    train_rng, rng_key = jr.split(rng_key)
-    vs = apply_fn(
-        params,
-        train_rng,
-        method="vector_field",
+    vs = model.vector_field(
         theta=theta_t,
+        theta_label=labels["theta"],
+        theta_index=batch["theta_index"],
         time=times,
         context=batch["y"],
-        is_training=is_training,
+        context_label=labels["y"],
+        context_index=batch["y_index"],
     )
     uts = _ut(theta_t, theta, times, sigma_min)
 
     loss = jnp.mean(jnp.square(vs - uts))
     return loss
-
 
 class FMPE(NE):
     r"""Flow matching posterior estimation.
@@ -108,6 +105,7 @@ class FMPE(NE):
         self,
         rng_key,
         data: PyTree,
+        labels: PyTree,
         *,
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
         n_iter: int = 1000,
@@ -115,7 +113,6 @@ class FMPE(NE):
         percentage_data_as_validation_set: float = 0.1,
         n_early_stopping_patience: int = 10,
         n_early_stopping_delta: float = 0.001,
-        **kwargs,
     ):
         """Fit the model.
 
@@ -123,6 +120,7 @@ class FMPE(NE):
             rng_key: a jax random key
             data: data set obtained from calling
                 `simulate_data_and_possibly_append`
+            labels: labels for each random variable ([u]int)
             optimizer: an optax optimizer object
             n_iter: maximal number of training iterations per round
             batch_size:  batch size used for training the model
@@ -130,8 +128,6 @@ class FMPE(NE):
                 data that is used for validation and early stopping
             n_early_stopping_patience: number of iterations of no improvement
                 of training the flow before stopping optimisation
-            **kwargs: optional keyword arguments
-
         Returns:
             a tuple of parameters and a tuple of the training information
         """
@@ -139,7 +135,7 @@ class FMPE(NE):
         train_iter, val_iter = self.as_iterators(
             itr_key, data, batch_size, percentage_data_as_validation_set
         )
-        params, losses = self._fit_model_single_round(
+        losses = self._fit_model_single_round(
             seed=rng_key,
             train_iter=train_iter,
             val_iter=val_iter,
@@ -147,9 +143,10 @@ class FMPE(NE):
             n_iter=n_iter,
             n_early_stopping_patience=n_early_stopping_patience,
             n_early_stopping_delta=n_early_stopping_delta,
+            labels=labels
         )
 
-        return params, losses
+        return losses
 
     def _fit_model_single_round(
         self,
@@ -160,41 +157,54 @@ class FMPE(NE):
         n_iter,
         n_early_stopping_patience,
         n_early_stopping_delta,
+        labels
     ):
-        init_key, seed = jr.split(seed)
-        params = self._init_params(init_key, **next(iter(train_iter)))
-        state = optimizer.init(params)
+        nnx_optimizer = nnx.Optimizer(self.model, optimizer)
 
-        loss_fn = jax.jit(
-            partial(_cfm_loss, apply_fn=self.model.apply, is_training=True)
-        )
+        # set model to train
+        self.model.train()
 
-        @jax.jit
-        def step(params, rng, state, **batch):
-            loss, grads = jax.value_and_grad(loss_fn)(params, rng, **batch)
-            updates, new_state = optimizer.update(grads, state, params)
-            new_params = optax.apply_updates(params, updates)
-            return loss, new_params, new_state
+        @nnx.jit
+        def step(model, rng, optimizer, batch):
+            loss, grads = nnx.value_and_grad(_cfm_loss)(
+                model,
+                rng,
+                batch,
+                labels
+            )
+            optimizer.update(grads)
+            return loss
 
         losses = np.zeros([n_iter, 2])
         early_stop = EarlyStopping(
-            n_early_stopping_delta, n_early_stopping_patience
+            n_early_stopping_delta,
+            n_early_stopping_patience
         )
-        best_params, best_loss = None, np.inf
+        best_state = nnx.state(self.model)
+        best_loss = np.inf
         logging.info("training model")
         for i in tqdm(range(n_iter)):
             train_loss = 0.0
             rng_key = jr.fold_in(seed, i)
             for batch in train_iter:
                 train_key, rng_key = jr.split(rng_key)
-                batch_loss, params, state = step(
-                    params, train_key, state, **batch
+                batch_loss = step(
+                    self.model,
+                    train_key,
+                    nnx_optimizer,
+                    batch
                 )
                 train_loss += batch_loss * (
                     batch["y"].shape[0] / train_iter.num_samples
                 )
             val_key, rng_key = jr.split(rng_key)
-            validation_loss = self._validation_loss(val_key, params, val_iter)
+            self.model.eval()
+            validation_loss = self._validation_loss(
+                val_key,
+                val_iter,
+                labels
+            )
+            self.model.train()
             losses[i] = jnp.array([train_loss, validation_loss])
 
             _, early_stop = early_stop.update(validation_loss)
@@ -203,43 +213,29 @@ class FMPE(NE):
                 break
             if validation_loss < best_loss:
                 best_loss = validation_loss
-                best_params = params.copy()
+                best_state = nnx.state(self.model)
 
+        # set the model to the best state
+        nnx.update(self.model, best_state)
         losses = jnp.vstack(losses)[: (i + 1), :] #type: ignore
-        return best_params, losses
+        return losses
 
-    def _init_params(self, rng_key, **init_data):
-        times = jr.uniform(jr.PRNGKey(0), shape=(init_data["y"].shape[0], 1))
-        params = self.model.init(
-            rng_key,
-            method="vector_field",
-            theta=init_data["theta"],
-            time=times,
-            context=init_data["y"],
-            is_training=False,
-        )
-        return params
+    def _validation_loss(self, rng_key, val_iter, labels):
 
-    def _validation_loss(self, rng_key, params, val_iter):
-        loss_fn = jax.jit(
-            partial(_cfm_loss, apply_fn=self.model.apply, is_training=False)
-        )
-
-        def body_fn(batch_key, **batch):
-            loss = loss_fn(params, batch_key, **batch)
+        @nnx.jit
+        def body_fn(batch_key, batch):
+            loss = _cfm_loss(self.model, batch_key, batch, labels)
             return loss * (batch["y"].shape[0] / val_iter.num_samples)
 
         loss = 0.0
         for batch in val_iter:
             val_key, rng_key = jr.split(rng_key)
-            loss += body_fn(val_key, **batch)
+            loss += body_fn(val_key, batch)
         return loss
 
-    # ruff: noqa: D417
     def sample_posterior(
         self,
         rng_key,
-        params,
         observable,
         *,
         n_samples=4_000,
@@ -267,15 +263,10 @@ class FMPE(NE):
             )
         )
         sample_key, rng_key = jr.split(rng_key)
-        thetas= jax.jit(
-            self.model.apply,
-            static_argnames=("method", "is_training"),
-        )(
-            params,
+        self.model.eval()
+        thetas = nnx.jit(self.model.sample)(
             sample_key,
-            method="sample",
             context=jnp.tile(observable, [n_samples, 1]),
-            is_training=False,
         )
 
         proposal_probs = self.prior_log_density_fn(

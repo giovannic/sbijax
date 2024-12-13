@@ -185,6 +185,10 @@ def test_cnf_can_be_initialised_with_an_index():
 
 def test_infinite_parameters():
     tol: float = 1e-3
+    labels = {
+        'theta': jnp.array([0, 1, 0, 1, 0, 1], dtype=jnp.int32),
+        'context': jnp.array([0, 0, 0], dtype=jnp.int32), #TODO: should have multivariate tokens!
+    }
     y_observed = jnp.array([
         [3., -3.],
         [8., -8.],
@@ -211,25 +215,24 @@ def test_infinite_parameters():
         config,
         n_context_labels=2,
         context_index_dim=3,
-        context_z_stats=(
-            jnp.mean(y_observed, axis=0),
-            jnp.std(y_observed, axis=0)
-        ),
         n_theta_labels=2,
         theta_index_dim=2,
         rngs=rngs
     )
+    theta_index_size= 3
+    model = CNF(theta_dim=theta_index_size*2, transform=nn)
 
     estim = FMPE(
         (infinite_prior_fn, infinite_simulator_fn),
-        nn,
+        model,
         sample_context_index=sample_index,
         context_index_shape=(1,),
         sample_theta_index=sample_index,
-        theta_index_shape=(3,),
+        theta_index_shape=(theta_index_size,),
     )
     data, params = None, {}
     for _ in range(2):
+        # TODO: params will never be created!
         data, _ = estim.simulate_data_and_possibly_append(
             jr.PRNGKey(1),
             params=params,
@@ -242,10 +245,9 @@ def test_infinite_parameters():
             n_samples=200,
             n_warmup=100,
         )
-        params, _ = estim.fit(jr.PRNGKey(2), data=data, n_iter=2)
+        estim.fit(jr.PRNGKey(2), data=data, n_iter=2, labels=labels)
     posterior, _ = estim.sample_posterior(
         jr.PRNGKey(3),
-        params,
         y_observed,
         observed_index=y_indices,
         n_chains=2,
