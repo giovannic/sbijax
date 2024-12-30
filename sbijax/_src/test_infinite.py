@@ -1,12 +1,14 @@
 import pytest
 from jax import numpy as jnp
 from jax import random as jr
+from jax import tree
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 from sbijax import FMPE
 from sbijax._src.nn.make_continuous_flow import CNF
-from sbijax._src.infinite import index_data
+from sbijax._src.infinite import index_theta
 from .nn.transformer.transformer import Transformer
+from .infinite import IndexMap
 
 from flax import nnx
 
@@ -25,27 +27,38 @@ from flax import nnx
 # - generate appropriate test
 
 def infinite_prior_fn(**kwargs):
-    x, y = kwargs["x"], kwargs["y"]
+    x, y = kwargs["x"][0], kwargs["y"][0]
     # return prior distribution of gaussian random walk at positions x and y
     prior = tfd.JointDistributionNamed(
         dict(
             x=tfd.Normal(x, 1.),
-            y=tfd.Normal(y, 1.),
+            y=tfd.Normal(y, 1.)
         ),
         batch_ndims=1,
     )
     return prior
 
+# perform outer product of a batch of vectors
+def batch_mul(x, y):
+    return jnp.einsum('...i,...j->...ij', x, y)
+    
 def infinite_simulator_fn(seed, theta, **kwargs):
-    t = kwargs['t']
-    p_x = tfd.Normal(jnp.zeros_like(theta["x"]), 1.)
-    p_y = tfd.Normal(jnp.zeros_like(theta["y"]), 1.)
+    t = kwargs['obs'][:, :, 0, 0]
+    batch_size = theta["x"].shape[0]
+    space_size = theta["x"].shape[1]
+    time_size = t.shape[1]
+    noise= tfd.Normal(
+        jnp.zeros((batch_size, time_size, space_size)),
+        1.
+    )
     x_seed, y_seed = jr.split(seed)
     obs = jnp.stack([
-        theta["x"] @ t + p_x.sample(seed=x_seed),
-        theta["y"] @ t + p_y.sample(seed=y_seed),
+        batch_mul(t, theta["x"]) + noise.sample(seed=x_seed),
+        batch_mul(t, theta["y"]) + noise.sample(seed=y_seed),
     ], axis=-1)
-    return obs.reshape(theta["x"].shape[0], -1)
+    return {
+        'obs': obs
+    }
 
 def sample_index(key, shape):
     points = jnp.cumsum(
@@ -59,7 +72,6 @@ def sample_index(key, shape):
     }
 
 def test_data_can_be_indexed_in_time_and_space():
-    # create a continuous flow with a linear transform
     n = 10
     n_dim = 2
 
@@ -71,29 +83,96 @@ def test_data_can_be_indexed_in_time_and_space():
         't': jnp.full((n, 1), 2),
     }
 
-    x= jnp.zeros((n, n_dim))
-
-    index_map = {
-        's': 0,
-        't': 1
+    theta= {
+        'x': jnp.zeros((n, n_dim)),
+        'y': jnp.zeros((n, n_dim))
     }
 
-    x_index = index_data(x, indices, index_map)
+    index_map: IndexMap = {
+        'x': 's',
+        'y': 't'
+    }
 
-    assert x_index.shape == (n, n_dim, 3)
+    x_index = index_theta(theta, indices, index_map)
+
+    assert all(tree.map(lambda leaf: leaf.shape == (n, n_dim, 3), x_index))
 
     # assert index is set
-    assert jnp.all(x_index[..., 0, 0] == 0)
-    assert jnp.all(x_index[..., 0, 1] == 1)
-    assert jnp.all(x_index[..., 1, 2] == 2)
+    assert jnp.all(x_index['x'][..., 0] == 0)
+    assert jnp.all(x_index['x'][..., 1] == 1)
+    assert jnp.all(x_index['y'][..., 2] == 2)
 
     # assert others are nan
-    assert jnp.all(jnp.isnan(x_index[..., 0, 2]))
-    assert jnp.all(jnp.isnan(x_index[..., 2, 0:1]))
+    assert jnp.all(jnp.isnan(x_index['x'][..., 2]))
+    assert jnp.all(jnp.isnan(x_index['y'][..., 0:2]))
 
 def test_data_can_be_partially_indexed():
     n = 10
-    n_dim = 4
+    n_dim = 2
+
+    indices = {
+        's': jnp.concatenate([
+            jnp.full((n, 1), 0),
+            jnp.full((n, 1), 1),
+        ], axis=-1)
+    }
+
+    theta= {
+        'x': jnp.zeros((n, n_dim)),
+        'y': jnp.zeros((n, n_dim))
+    }
+
+    index_map: IndexMap = {
+        'x': 's'
+    }
+
+    x_index = index_theta(theta, indices, index_map)
+
+    assert all(tree.map(lambda leaf: leaf.shape == (n, n_dim, 2), x_index).values())
+
+    # assert index is set
+    assert jnp.all(x_index['x'][..., 0] == 0)
+    assert jnp.all(x_index['x'][..., 1] == 1)
+
+    # assert others are nan
+    assert jnp.all(jnp.isnan(x_index['y']))
+
+def test_event_shape_can_be_indexed():
+    n = 10
+    event_shape = (3,)
+    sample_shape = (4,)
+
+    indices = {
+        't': jnp.array([-1, 0, 1])[jnp.newaxis, :, jnp.newaxis]
+    }
+
+    theta= {
+        'x': jnp.zeros((n,) + event_shape + sample_shape),
+        'y': jnp.zeros((n,) + event_shape + sample_shape)
+    }
+
+    index_map: IndexMap = {
+        'x': 't',
+        'y': 't'
+    }
+
+    x_index = index_theta(theta, indices, index_map)
+
+    assert all([
+        leaf.shape == (n,) + event_shape + sample_shape + (1,)
+        for leaf in tree.leaves(x_index)
+    ])
+
+    assert all([
+        jnp.all(leaf == indices['t'])
+        for leaf in tree.leaves(x_index)
+    ])
+
+
+def test_indexer_ignores_unreferenced_index():
+    # create a continuous flow with a linear transform
+    n = 10
+    n_dim = 2
 
     indices = {
         's': jnp.concatenate([
@@ -103,101 +182,37 @@ def test_data_can_be_partially_indexed():
         't': jnp.full((n, 1), 2),
     }
 
-    x= jnp.zeros((n, n_dim))
-
-    index_map = {
-        's': 0,
-        't': 3
+    theta= {
+        'x': jnp.zeros((n, n_dim)),
+        'y': jnp.zeros((n, n_dim))
     }
 
-    x_index = index_data(x, indices, index_map)
-
-    assert x_index.shape == (n, n_dim, 3)
-
-    # assert index is set
-    assert jnp.all(x_index[..., 0, 0] == 0)
-    assert jnp.all(x_index[..., 0, 1] == 1)
-    assert jnp.all(x_index[..., 3, 2] == 2)
-
-    # assert others are nan
-    assert jnp.all(jnp.isnan(x_index[..., 0, 2]))
-    assert jnp.all(jnp.isnan(x_index[..., 1:3, :]))
-    assert jnp.all(jnp.isnan(x_index[..., 3, :2]))
-
-#TODO: remove because unnecessary
-def test_cnf_can_be_initialised_with_an_index():
-    # create a continuous flow with a linear transform
-    rngs = nnx.Rngs(0, base_dist=0)
-    n = 10
-    n_context = 5
-    n_dim = 2
-
-    indices = {
-        's': jnp.concatenate([
-            jnp.linspace(0, 1, n)[:, jnp.newaxis],
-            jnp.linspace(0, 1, n)[:, jnp.newaxis],
-        ], axis=-1),
-        't': jnp.linspace(0, 1, n)[:, jnp.newaxis]
+    index_map: IndexMap = {
+        'x': 's'
     }
 
-    dummy_theta = jnp.zeros((n, n_dim))
-    dummy_context = jnp.zeros((n, n_context))
+    x_index = index_theta(theta, indices, index_map)
 
-    theta_index = index_data(
-        dummy_theta,
-        indices,
-        {
-            's': 0,
-            't': 1
-        }
-    )
-    context_index = index_data(
-        dummy_context,
-        indices,
-        {
-            's': 0,
-            't': 1
-        }
-    )
-
-    class DummyTransform(nnx.Module):
-        def __init__(self, n_context, n_dim, rngs):
-            self.linear = nnx.Linear(n_context, n_dim, rngs=rngs)
-        def __call__(self, theta, time, context, **kwargs):
-            return self.linear(context)
-
-    transform = DummyTransform(n_context, n_dim, rngs)
-    cnf = CNF(n_dim, transform)
-
-    assert cnf.sample(
-            rngs,
-            dummy_context,
-            theta_index=theta_index,
-            context_index=context_index
-        ).shape == (n, n_dim)
-    assert cnf.vector_field(
-            dummy_theta, # theta
-            .5, # time
-            dummy_context, # context
-            theta_index=theta_index,
-            context_index=context_index
-        ).shape == (n, n_dim)
+    assert all(tree.map(lambda leaf: leaf.shape == (n, n_dim, 2), x_index))
 
 def test_infinite_parameters():
     tol: float = 1e-3
-    labels = {
-        'theta': jnp.array([0, 1, 0, 1, 0, 1], dtype=jnp.int32),
-        'context': jnp.array([0, 0, 0], dtype=jnp.int32), #TODO: should have multivariate tokens!
-    }
     y_observed = jnp.array([
         [3., -3.],
         [8., -8.],
         [15., -15.],
     ])
+    theta_indices = {
+        'x': jnp.array([1., 2., 3.])[jnp.newaxis, :],
+        'y': jnp.array([-1., -2., -3.])[jnp.newaxis, :],
+    }
     y_indices = {
-        'x': jnp.array([1, 2, 3])[:, jnp.newaxis],
-        'y': jnp.array([-1, -2, -3])[:, jnp.newaxis],
-        't': jnp.array([3, 4, 5])[:, jnp.newaxis],
+        'obs': jnp.array([3, 4, 5, 6])[
+        jnp.newaxis, #batch
+        :, #time
+        jnp.newaxis, #distance
+        jnp.newaxis #x/y
+        ],
     }
     rngs = nnx.Rngs(0)
     config = {
@@ -213,8 +228,10 @@ def test_infinite_parameters():
     }
     nn = Transformer(
         config,
+        context_value_dim=2,
         n_context_labels=2,
         context_index_dim=3,
+        theta_value_dim=2,
         n_theta_labels=2,
         theta_index_dim=2,
         rngs=rngs
@@ -224,11 +241,7 @@ def test_infinite_parameters():
 
     estim = FMPE(
         (infinite_prior_fn, infinite_simulator_fn),
-        model,
-        sample_context_index=sample_index,
-        context_index_shape=(1,),
-        sample_theta_index=sample_index,
-        theta_index_shape=(theta_index_size,),
+        model
     )
     data, params = None, {}
     for _ in range(2):
@@ -238,15 +251,17 @@ def test_infinite_parameters():
             params=params,
             observable=y_observed,
             context_index=y_indices,
-            theta_index=y_indices,
+            theta_index=theta_indices,
             data=data,
             n_simulations=100,
             n_chains=2,
             n_samples=200,
             n_warmup=100,
         )
-        estim.fit(jr.PRNGKey(2), data=data, n_iter=2, labels=labels)
-    posterior, _ = estim.sample_posterior(
+        print(tree.map(lambda leaf: leaf.shape, data))
+        estim.fit(jr.PRNGKey(2), data=data, n_iter=2)
+    #TODO: theta needs to be specified here too
+    posterior, _ = estim.sample_posterior( 
         jr.PRNGKey(3),
         y_observed,
         observed_index=y_indices,

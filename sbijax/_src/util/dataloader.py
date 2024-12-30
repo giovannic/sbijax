@@ -1,3 +1,4 @@
+from functools import reduce
 import jax.tree_util
 import tensorflow as tf
 from jax import Array
@@ -6,6 +7,7 @@ from jax import random as jr
 from jax._src.flatten_util import ravel_pytree
 
 from sbijax._src.util.types import PyTree
+from jax import tree, vmap
 
 
 # pylint: disable=missing-class-docstring,too-few-public-methods
@@ -19,6 +21,88 @@ class DataLoader:
         """Iterate over the data set."""
         yield from self._itr.as_numpy_iterator()
 
+def prod(x):
+    return reduce(lambda x, y: x * y, x)
+
+def structured_as_batch_iterators(
+    rng_key: Array,
+    data: PyTree,
+    batch_size,
+    split,
+    shuffle
+):
+    """Create two data batch iterators from a data set.
+
+    Args:
+        rng_key: a jax random key
+        data: a named tuple with elements 'y' and 'theta' all data
+        batch_size: size of each batch
+        split: fraction of data to use for training data set. Rest is used
+            for validation data set.
+        shuffle: shuffle the data set or no
+
+    Returns:
+        returns two iterators
+    """
+    # broadcast indices to match samples
+    data['theta_index'] = tree.map(
+        lambda index, x: jnp.broadcast_to(index, x.shape),
+        data['theta_index'],
+        data['theta']
+    )
+    data['y_index'] = tree.map(
+        lambda index, x: jnp.broadcast_to(index, x.shape),
+        data['y_index'],
+        data['y']
+    )
+
+    # get label data by mapping dict keys to integers,
+    # broadcasting them to the leaf shape,
+    # and then flattening
+    prior_labels = list(data['theta'].keys())
+    prior_label_map = dict(
+        zip(
+            prior_labels,
+            range(len(prior_labels))
+        )
+    )
+    prior_label_data = ravel_pytree({
+        k: jnp.broadcast_to(prior_label_map[k], (prod(v.shape[1:]),))
+        for k, v in data['theta'].items()
+    })[0]
+    context_labels = list(data['y'].keys())
+    context_label_map = dict(
+        zip(
+            context_labels,
+            range(len(context_labels))
+        )
+    )
+    context_label_data = ravel_pytree({
+        k: jnp.broadcast_to(context_label_map[k], (prod(v.shape[1:]),))
+        for k, v in data['y'].items()
+    })[0]
+
+    # flatten structure, event and sample dimensions
+    data = {
+        k: vmap(
+            lambda x: ravel_pytree(x)[0],
+            in_axes=[{s: 0 for s in v.keys()}]
+        )(v)
+        for k, v in data.items()
+    }
+
+    train_iter, val_iter = as_batch_iterators(
+        rng_key,
+        data,
+        batch_size,
+        split,
+        shuffle
+    )
+    labels = {
+        'theta': prior_label_data,
+        'y': context_label_data
+    }
+    return train_iter, val_iter, labels
 
 # pylint: disable=missing-function-docstring
 def as_batch_iterators(
@@ -100,8 +184,8 @@ def as_batch_iterator(rng_key: Array, data: PyTree, batch_size, shuffle):
         a tensorflow iterator
     """
     data = {
-        "y": data["y"],
-        "theta": jax.vmap(lambda x: ravel_pytree(x)[0])(data["theta"]),
+        k: v if k != "theta" else jax.vmap(lambda x: ravel_pytree(x)[0])(v)
+        for k, v in data.items()
     }
     itr = tf.data.Dataset.from_tensor_slices(data)
     return as_batched_numpy_iterator_from_tf(

@@ -1,7 +1,5 @@
 import abc
 
-from jax import random as jr
-
 from sbijax._src.util.dataloader import as_batch_iterators
 
 

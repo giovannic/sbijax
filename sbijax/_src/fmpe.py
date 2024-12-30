@@ -1,5 +1,3 @@
-from functools import partial
-
 import jax
 import numpy as np
 import optax
@@ -13,6 +11,8 @@ from sbijax._src._ne_base import NE
 from sbijax._src.util.data import as_inference_data
 from sbijax._src.util.early_stopping import EarlyStopping
 from sbijax._src.util.types import PyTree
+
+from .util.dataloader import structured_as_batch_iterators
 
 from flax import nnx
 
@@ -105,7 +105,6 @@ class FMPE(NE):
         self,
         rng_key,
         data: PyTree,
-        labels: PyTree,
         *,
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
         n_iter: int = 1000,
@@ -120,7 +119,6 @@ class FMPE(NE):
             rng_key: a jax random key
             data: data set obtained from calling
                 `simulate_data_and_possibly_append`
-            labels: labels for each random variable ([u]int)
             optimizer: an optax optimizer object
             n_iter: maximal number of training iterations per round
             batch_size:  batch size used for training the model
@@ -132,8 +130,16 @@ class FMPE(NE):
             a tuple of parameters and a tuple of the training information
         """
         itr_key, rng_key = jr.split(rng_key)
-        train_iter, val_iter = self.as_iterators(
-            itr_key, data, batch_size, percentage_data_as_validation_set
+        (
+            train_iter,
+            val_iter,
+            labels
+        ) = structured_as_batch_iterators(
+            itr_key,
+            data,
+            batch_size,
+            percentage_data_as_validation_set,
+            True
         )
         losses = self._fit_model_single_round(
             seed=rng_key,

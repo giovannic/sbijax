@@ -18,6 +18,7 @@ class Embedding(nnx.Module):
 
     def __init__(
         self,
+        value_dim,
         n_labels,
         label_dim,
         index_in_dim,
@@ -36,7 +37,7 @@ class Embedding(nnx.Module):
             rngs
         )
         self.linear = nnx.Linear(
-            2 + label_dim + index_out_dim, # value + label + index + time
+            value_dim + label_dim + index_out_dim + 1, # value + label + index + time
             out_dim,
             rngs=rngs
         )
@@ -52,9 +53,6 @@ class Embedding(nnx.Module):
         """
         batch_size = values.shape[0]
         n_tokens = values.shape[1]
-
-        # reshape to batch x tokens x features
-        values = values[..., jnp.newaxis]
 
         # embed labels
         labels = self.embedding(labels)

@@ -11,13 +11,16 @@ class Transformer(nnx.Module):
     def __init__(
         self,
         config,
+        context_value_dim,
         n_context_labels,
         context_index_dim,
+        theta_value_dim,
         n_theta_labels,
         theta_index_dim,
         rngs=nnx.Rngs(0)
         ):
         self.context_embedding = Embedding(
+            context_value_dim,
             n_context_labels,
             config['label_dim'],
             context_index_dim,
@@ -42,6 +45,7 @@ class Transformer(nnx.Module):
         self.n_encoder = config['n_encoder']
 
         self.pos_embedding = Embedding(
+            theta_value_dim,
             n_theta_labels,
             config['label_dim'],
             theta_index_dim,
