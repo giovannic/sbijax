@@ -61,17 +61,6 @@ class EncoderBlock(nnx.Module):
             rngs=nnx.Rngs(0)
         ):
         
-        self.attn = nnx.MultiHeadAttention(
-            in_features=dim,
-            num_heads=n_heads,
-            qkv_features=dim,
-            use_bias=False,
-            broadcast_dropout=False,
-            dropout_rate=dropout,
-            decode=False,
-            rngs=rngs
-        )
-        self.attn_norm = nnx.LayerNorm(dim, rngs=rngs)
         self.ff = MLP(
             dim=dim,
             n_layers=n_ff,
@@ -79,12 +68,9 @@ class EncoderBlock(nnx.Module):
             activation=activation,
             rngs=rngs
         )
-        self.ff_norm= nnx.LayerNorm(dim, rngs=rngs)
+        self.ff_norm = nnx.LayerNorm(dim, rngs=rngs)
 
-    def __call__(self, x, mask=None):
-        x_att = self.attn(x, x, x, mask=mask)
-        x_att = self.attn_norm(x_att)
-        x = x + x_att
+    def __call__(self, x):
         x_ff  = self.ff(x)
         x_ff = self.ff_norm(x_ff)
         return x_ff + x

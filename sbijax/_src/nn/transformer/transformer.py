@@ -51,7 +51,8 @@ class Transformer(nnx.Module):
             theta_index_dim,
             config['index_out_dim'],
             config['latent_dim'],
-            rngs=rngs
+            rngs=rngs,
+            with_time=True
         )
 
         @nnx.split_rngs(splits=config['n_decoder'])
@@ -68,7 +69,11 @@ class Transformer(nnx.Module):
 
         self.decoder = create_decoder(rngs)
         self.n_decoder = config['n_decoder']
-        self.linear = nnx.Linear(config['latent_dim'], 1, rngs=rngs)
+        self.linear = nnx.Linear(
+            config['latent_dim'],
+            theta_value_dim,
+            rngs=rngs
+        )
 
     def __call__(
         self,
@@ -83,8 +88,7 @@ class Transformer(nnx.Module):
         encoded = self.encode(
             context,
             context_label,
-            context_index,
-            time
+            context_index
         )
         decoded = self.decode(
             theta,
@@ -100,13 +104,11 @@ class Transformer(nnx.Module):
         context,
         context_label,
         context_index,
-        time
         ):
         x = self.context_embedding(
             context,
             context_label,
-            context_index,
-            time
+            context_index
         )
         @nnx.split_rngs(splits=self.n_encoder)
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)

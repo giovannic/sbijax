@@ -10,8 +10,8 @@ class GaussianFourierEmbedding(nnx.Module):
 
     def __call__(self, inputs):
         return jnp.concatenate([
-            jnp.cos(2 * jnp.pi * jnp.dot(inputs, self.b)), #type: ignore
-            jnp.sin(2 * jnp.pi * jnp.dot(inputs, self.b)) #type: ignore
+            jnp.cos(2 * jnp.pi * jnp.dot(inputs, self.b.value)), #type: ignore
+            jnp.sin(2 * jnp.pi * jnp.dot(inputs, self.b.value)) #type: ignore
         ], axis=-1)
 
 class Embedding(nnx.Module):
@@ -24,7 +24,8 @@ class Embedding(nnx.Module):
         index_in_dim,
         index_out_dim,
         out_dim,
-        rngs=nnx.Rngs(0)
+        rngs=nnx.Rngs(0),
+        with_time=False
         ):
         self.embedding = nnx.Embed(
             n_labels,
@@ -36,13 +37,16 @@ class Embedding(nnx.Module):
             index_out_dim,
             rngs
         )
+        in_dim = value_dim + label_dim + index_out_dim
+        if with_time:
+            in_dim += 1
         self.linear = nnx.Linear(
-            value_dim + label_dim + index_out_dim + 1, # value + label + index + time
+            in_dim, # value + label + index + time
             out_dim,
             rngs=rngs
         )
 
-    def __call__(self, values, labels, indices, time):
+    def __call__(self, values, labels, indices, time=None):
         """
         Embed random variables for encoding
 
@@ -51,22 +55,35 @@ class Embedding(nnx.Module):
             labels: the type of random variable
             indices: the index for the random variable in infinite space
         """
-        batch_size = values.shape[0]
-        n_tokens = values.shape[1]
-
         # embed labels
         labels = self.embedding(labels)
-        # reshape to batch x tokens x features
-        labels = jnp.tile(labels, (batch_size, 1, 1))
+        # reshape to samples x tokens x features
+        labels = jnp.broadcast_to(
+            labels,
+            (values.shape[0],) + labels.shape[1:]
+        )
 
         # gaussian fourier embedding of indices
         indices = self.gf_embedding(indices)
 
-        # fill scalar time to match batch x tokens x features
-        time = jnp.full((batch_size, n_tokens, 1), time)
-
-        # reshape into tokens
-        x = jnp.concatenate([values, labels, indices, time], axis=-1)
+        # concatenate into tokens
+        if time is not None:
+            time = jnp.broadcast_to(
+                time,
+                values.shape[:2] + (1,)
+            )
+            x = jnp.concatenate([
+                values,
+                labels,
+                indices,
+                time
+            ], axis=-1)
+        else:
+            x = jnp.concatenate([
+                values,
+                labels,
+                indices
+            ], axis=-1)
 
         # apply linear transform to tokens
         return self.linear(x)

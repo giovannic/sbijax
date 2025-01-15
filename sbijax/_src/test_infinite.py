@@ -1,64 +1,21 @@
 import pytest
-from jax import numpy as jnp
-from jax import random as jr
-from jax import tree
+from functools import reduce
+from jax import numpy as jnp, random as jr, vmap
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 from sbijax import FMPE
 from sbijax._src.nn.make_continuous_flow import CNF
-from sbijax._src.infinite import index_theta
 from .nn.transformer.transformer import Transformer
-from .infinite import IndexMap
+from .util.dataloader import structured_as_batch_iterators
 
 from flax import nnx
 
 # TODO:
-# - ~generate infinite dim prior~
-# - ~generate infinite dim observations~
-# - ~create indices (either continuous or set based)~
-# - ~integrate indices into FMPE, SBI and NE~
-# - ~when are these indices variably sized? During training?~
-# - ~translate CNF to flax
-# - ~integrate indices into transformer~
-#   ~- init~
-#   ~- vector_field~
-#   ~- __call__~
-# - generate realistic y_observed
-# - generate appropriate test
+# - test that inference works on infinite case
+# - test that inference works on hierarchical case
 
-def infinite_prior_fn(**kwargs):
-    x, y = kwargs["x"][0], kwargs["y"][0]
-    # return prior distribution of gaussian random walk at positions x and y
-    prior = tfd.JointDistributionNamed(
-        dict(
-            x=tfd.Normal(x, 1.),
-            y=tfd.Normal(y, 1.)
-        ),
-        batch_ndims=1,
-    )
-    return prior
-
-# perform outer product of a batch of vectors
-def batch_mul(x, y):
-    return jnp.einsum('...i,...j->...ij', x, y)
-    
-def infinite_simulator_fn(seed, theta, **kwargs):
-    t = kwargs['obs'][:, :, 0, 0]
-    batch_size = theta["x"].shape[0]
-    space_size = theta["x"].shape[1]
-    time_size = t.shape[1]
-    noise= tfd.Normal(
-        jnp.zeros((batch_size, time_size, space_size)),
-        1.
-    )
-    x_seed, y_seed = jr.split(seed)
-    obs = jnp.stack([
-        batch_mul(t, theta["x"]) + noise.sample(seed=x_seed),
-        batch_mul(t, theta["y"]) + noise.sample(seed=y_seed),
-    ], axis=-1)
-    return {
-        'obs': obs
-    }
+def prod(x):
+    return reduce(lambda x, y: x * y, x)
 
 def sample_index(key, shape):
     points = jnp.cumsum(
@@ -71,149 +28,184 @@ def sample_index(key, shape):
         't': points[2]
     }
 
-def test_data_can_be_indexed_in_time_and_space():
-    n = 10
-    n_dim = 2
+def test_structured_loader_flattens_theta_and_y():
+    sample_size = 10
+    event_size = 3
+    batch_shape= (2, 4)
+    index_size = 6
 
-    indices = {
-        's': jnp.concatenate([
-            jnp.full((n, 1), 0),
-            jnp.full((n, 1), 1),
-        ], axis=-1),
-        't': jnp.full((n, 1), 2),
+    data = {
+        'theta': {
+            'x': jnp.zeros((sample_size, event_size) + batch_shape),
+        },
+        'theta_index': {
+            'x': jnp.arange(sample_size * event_size * index_size).reshape((sample_size, event_size, index_size)),
+        },
+        'y': {
+            'obs': jnp.zeros((sample_size, event_size) + batch_shape),
+        },
+        'y_index': {
+            'obs': jnp.arange(sample_size * event_size * index_size).reshape((sample_size, event_size, index_size)),
+        },
     }
 
-    theta= {
-        'x': jnp.zeros((n, n_dim)),
-        'y': jnp.zeros((n, n_dim))
+    train_iter, _, labels = structured_as_batch_iterators(
+        jr.PRNGKey(0),
+        data,
+        3,
+        .5,
+        True,
+        data_batch_ndims={
+            'theta': {'x': 2},
+            'y': {'obs': 2}
+        }
+    )
+
+    for batch in train_iter:
+        train_n = batch['theta'].shape[0]
+        # check that theta and y have been flattened
+        target_shape = (train_n, event_size, prod(batch_shape))
+        assert batch['theta'].shape == target_shape
+        assert batch['y'].shape == target_shape
+
+        # check that indices are broadcasted
+        target_shape = (train_n, event_size, index_size)
+        assert batch['theta_index'].shape == target_shape
+        assert batch['y_index'].shape == target_shape
+
+    # check that labels are correct shape
+    assert labels['theta'].shape == (1, event_size, 1)
+    assert labels['y'].shape == (1, event_size, 1)
+
+def test_structured_loader_labels_multiple_data():
+    sample_size = 10
+    event_size = 3
+    batch_shape= (2, 4)
+    index_size = 6
+
+    data = {
+        'theta': {
+            'x': jnp.zeros((sample_size, event_size) + batch_shape),
+            'y': jnp.zeros((sample_size, 1) + batch_shape),
+        },
+        'theta_index': {
+            'x': jnp.arange(sample_size * event_size * index_size).reshape((sample_size, event_size, index_size)),
+        },
+        'y': {
+            'obs_1': jnp.zeros((sample_size, event_size) + batch_shape),
+            'obs_2': jnp.zeros((sample_size, 1) + batch_shape),
+        },
+        'y_index': {
+            'obs_1': jnp.arange(sample_size * event_size * index_size).reshape((sample_size, event_size, index_size)),
+        },
     }
 
-    index_map: IndexMap = {
-        'x': 's',
-        'y': 't'
-    }
+    _, _, labels = structured_as_batch_iterators(
+        jr.PRNGKey(0),
+        data,
+        3,
+        .5,
+        True,
+        data_batch_ndims={
+            'theta': {'x': 2, 'y': 2},
+            'y': {'obs_1': 2, 'obs_2': 2}
+        },
+    )
 
-    x_index = index_theta(theta, indices, index_map)
+    # check that labels are correct shape
+    assert labels['theta'].shape == (1, event_size + 1, 1)
+    assert labels['y'].shape == (1, event_size + 1, 1)
 
-    assert all(tree.map(lambda leaf: leaf.shape == (n, n_dim, 3), x_index))
+def test_encode_context():
+    pass
 
-    # assert index is set
-    assert jnp.all(x_index['x'][..., 0] == 0)
-    assert jnp.all(x_index['x'][..., 1] == 1)
-    assert jnp.all(x_index['y'][..., 2] == 2)
+def test_encode_unknown_theta():
+    pass
 
-    # assert others are nan
-    assert jnp.all(jnp.isnan(x_index['x'][..., 2]))
-    assert jnp.all(jnp.isnan(x_index['y'][..., 0:2]))
+def test_decode_theta():
+    pass
 
-def test_data_can_be_partially_indexed():
-    n = 10
-    n_dim = 2
+def test_sample_structured_model():
+    pass
 
-    indices = {
-        's': jnp.concatenate([
-            jnp.full((n, 1), 0),
-            jnp.full((n, 1), 1),
-        ], axis=-1)
-    }
+def test_sampled_structured_model_after_first_round():
+    pass
 
-    theta= {
-        'x': jnp.zeros((n, n_dim)),
-        'y': jnp.zeros((n, n_dim))
-    }
-
-    index_map: IndexMap = {
-        'x': 's'
-    }
-
-    x_index = index_theta(theta, indices, index_map)
-
-    assert all(tree.map(lambda leaf: leaf.shape == (n, n_dim, 2), x_index).values())
-
-    # assert index is set
-    assert jnp.all(x_index['x'][..., 0] == 0)
-    assert jnp.all(x_index['x'][..., 1] == 1)
-
-    # assert others are nan
-    assert jnp.all(jnp.isnan(x_index['y']))
-
-def test_event_shape_can_be_indexed():
-    n = 10
-    event_shape = (3,)
-    sample_shape = (4,)
-
-    indices = {
-        't': jnp.array([-1, 0, 1])[jnp.newaxis, :, jnp.newaxis]
-    }
-
-    theta= {
-        'x': jnp.zeros((n,) + event_shape + sample_shape),
-        'y': jnp.zeros((n,) + event_shape + sample_shape)
-    }
-
-    index_map: IndexMap = {
-        'x': 't',
-        'y': 't'
-    }
-
-    x_index = index_theta(theta, indices, index_map)
-
-    assert all([
-        leaf.shape == (n,) + event_shape + sample_shape + (1,)
-        for leaf in tree.leaves(x_index)
-    ])
-
-    assert all([
-        jnp.all(leaf == indices['t'])
-        for leaf in tree.leaves(x_index)
-    ])
-
-
-def test_indexer_ignores_unreferenced_index():
-    # create a continuous flow with a linear transform
-    n = 10
-    n_dim = 2
-
-    indices = {
-        's': jnp.concatenate([
-            jnp.full((n, 1), 0),
-            jnp.full((n, 1), 1),
-        ], axis=-1),
-        't': jnp.full((n, 1), 2),
-    }
-
-    theta= {
-        'x': jnp.zeros((n, n_dim)),
-        'y': jnp.zeros((n, n_dim))
-    }
-
-    index_map: IndexMap = {
-        'x': 's'
-    }
-
-    x_index = index_theta(theta, indices, index_map)
-
-    assert all(tree.map(lambda leaf: leaf.shape == (n, n_dim, 2), x_index))
+def test_posterior_sampling():
+    pass
 
 def test_infinite_parameters():
     tol: float = 1e-3
-    y_observed = jnp.array([
-        [3., -3.],
-        [8., -8.],
-        [15., -15.],
-    ])
-    theta_indices = {
-        'x': jnp.array([1., 2., 3.])[jnp.newaxis, :],
-        'y': jnp.array([-1., -2., -3.])[jnp.newaxis, :],
+
+    theta_index= {
+        's': jnp.array([
+            [1., -1.],
+            [2., -2.],
+            [3., -3.],
+        ])[jnp.newaxis, :]
     }
-    y_indices = {
-        'obs': jnp.array([3, 4, 5, 6])[
-        jnp.newaxis, #batch
-        :, #time
-        jnp.newaxis, #distance
-        jnp.newaxis #x/y
+    y_index= {
+        'obs': jnp.array([3., 4., 5., 6.])[
+            jnp.newaxis, #sample
+            :, #time
+            jnp.newaxis #x/y
         ],
     }
+
+    def prior_fn(**kwargs):
+        s = kwargs["s"][0]
+        # return prior distribution of gaussian random walk at positions x and y
+        prior = tfd.JointDistributionNamed(
+            dict(
+                s=tfd.Normal(s / 2., 1.),
+            ),
+            batch_ndims=1,
+        )
+        return prior
+       
+    def simulator_fn(seed, theta, **kwargs):
+        t = kwargs['obs']
+        sample_size= theta["s"].shape[0]
+        t_n = t.shape[1]
+
+        # sample from guassian mixture
+        def sample_row(seed, s, t):
+            
+            choice_key, noise_key = jr.split(seed)
+            return tfd.Normal(
+                jnp.broadcast_to(
+                    jr.choice(choice_key, s)[jnp.newaxis, :],
+                    (t_n, 2)
+                ),
+                jnp.broadcast_to(t, (t_n, 2))
+            ).sample(seed=noise_key)
+
+        # vmap over sample size
+        keys = jr.split(seed, sample_size)
+        samples = vmap(sample_row, in_axes=(0, 0, 0))(
+            keys,
+            theta["s"],
+            jnp.broadcast_to(t, (sample_size, t_n, 2))
+        )
+
+        return { 'obs': samples }
+
+    theta_key, y_key = jr.split(jr.PRNGKey(0))
+
+    theta_truth = prior_fn(**theta_index).sample((1,), seed=theta_key)
+    y_observed = simulator_fn(y_key, theta_truth, **y_index)
+    # y_observed = {
+        # 'obs': jnp.array([
+            # [.5, -.5],
+            # [1., -1.],
+            # [1.5, -1.5],
+            # [1., -1.],
+        # ])[
+            # jnp.newaxis, #sample
+            # :, #time
+        # ]
+    # }
+
     rngs = nnx.Rngs(0)
     config = {
         'latent_dim': 12,
@@ -226,47 +218,68 @@ def test_infinite_parameters():
         'dropout': .1,
         'activation': nnx.relu,
     }
+    theta_value_dim = 2
     nn = Transformer(
         config,
         context_value_dim=2,
-        n_context_labels=2,
-        context_index_dim=3,
-        theta_value_dim=2,
+        n_context_labels=1,
+        context_index_dim=1,
+        theta_value_dim=theta_value_dim,
         n_theta_labels=2,
         theta_index_dim=2,
         rngs=rngs
     )
-    theta_index_size= 3
-    model = CNF(theta_dim=theta_index_size*2, transform=nn)
+    theta_event_size= 3
+    model = CNF(
+        theta_shape=(theta_event_size, theta_value_dim),
+        transform=nn
+    )
+
+    data_batch_ndims = {
+        'theta': {'s': 1},
+        'y': {'obs': 1}
+    }
+
+    theta_batch_shapes = { 's': (2,) }
 
     estim = FMPE(
-        (infinite_prior_fn, infinite_simulator_fn),
-        model
+        (prior_fn, simulator_fn),
+        model,
+        theta_batch_shapes
     )
     data, params = None, {}
-    for _ in range(2):
+    for _ in range(1):
         # TODO: params will never be created!
         data, _ = estim.simulate_data_and_possibly_append(
             jr.PRNGKey(1),
             params=params,
             observable=y_observed,
-            context_index=y_indices,
-            theta_index=theta_indices,
+            context_index=y_index,
+            theta_index=theta_index,
             data=data,
-            n_simulations=100,
+            n_simulations=1_000,
             n_chains=2,
             n_samples=200,
             n_warmup=100,
         )
-        print(tree.map(lambda leaf: leaf.shape, data))
-        estim.fit(jr.PRNGKey(2), data=data, n_iter=2)
-    #TODO: theta needs to be specified here too
+        estim.fit(
+            jr.PRNGKey(2),
+            data=data,
+            n_iter=100,
+            data_batch_ndims=data_batch_ndims,
+        )
     posterior, _ = estim.sample_posterior( 
-        jr.PRNGKey(3),
+        rngs,
         y_observed,
-        observed_index=y_indices,
+        context_index=y_index,
+        theta_index=theta_index,
         n_chains=2,
         n_samples=200,
         n_warmup=100,
     )
-    assert posterior.posterior.mean() == pytest.approx(1., tol) # type: ignore
+    s_hat = jnp.mean(jnp.array(posterior.posterior.s), keepdims=True, axis=0) # type: ignore
+    s_truth = theta_truth['s'] # type: ignore
+    print(s_hat)
+    print(s_truth)
+    assert s_hat == pytest.approx(s_truth, tol)
+    assert False

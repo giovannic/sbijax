@@ -60,7 +60,6 @@ class NE(SBI, ABC):
         Returns:
             returns a NamedTuple of two axis, y and theta
         """
-        observable = jnp.atleast_2d(observable)
         new_data, diagnostics = self.simulate_data(
             rng_key,
             params=params,
@@ -141,7 +140,7 @@ class NE(SBI, ABC):
             inference_data, diagnostics = self.sample_posterior(
                 rng_key=rng_key,
                 params=params,
-                observable=jnp.atleast_2d(observable),
+                observable=observable,
                 context_index=context_index,
                 theta_index=theta_index,
                 **kwargs,

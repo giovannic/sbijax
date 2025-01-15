@@ -1,10 +1,9 @@
-import jax
 import numpy as np
 import optax
+from jax import tree
 from absl import logging
 from jax import numpy as jnp
 from jax import random as jr
-from jax._src.flatten_util import ravel_pytree
 from tqdm import tqdm
 
 from sbijax._src._ne_base import NE
@@ -12,19 +11,23 @@ from sbijax._src.util.data import as_inference_data
 from sbijax._src.util.early_stopping import EarlyStopping
 from sbijax._src.util.types import PyTree
 
-from .util.dataloader import structured_as_batch_iterators
+from .util.dataloader import (
+    structured_as_batch_iterators,
+    encode_context,
+    encode_unknown_theta,
+    decode_theta,
+    PAD_VALUE
+)
 
 from flax import nnx
 
 def _sample_theta_t(rng_key, times, theta, sigma_min):
     mus = times * theta
-    sigmata = 1.0 - (1.0 - sigma_min) * times
-    sigmata = sigmata.reshape(times.shape[0], 1)
+    sigma= 1.0 - (1.0 - sigma_min) * times
 
-    noise = jr.normal(rng_key, shape=(*theta.shape,))
-    theta_t = noise * sigmata + mus
+    noise = jr.normal(rng_key, shape=theta.shape)
+    theta_t = noise * sigma + mus
     return theta_t
-
 
 def _ut(theta_t, theta, times, sigma_min):
     num = theta - (1.0 - sigma_min) * theta_t
@@ -39,13 +42,18 @@ def _cfm_loss(
     sigma_min=0.001,
 ):
     theta = batch["theta"]
-    n, _ = theta.shape
+    n = theta.shape[0]
 
     t_key, rng_key = jr.split(rng_key)
-    times = jr.uniform(t_key, shape=(n, 1))
+    times = jr.uniform(t_key, shape=(n, 1, 1)) # sample, token, time
 
     theta_key, rng_key = jr.split(rng_key)
-    theta_t = _sample_theta_t(theta_key, times, theta, sigma_min)
+    theta_t = _sample_theta_t(
+        theta_key,
+        times,
+        theta,
+        sigma_min
+    )
 
     vs = model.vector_field(
         theta=theta_t,
@@ -93,6 +101,7 @@ class FMPE(NE):
         self,
         model_fns,
         density_estimator,
+        theta_batch_shapes,
         **kwargs
         ):
         super().__init__(
@@ -100,6 +109,7 @@ class FMPE(NE):
             density_estimator,
             **kwargs
         )
+        self.theta_batch_shapes = theta_batch_shapes
 
     def fit(
         self,
@@ -112,6 +122,7 @@ class FMPE(NE):
         percentage_data_as_validation_set: float = 0.1,
         n_early_stopping_patience: int = 10,
         n_early_stopping_delta: float = 0.001,
+        data_batch_ndims = None
     ):
         """Fit the model.
 
@@ -139,8 +150,10 @@ class FMPE(NE):
             data,
             batch_size,
             percentage_data_as_validation_set,
-            True
+            True,
+            data_batch_ndims=data_batch_ndims
         )
+
         losses = self._fit_model_single_round(
             seed=rng_key,
             train_iter=train_iter,
@@ -170,7 +183,7 @@ class FMPE(NE):
         # set model to train
         self.model.train()
 
-        @nnx.jit
+        # @nnx.jit
         def step(model, rng, optimizer, batch):
             loss, grads = nnx.value_and_grad(_cfm_loss)(
                 model,
@@ -228,7 +241,7 @@ class FMPE(NE):
 
     def _validation_loss(self, rng_key, val_iter, labels):
 
-        @nnx.jit
+        # @nnx.jit
         def body_fn(batch_key, batch):
             loss = _cfm_loss(self.model, batch_key, batch, labels)
             return loss * (batch["y"].shape[0] / val_iter.num_samples)
@@ -241,11 +254,17 @@ class FMPE(NE):
 
     def sample_posterior(
         self,
-        rng_key,
+        rngs,
         observable,
+        theta_index,
+        context_index,
         *,
         n_samples=4_000,
-        observed_index=None,
+        sample_ndims=1,
+        batch_ndims=None,
+        pad_value=PAD_VALUE,
+        context_index_map=None,
+        theta_index_map=None,
         **_
     ):
         r"""Sample from the approximate posterior.
@@ -260,31 +279,61 @@ class FMPE(NE):
             returns an array of samples from the posterior distribution of
             dimension (n_samples \times p)
         """
-        observable = jnp.atleast_2d(observable)
+        if batch_ndims is None:
+            context_batch_ndims = None
+            theta_batch_ndims = None
+        else:
+            context_batch_ndims = { 'y': batch_ndims['y'] }
+            theta_batch_ndims = { 'theta': batch_ndims['theta'] }
 
-        _, unravel_fn = ravel_pytree(
-            self.prior_sampler_fn(
-                index=observed_index,
-                seed=jr.PRNGKey(1)
-            )
+        context, context_label = encode_context(
+            {
+                'y': observable,
+                'y_index': context_index
+            },
+            data_sample_ndims=1,
+            data_batch_ndims=context_batch_ndims,
+            pad_value=pad_value,
+            index_map=context_index_map
         )
-        sample_key, rng_key = jr.split(rng_key)
+
+        # calculate event shapes from index
+        event_shapes = tree.map(
+            lambda x: x.shape[sample_ndims:-1],
+            theta_index
+        )
+
+        flat_index, theta_label = encode_unknown_theta(
+            { 'theta_index': theta_index },
+            data_sample_ndims=sample_ndims,
+            data_batch_ndims=theta_batch_ndims,
+            pad_value=pad_value,
+            index_map=theta_index_map
+        )
+
         self.model.eval()
-        thetas = nnx.jit(self.model.sample)(
-            sample_key,
-            context=jnp.tile(observable, [n_samples, 1]),
+        thetas = nnx.jit(self.model.sample, static_argnames=['sample_size'])(
+            rngs,
+            sample_size=n_samples,
+            context=context['y'],
+            context_label=context_label,
+            context_index=context['y_index'],
+            theta_label=theta_label,
+            theta_index=flat_index
         )
-
+        thetas = decode_theta(
+            theta=thetas,
+            labels=theta_index.keys(),
+            sample_shape=(n_samples,),
+            event_shapes=event_shapes,
+            batch_shapes=self.theta_batch_shapes
+        )
         proposal_probs = self.prior_log_density_fn(
-            jax.vmap(unravel_fn)(thetas),
-            index=observed_index
+            thetas,
+            index=theta_index
         )
-        ess = thetas.shape[0] / jnp.sum(
+        ess = n_samples / jnp.sum(
             jnp.isfinite(proposal_probs)
         )
-        thetas = jax.tree_map(
-            lambda x: x.reshape(1, *x.shape),
-            jax.vmap(unravel_fn)(thetas[:n_samples]),
-        )
-        inference_data = as_inference_data(thetas, jnp.squeeze(observable))
+        inference_data = as_inference_data(thetas, observable)
         return inference_data, ess
