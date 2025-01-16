@@ -145,7 +145,7 @@ def test_infinite_parameters():
         ])[jnp.newaxis, :]
     }
     y_index= {
-        'obs': jnp.array([3., 4., 5., 6.])[
+        'obs': jnp.arange(1., 30., dtype=jnp.float32)[
             jnp.newaxis, #sample
             :, #time
             jnp.newaxis #x/y
@@ -177,7 +177,7 @@ def test_infinite_parameters():
                     jr.choice(choice_key, s)[jnp.newaxis, :],
                     (t_n, 2)
                 ),
-                jnp.broadcast_to(t, (t_n, 2))
+                jnp.broadcast_to(1./t, (t_n, 2))
             ).sample(seed=noise_key)
 
         # vmap over sample size
@@ -194,24 +194,13 @@ def test_infinite_parameters():
 
     theta_truth = prior_fn(**theta_index).sample((1,), seed=theta_key)
     y_observed = simulator_fn(y_key, theta_truth, **y_index)
-    # y_observed = {
-        # 'obs': jnp.array([
-            # [.5, -.5],
-            # [1., -1.],
-            # [1.5, -1.5],
-            # [1., -1.],
-        # ])[
-            # jnp.newaxis, #sample
-            # :, #time
-        # ]
-    # }
 
     rngs = nnx.Rngs(0)
     config = {
-        'latent_dim': 12,
-        'label_dim': 2,
-        'index_out_dim': 4,
-        'n_encoder': 2,
+        'latent_dim': 64,
+        'label_dim': 64,
+        'index_out_dim': 64,
+        'n_encoder': 1,
         'n_decoder': 2,
         'n_heads': 2,
         'n_ff': 2,
@@ -265,7 +254,7 @@ def test_infinite_parameters():
         estim.fit(
             jr.PRNGKey(2),
             data=data,
-            n_iter=100,
+            n_iter=1_000,
             data_batch_ndims=data_batch_ndims,
         )
     posterior, _ = estim.sample_posterior( 

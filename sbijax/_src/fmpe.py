@@ -183,7 +183,7 @@ class FMPE(NE):
         # set model to train
         self.model.train()
 
-        # @nnx.jit
+        @nnx.jit
         def step(model, rng, optimizer, batch):
             loss, grads = nnx.value_and_grad(_cfm_loss)(
                 model,
@@ -241,15 +241,15 @@ class FMPE(NE):
 
     def _validation_loss(self, rng_key, val_iter, labels):
 
-        # @nnx.jit
-        def body_fn(batch_key, batch):
-            loss = _cfm_loss(self.model, batch_key, batch, labels)
+        @nnx.jit
+        def body_fn(model, batch_key, batch):
+            loss = _cfm_loss(model, batch_key, batch, labels)
             return loss * (batch["y"].shape[0] / val_iter.num_samples)
 
         loss = 0.0
         for batch in val_iter:
             val_key, rng_key = jr.split(rng_key)
-            loss += body_fn(val_key, batch)
+            loss += body_fn(self.model, val_key, batch)
         return loss
 
     def sample_posterior(
