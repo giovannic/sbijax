@@ -1,83 +1,31 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
-name = "sbijax"
-description = " Simulation-based inference in JAX"
-authors = [{name = "Simon Dirmeier", email = "sfyrbnd@pm.me"}]
+name = "sfmpe"
+description = "Structured Flow Matching for Posterior Estimation"
+authors = [{name = "Giovanni Charles", email = "giovanni.charles@gmail.com"}]
 readme = "README.md"
-license = "Apache-2.0"
-keywords = [ "sbi", "abc", "simulation-based inference", "approximate Bayesian computation"]
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
 ]
 requires-python = ">=3.10"
 dependencies = [
     "arviz>=0.17.1",
-    "blackjax-nightly>=1.0.0.post17",
-    "dm-haiku>=0.0.9",
     "matplotlib>=3.6.2",
     "optax>=0.1.3",
     "seaborn>=0.12.2",
-    "surjectors>=0.3.3",
     "tensorflow==2.15.0",
-    "tensorflow-datasets==4.9.3",
-    "tfp-nightly>=0.20.0.dev20230404",
+    "tensorflow-probability>=0.20.0",
     "tqdm>=4.64.1",
-    "flax>=0.10.2"
+    "flax>=0.10.2",
+    "sbijax==0.3.3.post1"
 ]
 dynamic = ["version"]
 
 [project.urls]
-Homepage = "https://github.com/dirmeier/sbijax"
-Documentation = "https://sbijax.readthedocs.io"
+Homepage = "https://github.com/giovannic/sfmpe"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.version]
-path = "sbijax/__init__.py"
-
-[tool.hatch.build.targets.sdist]
-exclude = [
-    "/.github",
-    "./gitignore",
-    "/.pre-commit-config.yaml"
+[project.optional-dependencies]
+dev = [
+    "pyright",
+    "jaxtyping"
 ]
-
-[tool.hatch.envs.test]
-dependencies = [
-    "ruff>=0.3.0",
-    "pytest>=7.2.0",
-    "pytest-cov>=4.0.0",
-    "jaxtyping>=0.2.36"
-]
-
-[tool.hatch.envs.test.scripts]
-lint = 'ruff check sbijax examples'
-format = 'ruff format sbijax examples'
-test = 'pytest -v --doctest-modules --cov=./sbijax --cov-report=xml sbijax'
-
-[tool.bandit]
-skips = ["B101"]
-
-[tool.ruff]
-line-length = 80
-exclude = ["*_test.py", "docs/**", "examples/**", "manuscript+supplement/**"]
-
-[tool.ruff.lint]
-select = ["E", "F"]
-extend-select = [
-  "UP", "D", "I", "PL", "S"
-]
-ignore=["S101"]
-
-[tool.ruff.lint.pydocstyle]
-convention= 'google'
