@@ -8,25 +8,16 @@ from sfmpe.nn.make_continuous_flow import CNF
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.util.dataloader import structured_as_batch_iterators
 
+from sbijax import FMPE
+from sbijax.nn import make_cnf
+
 from flax import nnx
 
 # TODO:
-# - test that inference works on infinite case
 # - test that inference works on hierarchical case
 
 def prod(x):
     return reduce(lambda x, y: x * y, x)
-
-def sample_index(key, shape):
-    points = jnp.cumsum(
-        jr.lognormal(key, shape=(3,) + shape),
-        axis=0
-    )
-    return {
-        'x': points[0],
-        'y': -points[1],
-        't': points[2]
-    }
 
 def test_structured_loader_flattens_theta_and_y():
     sample_size = 10
@@ -135,17 +126,22 @@ def test_posterior_sampling():
     pass
 
 def test_infinite_parameters():
-    tol: float = 1e-3
+    tol = 1e-2
+    n_rounds = 5
+    index_noise = 1e-1
+    n_simulations = 100
+    n_epochs = 1_000
+    n_post_samples = 1_000
 
     theta_index= {
         's': jnp.array([
-            [1., -1.],
-            [2., -2.],
-            [3., -3.],
+            [10., -10.],
+            [20., -20.],
+            [30., -30.],
         ])[jnp.newaxis, :]
     }
     y_index= {
-        'obs': jnp.arange(1., 30., dtype=jnp.float32)[
+        'obs': jnp.arange(1., 100., dtype=jnp.float32)[
             jnp.newaxis, #sample
             :, #time
             jnp.newaxis #x/y
@@ -154,10 +150,9 @@ def test_infinite_parameters():
 
     def prior_fn(**kwargs):
         s = kwargs["s"][0]
-        # return prior distribution of gaussian random walk at positions x and y
         prior = tfd.JointDistributionNamed(
             dict(
-                s=tfd.Normal(s / 2., 1.),
+                s=tfd.Normal(s / 2., index_noise),
             ),
             batch_ndims=1,
         )
@@ -177,7 +172,7 @@ def test_infinite_parameters():
                     jr.choice(choice_key, s)[jnp.newaxis, :],
                     (t_n, 2)
                 ),
-                jnp.broadcast_to(1./t, (t_n, 2))
+                jnp.broadcast_to(1./(t*1e3), (t_n, 2))
             ).sample(seed=noise_key)
 
         # vmap over sample size
@@ -236,39 +231,111 @@ def test_infinite_parameters():
         model,
         theta_batch_shapes
     )
-    data, params = None, {}
-    for _ in range(1):
-        # TODO: params will never be created!
+
+    data = None
+    for _ in range(n_rounds):
         data, _ = estim.simulate_data_and_possibly_append(
             jr.PRNGKey(1),
-            params=params,
+            first_round=data is None,
             observable=y_observed,
             context_index=y_index,
             theta_index=theta_index,
             data=data,
-            n_simulations=1_000,
-            n_chains=2,
-            n_samples=200,
-            n_warmup=100,
+            n_simulations=n_simulations
         )
         estim.fit(
             jr.PRNGKey(2),
             data=data,
-            n_iter=1_000,
+            n_iter=n_epochs,
             data_batch_ndims=data_batch_ndims,
         )
+
+    print('sbijax')
+
+    # flatten y_observed
+    sbijax_y_observed = y_observed['obs'].reshape((1, -1)) # type: ignore
+
+    sbijax_nn = make_cnf(6)
+    def sbijax_prior_fn():
+        prior = tfd.JointDistributionNamed(
+            dict(
+                theta=tfd.Independent(
+                    tfd.Normal(theta_index['s'].reshape(-1) / 2., index_noise),
+                    reinterpreted_batch_ndims=1
+                )
+            ),
+            batch_ndims=1,
+        )
+        return prior
+
+    def sbijax_simulator_fn(seed, theta):
+        t = y_index['obs']
+        s = theta['theta'].reshape((-1, theta_event_size, 2))
+        sample_size= s.shape[0]
+        t_n = t.shape[1]
+
+        # sample from guassian mixture
+        def sample_row(seed, s, t):
+            
+            choice_key, noise_key = jr.split(seed)
+            return tfd.Normal(
+                jnp.broadcast_to(
+                    jr.choice(choice_key, s)[jnp.newaxis, :],
+                    (t_n, 2)
+                ),
+                jnp.broadcast_to(1./(t * 100.), (t_n, 2))
+            ).sample(seed=noise_key)
+
+        # vmap over sample size
+        keys = jr.split(seed, sample_size)
+        samples = vmap(sample_row, in_axes=(0, 0, 0))(
+            keys,
+            s,
+            jnp.broadcast_to(t, (sample_size, t_n, 2))
+        )
+
+        return samples.reshape((sample_size, -1)) # type: ignore
+
+    sbijax_estim = FMPE(
+        (sbijax_prior_fn, sbijax_simulator_fn),
+        sbijax_nn,
+    )
+
+    data, params = None, {}
+    for _ in range(n_rounds):
+        data, params = sbijax_estim.simulate_data_and_possibly_append(
+            jr.PRNGKey(1),
+            params=params,
+            observable=sbijax_y_observed,
+            data=data,
+            n_simulations=n_simulations,
+        )
+        params, _ = sbijax_estim.fit(
+            jr.PRNGKey(2),
+            data=data,
+            n_iter=n_epochs
+        )
+
     posterior, _ = estim.sample_posterior( 
-        rngs,
+        jr.PRNGKey(3),
         y_observed,
         context_index=y_index,
         theta_index=theta_index,
-        n_chains=2,
-        n_samples=200,
-        n_warmup=100,
+        n_samples=n_post_samples,
     )
+
+    sbijax_posterior, _ = sbijax_estim.sample_posterior(
+        rng_key=jr.PRNGKey(3),
+        params=params,
+        observable=sbijax_y_observed,
+        n_samples=n_post_samples,
+    )
+    sbijax_s_hat = jnp.mean(jnp.array(sbijax_posterior.posterior.theta).reshape((n_simulations, 3, 2)), keepdims=True, axis=0) # type: ignore
     s_hat = jnp.mean(jnp.array(posterior.posterior.s), keepdims=True, axis=0) # type: ignore
     s_truth = theta_truth['s'] # type: ignore
+    print(sbijax_s_hat)
     print(s_hat)
     print(s_truth)
+    assert sbijax_s_hat == pytest.approx(s_truth, tol)
     assert s_hat == pytest.approx(s_truth, tol)
     assert False

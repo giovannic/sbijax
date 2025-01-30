@@ -11,19 +11,16 @@ class Transformer(nnx.Module):
     def __init__(
         self,
         config,
-        context_value_dim,
-        n_context_labels,
-        context_index_dim,
-        theta_value_dim,
-        n_theta_labels,
-        theta_index_dim,
+        value_dim,
+        n_labels,
+        index_dim,
         rngs=nnx.Rngs(0)
         ):
-        self.context_embedding = Embedding(
-            context_value_dim,
-            n_context_labels,
+        self.embedding = Embedding(
+            value_dim,
+            n_labels,
             config['label_dim'],
-            context_index_dim,
+            index_dim,
             config['index_out_dim'],
             config['latent_dim'],
             rngs=rngs
@@ -44,17 +41,6 @@ class Transformer(nnx.Module):
         self.encoder = create_encoder(rngs)
         self.n_encoder = config['n_encoder']
 
-        self.pos_embedding = Embedding(
-            theta_value_dim,
-            n_theta_labels,
-            config['label_dim'],
-            theta_index_dim,
-            config['index_out_dim'],
-            config['latent_dim'],
-            rngs=rngs,
-            with_time=True
-        )
-
         @nnx.split_rngs(splits=config['n_decoder'])
         @nnx.vmap(in_axes=(0,), out_axes=0)
         def create_decoder(rngs):
@@ -71,7 +57,7 @@ class Transformer(nnx.Module):
         self.n_decoder = config['n_decoder']
         self.linear = nnx.Linear(
             config['latent_dim'],
-            theta_value_dim,
+            value_dim,
             rngs=rngs
         )
 
@@ -105,7 +91,7 @@ class Transformer(nnx.Module):
         context_label,
         context_index,
         ):
-        x = self.context_embedding(
+        x = self.embedding(
             context,
             context_label,
             context_index
@@ -126,7 +112,7 @@ class Transformer(nnx.Module):
         encoded,
         time
         ):
-        x = self.pos_embedding(
+        x = self.embedding(
             pos,
             pos_label,
             pos_index,

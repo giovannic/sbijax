@@ -1,6 +1,6 @@
 import numpy as np
 import optax
-from jax import tree
+from jax import tree, jit
 from absl import logging
 from jax import numpy as jnp
 from jax import random as jr
@@ -97,6 +97,7 @@ class SFMPE(NE):
         n_early_stopping_patience: int = 10,
         n_early_stopping_delta: float = 0.001,
         data_batch_ndims = None
+        theta_event_sizes = None
     ):
         """Fit the model.
 
@@ -118,14 +119,16 @@ class SFMPE(NE):
         (
             train_iter,
             val_iter,
-            labels
+            labels,
+            mask
         ) = structured_as_batch_iterators(
             itr_key,
             data,
             batch_size,
             percentage_data_as_validation_set,
             True,
-            data_batch_ndims=data_batch_ndims
+            data_batch_ndims=data_batch_ndims,
+            event_sizes=theta_event_sizes
         )
 
         losses = self._fit_model_single_round(
@@ -136,7 +139,8 @@ class SFMPE(NE):
             n_iter=n_iter,
             n_early_stopping_patience=n_early_stopping_patience,
             n_early_stopping_delta=n_early_stopping_delta,
-            labels=labels
+            labels=labels,
+            mask=mask
         )
 
         return losses
@@ -228,7 +232,7 @@ class SFMPE(NE):
 
     def sample_posterior(
         self,
-        rngs,
+        key,
         observable,
         theta_index,
         context_index,
@@ -241,18 +245,37 @@ class SFMPE(NE):
         theta_index_map=None,
         **_
     ):
-        r"""Sample from the approximate posterior.
+        thetas, diagnostics = self.sample_structured_posterior(
+            key,
+            observable,
+            theta_index,
+            context_index,
+            n_samples=n_samples,
+            sample_ndims=sample_ndims,
+            batch_ndims=batch_ndims,
+            pad_value=pad_value,
+            context_index_map=context_index_map,
+            theta_index_map=theta_index_map
+        )
 
-        Args:
-            rng_key: a jax random key
-            params: a pytree of neural network parameters
-            observable: observation to condition on
-            n_samples: number of samples to draw
+        inference_data = as_inference_data(thetas, observable)
+        return inference_data, diagnostics
 
-        Returns:
-            returns an array of samples from the posterior distribution of
-            dimension (n_samples \times p)
-        """
+    def sample_structured_posterior(
+        self,
+        rng_key,
+        observable,
+        theta_index,
+        context_index,
+        *,
+        n_samples=4_000,
+        sample_ndims=1,
+        batch_ndims=None,
+        pad_value=PAD_VALUE,
+        context_index_map=None,
+        theta_index_map=None,
+        **_
+    ):
         if batch_ndims is None:
             context_batch_ndims = None
             theta_batch_ndims = None
@@ -286,14 +309,31 @@ class SFMPE(NE):
         )
 
         self.model.eval()
-        thetas = nnx.jit(self.model.sample, static_argnames=['sample_size'])(
-            rngs,
-            sample_size=n_samples,
-            context=context['y'],
-            context_label=context_label,
-            context_index=context['y_index'],
-            theta_label=theta_label,
-            theta_index=flat_index
+
+        # NOTE: nnx.jit somehow leaks tracers. Need to investigate
+        @jit
+        def _sample_theta(
+            graphdef,
+            state
+            ):
+            model = nnx.merge(graphdef, state)
+            res = model.sample(
+                rngs=nnx.Rngs(rng_key),
+                context=context['y'],
+                context_label=context_label,
+                context_index=context['y_index'],
+                theta_label=theta_label,
+                theta_index=flat_index,
+                sample_size=n_samples,
+            )
+
+            return res
+
+        graphdef, state = nnx.split(self.model)
+
+        thetas = _sample_theta(
+            graphdef,
+            state
         )
         thetas = decode_theta(
             theta=thetas,
@@ -309,5 +349,57 @@ class SFMPE(NE):
         ess = n_samples / jnp.sum(
             jnp.isfinite(proposal_probs)
         )
-        inference_data = as_inference_data(thetas, observable)
-        return inference_data, ess
+        return thetas, ess
+
+    def simulate_parameters(
+        self,
+        rng_key,
+        *,
+        first_round=True,
+        observable=None,
+        theta_index=None,
+        context_index=None,
+        n_simulations=1000,
+        **kwargs,
+    ):
+        r"""Simulate parameters from the posterior or prior.
+
+        Args:
+            rng_key: a random key
+            params:a dictionary of neural network parameters. If None, will
+                draw from prior. If parameters given, will draw from amortized
+                posterior using 'observable'.
+            observable: an observation. Needs to be given if posterior draws
+                are desired
+            observed_index: (optional) the index at which an observation
+                was made
+            n_simulations: number of newly simulated data
+            kwargs: dictionary of ey value pairs passed to `sample_posterior`
+
+        Returns:
+            a NamedTuple of two axis, y and theta
+        """
+        if first_round:
+            diagnostics = None
+            self.n_total_simulations += n_simulations
+            new_thetas = self.prior_sampler_fn(
+                index=theta_index,
+                seed=rng_key,
+                sample_shape=(n_simulations,),
+            )
+        else:
+            if observable is None:
+                raise ValueError(
+                    "need to have access to 'observable' "
+                    "when sampling from posterior"
+                )
+            if "n_samples" not in kwargs:
+                kwargs["n_samples"] = n_simulations
+            new_thetas, diagnostics = self.sample_structured_posterior(
+                rng_key=rng_key,
+                observable=observable,
+                context_index=context_index,
+                theta_index=theta_index,
+                **kwargs,
+            )
+        return (new_thetas, theta_index), diagnostics

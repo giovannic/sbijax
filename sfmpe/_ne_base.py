@@ -38,8 +38,8 @@ class NE(SBI, ABC):
     def simulate_data_and_possibly_append(
         self,
         rng_key,
-        params,
         observable,
+        first_round=True,
         data=None,
         n_simulations=1000,
         **kwargs,
@@ -59,7 +59,7 @@ class NE(SBI, ABC):
         """
         new_data, diagnostics = self.simulate_data(
             rng_key,
-            params=params,
+            first_round=first_round,
             observable=observable,
             n_simulations=n_simulations,
             **kwargs,
@@ -94,7 +94,7 @@ class NE(SBI, ABC):
         self,
         rng_key,
         *,
-        params=None,
+        first_round=True,
         observable=None,
         theta_index=None,
         context_index=None,
@@ -118,7 +118,7 @@ class NE(SBI, ABC):
         Returns:
             a NamedTuple of two axis, y and theta
         """
-        if params is None or len(params) == 0:
+        if first_round:
             diagnostics = None
             self.n_total_simulations += n_simulations
             new_thetas = self.prior_sampler_fn(
@@ -136,12 +136,12 @@ class NE(SBI, ABC):
                 kwargs["n_samples"] = n_simulations
             inference_data, diagnostics = self.sample_posterior(
                 rng_key=rng_key,
-                params=params,
                 observable=observable,
                 context_index=context_index,
                 theta_index=theta_index,
                 **kwargs,
             )
+            # TODO: recover posterior
             new_thetas = flatten(inference_data.posterior) #type: ignore
         return (new_thetas, theta_index), diagnostics
 
@@ -149,7 +149,7 @@ class NE(SBI, ABC):
         self,
         rng_key,
         *,
-        params=None,
+        first_round=True,
         observable=None,
         n_simulations=1000,
         **kwargs,
@@ -173,7 +173,7 @@ class NE(SBI, ABC):
 
         (new_thetas, theta_index), diagnostics = self.simulate_parameters(
             theta_key,
-            params=params,
+            first_round=first_round,
             observable=observable,
             n_simulations=n_simulations,
             **kwargs,

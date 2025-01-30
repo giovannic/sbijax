@@ -53,7 +53,6 @@ class EncoderBlock(nnx.Module):
 
     def __init__(
             self,
-            n_heads,
             dim,
             n_ff,
             dropout,

@@ -1,5 +1,6 @@
 from jax import numpy as jnp, random
 from flax import nnx
+from ...util.dataloader import PAD_VALUE
 
 class GaussianFourierEmbedding(nnx.Module):
     def __init__(self, in_dim, out_dim, rngs):
@@ -25,7 +26,6 @@ class Embedding(nnx.Module):
         index_out_dim,
         out_dim,
         rngs=nnx.Rngs(0),
-        with_time=False
         ):
         self.embedding = nnx.Embed(
             n_labels,
@@ -37,9 +37,7 @@ class Embedding(nnx.Module):
             index_out_dim,
             rngs
         )
-        in_dim = value_dim + label_dim + index_out_dim
-        if with_time:
-            in_dim += 1
+        in_dim = value_dim + label_dim + index_out_dim + 1
         self.linear = nnx.Linear(
             in_dim, # value + label + index + time
             out_dim,
@@ -67,23 +65,22 @@ class Embedding(nnx.Module):
         indices = self.gf_embedding(indices)
 
         # concatenate into tokens
-        if time is not None:
+        if time is None:
+            time = jnp.full(
+                values.shape[:2] + (1,),
+                PAD_VALUE
+            )
+        else:
             time = jnp.broadcast_to(
                 time,
                 values.shape[:2] + (1,)
             )
-            x = jnp.concatenate([
-                values,
-                labels,
-                indices,
-                time
-            ], axis=-1)
-        else:
-            x = jnp.concatenate([
-                values,
-                labels,
-                indices
-            ], axis=-1)
+        x = jnp.concatenate([
+            values,
+            labels,
+            indices,
+            time
+        ], axis=-1)
 
         # apply linear transform to tokens
         return self.linear(x)
