@@ -13,7 +13,7 @@ class CNF(nnx.Module):
             with the same batch dimensions.
     """
 
-    def __init__(self, theta_shape, transform: nnx.Module):
+    def __init__(self, transform: nnx.Module):
         """Conditional continuous normalizing flow.
 
         Args:
@@ -23,7 +23,6 @@ class CNF(nnx.Module):
                 with the same batch dimensions.
         """
         super().__init__()
-        self._theta_shape= theta_shape
         self._network = transform
 
     def sample(
@@ -32,9 +31,13 @@ class CNF(nnx.Module):
         context,
         context_label,
         context_index,
+        context_mask,
+        theta_shape,
         theta_label,
         theta_index,
-        sample_size=1
+        theta_mask,
+        cross_mask,
+        sample_size=1,
         ):
         """Sample from the pushforward.
 
@@ -43,7 +46,7 @@ class CNF(nnx.Module):
         """
         theta_0= random.normal(
             rngs.base_dist(),
-            (sample_size,) + self._theta_shape
+            (sample_size,) + theta_shape
         )
 
         def ode_func(theta_t, time, *_):
@@ -53,10 +56,13 @@ class CNF(nnx.Module):
                 theta=theta_t,
                 theta_label=theta_label,
                 theta_index=theta_index,
+                theta_mask=theta_mask,
                 time=time,
                 context=context,
                 context_label=context_label,
-                context_index=context_index
+                context_index=context_index,
+                context_mask=context_mask,
+                cross_mask=cross_mask,
             )
             return ret.reshape(-1)
 
@@ -74,17 +80,20 @@ class CNF(nnx.Module):
             theta_0.reshape((sample_size, -1))
         )
 
-        return res[:, -1].reshape((sample_size,) + self._theta_shape)
+        return res[:, -1].reshape((sample_size,) + theta_shape)
 
     def vector_field(
         self,
         theta,
         theta_label,
         theta_index,
+        theta_mask,
         time,
         context,
         context_label,
-        context_index
+        context_index,
+        context_mask,
+        cross_mask,
         ):
         """Compute the vector field.
 
@@ -100,8 +109,11 @@ class CNF(nnx.Module):
             theta=theta,
             theta_label=theta_label,
             theta_index=theta_index,
+            theta_mask=theta_mask,
             time=time,
             context=context,
             context_label=context_label,
             context_index=context_index,
+            context_mask=context_mask,
+            cross_mask=cross_mask
         )

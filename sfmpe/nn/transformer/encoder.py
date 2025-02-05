@@ -57,8 +57,20 @@ class EncoderBlock(nnx.Module):
             n_ff,
             dropout,
             activation,
+            n_heads,
             rngs=nnx.Rngs(0)
         ):
+        self.attn = nnx.MultiHeadAttention(
+            in_features=dim,
+            num_heads=n_heads,
+            qkv_features=dim,
+            use_bias=False,
+            broadcast_dropout=False,
+            dropout_rate=dropout,
+            decode=False,
+            rngs=rngs
+        )
+        self.norm = nnx.LayerNorm(dim, rngs=rngs)
         
         self.ff = MLP(
             dim=dim,
@@ -69,13 +81,17 @@ class EncoderBlock(nnx.Module):
         )
         self.ff_norm = nnx.LayerNorm(dim, rngs=rngs)
 
-    def __call__(self, x):
+    def __call__(self, x, mask=None):
+        x_att = self.attn(x, x, x, mask=mask)
+        x_att = self.norm(x)
+        x = x + x_att
+
         x_ff  = self.ff(x)
         x_ff = self.ff_norm(x_ff)
         return x_ff + x
 
-class EncoderDecoderBlock(nnx.Module):
-    """Transformer Encoder Decoder Block."""
+class DecoderBlock(nnx.Module):
+    """Transformer Decoder Block."""
 
     def __init__(
             self,
@@ -86,7 +102,7 @@ class EncoderDecoderBlock(nnx.Module):
             activation,
             rngs=nnx.Rngs(0)
         ):
-        self.dec_attn = nnx.MultiHeadAttention(
+        self.attn = nnx.MultiHeadAttention(
             in_features=dim,
             num_heads=n_heads,
             qkv_features=dim,
@@ -96,18 +112,7 @@ class EncoderDecoderBlock(nnx.Module):
             decode=False,
             rngs=rngs
         )
-        self.dec_norm = nnx.LayerNorm(dim, rngs=rngs)
-        self.enc_attn = nnx.MultiHeadAttention(
-            in_features=dim,
-            num_heads=n_heads,
-            qkv_features=dim,
-            use_bias=False,
-            broadcast_dropout=False,
-            dropout_rate=dropout,
-            decode=False,
-            rngs=rngs
-        )
-        self.enc_norm= nnx.LayerNorm(dim, rngs=rngs)
+        self.norm= nnx.LayerNorm(dim, rngs=rngs)
         self.ff = MLP(
             dim=dim,
             n_layers=n_ff,
@@ -117,12 +122,9 @@ class EncoderDecoderBlock(nnx.Module):
         )
         self.ff_norm = nnx.LayerNorm(dim, rngs=rngs)
 
-    def __call__(self, x, encoded, mask=None):
-        x_att = self.dec_attn(x, x, x, mask=mask)
-        x_att = self.dec_norm(x)
-        x = x + x_att
-        x_att = self.enc_attn(x, encoded, encoded, mask=mask)
-        x_att = self.enc_norm(x_att)
+    def __call__(self, x, context, mask=None):
+        x_att = self.attn(x, context, context, mask=mask)
+        x_att = self.norm(x_att)
         x = x + x_att
         y = self.ff(x)
         y = self.ff_norm(y)

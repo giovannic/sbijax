@@ -1,5 +1,5 @@
 from flax import nnx
-from .encoder import EncoderBlock, EncoderDecoderBlock
+from .encoder import EncoderBlock, DecoderBlock
 from .embedding import Embedding
 
 class Transformer(nnx.Module):
@@ -30,11 +30,11 @@ class Transformer(nnx.Module):
         @nnx.vmap(in_axes=(0,), out_axes=0)
         def create_encoder(rngs):
             return EncoderBlock(
-                config['n_heads'],
-                config['latent_dim'],
-                config['n_ff'],
-                config['dropout'],
-                config['activation'],
+                dim=config['latent_dim'],
+                n_ff=config['n_ff'],
+                dropout=config['dropout'],
+                activation=config['activation'],
+                n_heads=config['n_heads'],
                 rngs=rngs
             )
 
@@ -44,12 +44,12 @@ class Transformer(nnx.Module):
         @nnx.split_rngs(splits=config['n_decoder'])
         @nnx.vmap(in_axes=(0,), out_axes=0)
         def create_decoder(rngs):
-            return EncoderDecoderBlock(
-                config['n_heads'],
-                config['latent_dim'],
-                config['n_ff'],
-                config['dropout'],
-                config['activation'],
+            return DecoderBlock(
+                dim=config['latent_dim'],
+                n_ff=config['n_ff'],
+                dropout=config['dropout'],
+                activation=config['activation'],
+                n_heads=config['n_heads'],
                 rngs=rngs
             )
 
@@ -66,22 +66,28 @@ class Transformer(nnx.Module):
         context,
         context_label,
         context_index,
+        context_mask,
         theta,
         theta_label,
         theta_index,
-        time
+        theta_mask,
+        cross_mask,
+        time,
         ):
         encoded = self.encode(
             context,
             context_label,
-            context_index
+            context_index,
+            context_mask,
         )
         decoded = self.decode(
             theta,
             theta_label,
             theta_index,
+            theta_mask,
             encoded,
-            time
+            cross_mask,
+            time,
         )
         return decoded
 
@@ -90,16 +96,17 @@ class Transformer(nnx.Module):
         context,
         context_label,
         context_index,
+        context_mask,
         ):
         x = self.embedding(
             context,
             context_label,
-            context_index
+            context_index,
         )
         @nnx.split_rngs(splits=self.n_encoder)
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
         def forward(x, model):
-            x = model(x)
+            x = model(x, mask=context_mask)
             return x
 
         return forward(x, self.encoder)
@@ -109,8 +116,10 @@ class Transformer(nnx.Module):
         pos,
         pos_label,
         pos_index,
+        pos_mask,
         encoded,
-        time
+        cross_mask,
+        time,
         ):
         x = self.embedding(
             pos,
@@ -118,11 +127,18 @@ class Transformer(nnx.Module):
             pos_index,
             time
         )
+        @nnx.split_rngs(splits=self.n_encoder)
+        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        def enc(x, model):
+            x = model(x, mask=pos_mask)
+            return x
 
         @nnx.split_rngs(splits=self.n_decoder)
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
-        def forward(x, model):
-            x = model(x, encoded)
+        def dec(x, decoder):
+            x = decoder(x, encoded, mask=cross_mask)
             return x
-        x = forward(x, self.decoder)
+
+        x = enc(x, self.encoder)
+        x = dec(x, self.decoder)
         return self.linear(x)

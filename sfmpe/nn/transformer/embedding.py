@@ -61,9 +61,6 @@ class Embedding(nnx.Module):
             (values.shape[0],) + labels.shape[1:]
         )
 
-        # gaussian fourier embedding of indices
-        indices = self.gf_embedding(indices)
-
         # concatenate into tokens
         if time is None:
             time = jnp.full(
@@ -75,12 +72,23 @@ class Embedding(nnx.Module):
                 time,
                 values.shape[:2] + (1,)
             )
-        x = jnp.concatenate([
-            values,
-            labels,
-            indices,
-            time
-        ], axis=-1)
+
+        # gaussian fourier embedding of indices
+        if indices is not None:
+            indices = self.gf_embedding(indices)
+
+            x = jnp.concatenate([
+                values,
+                labels,
+                indices,
+                time
+            ], axis=-1)
+        else:
+            x = jnp.concatenate([
+                values,
+                labels,
+                time
+            ], axis=-1)
 
         # apply linear transform to tokens
         return self.linear(x)

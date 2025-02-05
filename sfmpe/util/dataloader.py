@@ -44,21 +44,15 @@ def flatten_index_tuple(idx_tuple, shape):
 
 def pad_multidim_event(
     arr: jnp.ndarray,
-    event_shape: Tuple[int, ...],
     event_start: int,
     max_shape: Tuple[int, ...],
-    pad_value: float
+    pad_value: float = PAD_VALUE
 ) -> jnp.ndarray:
     """
     Pad `arr` on the event dimensions so that arr.event_shape[i]
     becomes max_shape[i], for i in [0..len(event_shape)-1].
     We'll pad only 'on the right' side (i.e., (0, needed_pad)).
     """
-    if len(event_shape) != len(max_shape):
-        raise ValueError(
-            f"Incompatible event shapes: got {event_shape}, expected {max_shape}"
-        )
-
     # Build the pad config for *just* the event dims:
     # event dims are in the middle of arr's shape:
     #  arr.shape = sample_dims + event_shape + batch_dims
@@ -67,7 +61,7 @@ def pad_multidim_event(
     # We'll build a pad_config of length nd, each entry is (pad_left, pad_right).
     pad_config = [(0, 0)] * nd
 
-    for i in range(len(event_shape)):
+    for i in range(len(max_shape)):
         dim_idx = event_start + i
         actual_size = arr.shape[dim_idx]
         needed_size = max_shape[i]
@@ -135,7 +129,7 @@ def flatten_blocks(
     """
     # We'll store the flattened leaves plus block metadata:
     flattened_leaves = []
-    slices= {}  # (outer_key,inner_key) -> { offset, size, original_event_shape, ... }
+    slices= {}  # key -> { offset, size, original_event_shape, ... }
     current_offset = 0
 
     for key, leaf in data.items():
@@ -160,8 +154,8 @@ def flatten_blocks(
         event_shape = leaf.shape[sample_ndims : -batch_ndim]
         slices[key] = {
             "offset": current_offset,
-            "size": block_size,
-            "shape": event_shape
+            "event_shape": event_shape,
+            "batch_shape": leaf.shape[-batch_ndim:]
         }
         current_offset += block_size
         flattened_leaves.append(leaf_flat)
@@ -177,7 +171,7 @@ def build_self_attention_mask(
     """
     Builds masks for local and cross-local independence
     """
-    total_size = sum(s['size'] for s in block_slices)
+    total_size = sum(prod(s['event_shape']) for s in block_slices.values())
 
     # Build default mask NxN = 1
     mask_np = np.ones((total_size, total_size), dtype=np.int8)
@@ -186,7 +180,7 @@ def build_self_attention_mask(
     for key in independence.get("local", []):
         if key in block_slices:
             off = block_slices[key]["offset"]
-            sz  = block_slices[key]["size"]
+            sz  = prod(block_slices[key]["event_shape"])
             mask_np[off:off+sz, off:off+sz] = 0
 
     # cross_local => zero out entire sub-block, re-enable diagonal or user-specified pairs
@@ -195,13 +189,13 @@ def build_self_attention_mask(
             continue
         offA, sizeA, shapeA = (
             block_slices[blockA]["offset"],
-            block_slices[blockA]["size"],
-            block_slices[blockA]["shape"]
+            prod(block_slices[blockA]["event_shape"]),
+            block_slices[blockA]["event_shape"]
         )
         offB, sizeB, shapeB = (
             block_slices[blockB]["offset"],
-            block_slices[blockB]["size"],
-            block_slices[blockB]["shape"]
+            prod(block_slices[blockB]["event_shape"]),
+            block_slices[blockB]["event_shape"]
         )
 
         # zero out sub-block
@@ -240,8 +234,8 @@ def build_cross_attention_mask(
     Only 'cross_local' rules that connect a block in query_slices
     to a block in key_slices are applied.
     """
-    Q = sum(b["size"] for b in query_slices.values())
-    K = sum(b["size"] for b in key_slices.values())
+    Q = sum(prod(b["event_shape"]) for b in query_slices.values())
+    K = sum(prod(b["event_shape"]) for b in key_slices.values())
     mask_np = np.ones((Q, K), dtype=np.int8)
 
     # We'll ignore "local" because that's about within-block self attention,
@@ -251,11 +245,11 @@ def build_cross_attention_mask(
         # Check if blockA is in query and blockB is in key
         if blockA in query_slices and blockB in key_slices:
             q_off, q_size, q_shape = (query_slices[blockA]["offset"],
-                                      query_slices[blockA]["size"],
-                                      query_slices[blockA].get("shape"))
+                                      prod(query_slices[blockA]["event_shape"]),
+                                      query_slices[blockA]["event_shape"])
             k_off, k_size, k_shape = (key_slices[blockB]["offset"],
-                                      key_slices[blockB]["size"],
-                                      key_slices[blockB].get("shape"))
+                                      prod(key_slices[blockB]["event_shape"]),
+                                      key_slices[blockB]["event_shape"])
             # Zero out sub-block
             mask_np[q_off:q_off+q_size, k_off:k_off+k_size] = 0
 
@@ -301,7 +295,6 @@ def build_padding_mask(
       block_slices:
         { (key): {
             "offset": <int>,
-            "size":   <int>,  # should == prod(shape)
             "shape":  tuple,  # the padded shape
           }, ... }
 
@@ -312,15 +305,15 @@ def build_padding_mask(
     """
 
     def _build_block_mask(key, info):
-        block_size = info["size"]
+        block_size = prod(info["event_shape"])
         actual_event_shape = event_shapes[key]
 
         # Build coordinate grid
-        ranges = [jnp.arange(r) for r in info['shape']]
+        ranges = [jnp.arange(r) for r in info['event_shape']]
         coords = jnp.meshgrid(*ranges, indexing="ij")
 
         # filter coordinates and flatten
-        n_event_dims = len(info['shape'])
+        n_event_dims = len(info['event_shape'])
         valid_in_dimension = [
            coord < jnp.expand_dims(actual_event_shape[..., i], range(-n_event_dims, 0))
            for i, coord in enumerate(coords)
@@ -342,17 +335,16 @@ def build_padding_mask(
         axis=-1
     )
 
-def structured_as_batch_iterators(
-    rng_key: Array,
+def flatten_structured(
     data: PyTree,
-    batch_size,
-    split,
-    shuffle,
     data_sample_ndims=1,
     data_batch_ndims: Optional[PyTree]=None,
+    index: Optional[PyTree]=None,
     pad_value=PAD_VALUE,
     event_shapes: Optional[PyTree]=None,
-):
+    independence: Dict={}
+    ):
+
     batch_ndims_tree = _get_batch_ndims(data, data_batch_ndims)
 
     max_batch_size = _get_max_batch_size(data, batch_ndims_tree)
@@ -373,55 +365,23 @@ def structured_as_batch_iterators(
         max_batch_size
     )
 
-    flat_theta_index = _flatten_index(
-        data['theta_index'],
-        pad_value
-    )
-
-    flat_y_index = _flatten_index(
-        data['y_index'],
-        pad_value
-    )
-
     theta_attention = build_self_attention_mask(
         theta_slices,
-        data['independence']
+        independence
     )
 
     y_attention = build_self_attention_mask(
         y_slices,
-        data['independence']
+        independence
     )
-
-
-    theta_padding_mask = y_padding_mask = None
-    if event_shapes is not None:
-        sample_shape = jnp.shape(flat_y)[:data_sample_ndims]
-        theta_padding_mask = build_padding_mask(
-            theta_slices,
-            event_shapes['theta']
-        )
-        theta_padding_mask = jnp.broadcast_to(
-            theta_padding_mask,
-            sample_shape + theta_padding_mask.shape[data_sample_ndims:]
-        )
-
-        y_padding_mask = build_padding_mask(
-            y_slices,
-            event_shapes['y']
-        )
-        y_padding_mask = jnp.broadcast_to(
-            y_padding_mask,
-            sample_shape + y_padding_mask.shape[data_sample_ndims:]
-        )
 
     cross_attention = build_cross_attention_mask(
-        y_slices,
         theta_slices,
-        data['independence']
+        y_slices,
+        independence
     )
 
-    labels = data['theta'].keys() + data['y'].keys()
+    labels = list(data['theta'].keys()) + list(data['y'].keys())
     label_map = {
         label: i for (i, label) in enumerate(labels)
     }
@@ -439,20 +399,43 @@ def structured_as_batch_iterators(
 
     data = {
         'theta': flat_theta,
-        'theta_index': flat_theta_index,
-        'theta_padding_mask': theta_padding_mask,
         'y': flat_y,
-        'y_index': flat_y_index,
-        'y_padding_mask': y_padding_mask,
     }
 
-    train_iter, val_iter = as_batch_iterators(
-        rng_key,
-        data,
-        batch_size,
-        split,
-        shuffle
-    )
+    if index is not None:
+        data['theta_index'] = _flatten_index(
+            { k: index[k] for k in data['theta'].keys() },
+            pad_value,
+            data_sample_ndims
+        )
+        data['y_index'] = _flatten_index(
+            { k: index[k] for k in data['y'].keys() },
+            pad_value,
+            data_sample_ndims
+        )
+
+    if event_shapes is not None:
+        sample_shape = jnp.shape(flat_y)[:data_sample_ndims]
+        theta_padding_mask = build_padding_mask(
+            theta_slices,
+            event_shapes['theta']
+        )
+        theta_padding_mask = jnp.broadcast_to(
+            theta_padding_mask,
+            sample_shape + theta_padding_mask.shape[data_sample_ndims:]
+        )
+        data['theta_padding_mask'] = theta_padding_mask
+
+        y_padding_mask = build_padding_mask(
+            y_slices,
+            event_shapes['y']
+        )
+        y_padding_mask = jnp.broadcast_to(
+            y_padding_mask,
+            sample_shape + y_padding_mask.shape[data_sample_ndims:]
+        )
+        data['y_padding_mask'] = y_padding_mask
+
     labels = {
         'theta': theta_labels,
         'y': context_labels
@@ -462,112 +445,104 @@ def structured_as_batch_iterators(
         'y': y_attention,
         'cross': cross_attention
     }
-    return train_iter, val_iter, labels, masks
-
-def encode_context(
-    data,
-    data_sample_ndims=1,
-    data_batch_ndims=None,
-    pad_value=PAD_VALUE,
-    index_map=None
-    ):
-    batch_ndims_tree = _get_batch_ndims(data, data_batch_ndims)
-    
-    # flatten event dims for tokenisation
-    data = _flatten_event_dims(
-        data,
-        data_sample_ndims,
-        batch_ndims_tree
-    )
-
-    labels = _get_flat_labels(
-        data['y'],
-        data_sample_ndims
-    )
-
-    data = {
-        'y': _flatten_data(
-            data['y'],
-            data_sample_ndims,
-            batch_ndims_tree['y'],
-            pad_value
-        ),
-        'y_index': _flatten_index(
-            data['y_index'],
-            pad_value,
-            index_map
-        )
+    slices = {
+        'theta': theta_slices,
+        'y': y_slices
     }
+    return data, labels, masks, slices
 
-    return data, labels
+def structured_as_batch_iterators(
+    rng_key: Array,
+    data: PyTree,
+    batch_size=100,
+    split=.7,
+    shuffle=True,
+    data_sample_ndims=1,
+    data_batch_ndims: Optional[PyTree]=None,
+    pad_value=PAD_VALUE,
+    event_shapes: Optional[PyTree]=None,
+    independence: Dict={}
+):
+    
+    data, labels, masks, slices = flatten_structured(
+        data,
+        data_sample_ndims=data_sample_ndims,
+        data_batch_ndims=data_batch_ndims,
+        pad_value=pad_value,
+        event_shapes=event_shapes,
+        independence=independence
+    )
+
+    train_iter, val_iter = as_batch_iterators(
+        rng_key,
+        data,
+        batch_size,
+        split,
+        shuffle
+    )
+    
+    return train_iter, val_iter, labels, masks, slices
 
 def encode_unknown_theta(
-    data,
+    theta_slices,
+    index=None,
     data_sample_ndims=1,
-    data_batch_ndims=None,
     pad_value=PAD_VALUE,
-    index_map=None
     ):
-    batch_ndims_tree = _get_batch_ndims(data, data_batch_ndims)
-    
-    # flatten event dims for tokenisation
-    data = _flatten_event_dims(
-        data,
-        data_sample_ndims,
-        batch_ndims_tree
-    )
 
     labels = _get_flat_labels(
-        data['theta_index'],
+        theta_slices,
         data_sample_ndims
     )
 
-    index= _flatten_index(
-        data['theta_index'],
-        pad_value,
-        index_map
-    )
+    if index is not None:
+        index = _flatten_index(
+            { k: index[k] for k in theta_slices.keys() },
+            pad_value
+        )
 
-    return index, labels
+    return labels, index
 
 def decode_theta(
-    theta,
-    labels,
-    sample_shape,
-    event_shapes,
-    batch_shapes=None
-    ):
-    if batch_shapes is None:
-        batch_shapes = tree.map(lambda _: (1,), event_shapes)
+    theta: jnp.ndarray,
+    theta_slices: dict[str, dict],
+    sample_shape
+) -> dict[str, jnp.ndarray]:
+    """
+    'Unflatten' the transformer's output back into a dictionary of blocks
+    with known event and batch shapes.
 
-    # split theta into rvs
-    sorted_event_shapes = [
-        event_shapes[k]
-        for k in batch_shapes.keys()
-    ]
-    event_sizes= [
-        prod(s)
-        for s in sorted_event_shapes
-    ]
+    Args:
+      theta:
+        jnp.ndarray of shape [sample_shape..., tokens, max_batch_size].
+      theta_slices:
+        { block_name: {
+            "offset": int,
+            "event_shape": tuple[int,...],
+            "batch_shape": tuple[int,...],
+          },
+          ...
+        }
 
-    # find batch sizes
-    batch_sizes = [
-        prod(shape)
-        for shape in batch_shapes.values()
-    ]
+    Returns:
+      A dict { block_name: jnp.ndarray }, where each array has shape
+        [sample_shape..., *event_shape, *batch_shape].
+    """
 
-    # decode theta
-    return {
-        k: v[...,:s].reshape(sample_shape + e_s + b_s)
-        for k, v, s, e_s, b_s
-        in zip(
-            labels,
-            jnp.split(theta, event_sizes, axis=len(sample_shape)),
-            batch_sizes,
-            sorted_event_shapes,
-            batch_shapes.values()
-        )
-    }
+    def _decode_slice(info):
+        offset = info["offset"]
+        event_shape = info["event_shape"]
+        batch_shape = info["batch_shape"]
+
+        block_size = prod(event_shape)  # number of tokens for this block
+        batch_size = prod(batch_shape) # actual batch size for tokens in this block
+
+        new_shape = sample_shape + event_shape + batch_shape
+        block_slice = theta[..., offset : offset + block_size, :]
+
+        return jnp.reshape(block_slice[...,:batch_size], new_shape)
+
+    return { k: _decode_slice(v) for k, v in theta_slices.items() }
 
 def _get_batch_ndims(data, data_batch_ndims):
     if data_batch_ndims is None:
@@ -582,41 +557,30 @@ def _get_batch_ndims(data, data_batch_ndims):
         return batch_ndims_tree
 
 def _get_flat_labels(block_slices, label_map, sample_ndims=1):
-    event_size = sum(s['size'] for s in block_slices.values())
+    event_size = sum(prod(s['event_shape']) for s in block_slices.values())
     labels = np.zeros((1,) * sample_ndims + (event_size,), dtype=np.int8)
     for k, s in block_slices.items():
         off = s['offset']
-        sz = s['size']
+        sz = prod(s['event_shape'])
         labels[..., off:off+sz] = label_map[k]
     return jnp.array(labels)
 
-def _flatten_index(index, pad_value):
-    batch_sizes= [
-        leaf.shape[-1]
-        for leaf in tree.leaves(index)
-    ]
-    batch_start = [0] + cumsum(batch_sizes)
-    batch_size = batch_start[-1]
-
-    def _one_hot(i, leaf, pad_value):
-        return jnp.full(
-            leaf.shape[:-1] + (batch_size,),
-            pad_value
-        ).at[..., batch_start[i]:batch_start[i+1]].set(leaf)
-
-    index = [
-        _flatten_leaf(
-            _one_hot(i, leaf, pad_value),
-            sample_ndims=1,
-            batch_ndims=1,
-            pad_value=pad_value,
-            max_batch_size=batch_size
+def _flatten_index(index, pad_value, sample_ndims=1):
+    flattened = tree.leaves(
+        tree.map(
+            lambda leaf: _flatten_leaf(
+                leaf,
+                sample_ndims,
+                batch_ndims=1,
+                pad_value=pad_value,
+                max_batch_size=leaf.shape[-1]
+            ),
+            index
         )
-        for i, leaf in enumerate(tree.leaves(index))
-    ]
+    )
 
     # concatenate leaves in the event dimension
-    return jnp.concatenate(index, axis=-2)
+    return jnp.concatenate(flattened, axis=-2)
 
 # pylint: disable=missing-function-docstring
 def as_batch_iterators(
