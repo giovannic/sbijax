@@ -27,19 +27,25 @@ def _ut(theta_t, theta, times, sigma_min):
     denom = 1.0 - (1.0 - sigma_min) * times
     return num / denom
 
-def make_self_attention_mask(ind_mask, padding_mask=None):
-    mask= jnp.expand_dims(ind_mask, 0) # for batch dim
-    if padding_mask is not None:
-        mask= mask * padding_mask
-    return jnp.expand_dims(mask, 1) # for num attention heads
+def cross_2d_masks(a, b):
+    """ outer product of two 2d masks (sample_size x token_size)
+
+    Args:
+        a: (sample_size, token_size_1)
+        b: (sample_size, token_size_2)
+
+    Returns:
+        (sample_size, token_size_1, token_size_2)
+    """
+    return jnp.expand_dims(a, 3) * jnp.expand_dims(b, 2)
 
 def make_cross_attention_mask(
     ind_mask,
     theta_padding_mask=None,
     y_padding_mask=None
 ):
-    # extra dim for batch and heads
-    cross_mask = jnp.expand_dims(ind_mask, (0, 1))
+    # extra dim for heads
+    cross_mask = jnp.expand_dims(ind_mask, 1)
 
     if theta_padding_mask is not None:
         # extra heads and y dim
@@ -49,15 +55,48 @@ def make_cross_attention_mask(
         cross_mask = cross_mask * jnp.expand_dims(y_padding_mask, (1, 2))
     return cross_mask
 
+def make_attention_masks(masks):
+    theta_mask, context_mask, cross_mask = None, None, None
+
+    if masks is None:
+        return (theta_mask, context_mask, cross_mask)
+
+    if 'padding' in masks:
+        p_masks = masks['padding']
+        theta_padding_mask = p_masks['theta']
+        theta_mask = cross_2d_masks(theta_padding_mask, theta_padding_mask)
+        y_padding_mask = p_masks['y']
+        context_mask = cross_2d_masks(y_padding_mask, theta_padding_mask)
+        cross_mask = cross_2d_masks(theta_padding_mask, y_padding_mask)
+
+    if 'attention' in masks:
+        a_masks = masks['attention']
+
+        if theta_mask is not None:
+            theta_mask = theta_mask * a_masks['theta']
+        if context_mask is not None:
+            context_mask = context_mask * a_masks['y']
+        if cross_mask is not None:
+            cross_mask = cross_mask * a_masks['cross']
+
+    # add extra dim for heads
+    if theta_mask is not None:
+        theta_mask = jnp.expand_dims(theta_mask, 1)
+    if context_mask is not None:
+        context_mask = jnp.expand_dims(context_mask, 1)
+    if cross_mask is not None:
+        cross_mask = jnp.expand_dims(cross_mask, 1)
+
+    return theta_mask, context_mask, cross_mask
+
+
 def _cfm_loss(
     model,
     rng_key,
     batch,
-    labels,
-    attention_masks,
     sigma_min=0.001,
 ):
-    theta = batch["theta"]
+    theta = batch["data"]["theta"]
     n = theta.shape[0]
 
     t_key, rng_key = jr.split(rng_key)
@@ -71,31 +110,24 @@ def _cfm_loss(
         sigma_min
     )
 
-    theta_mask = make_self_attention_mask(
-        attention_masks['theta'],
-        batch.get('theta_padding_mask')
-    )
+    theta_mask, context_mask, cross_mask = make_attention_masks(batch.get('masks'))
 
-    context_mask = make_self_attention_mask(
-        attention_masks['y'],
-        batch.get('y_padding_mask')
-    )
-
-    cross_mask = make_cross_attention_mask(
-        attention_masks['cross'],
-        batch.get('theta_padding_mask'),
-        batch.get('y_padding_mask')
-    )
+    if 'index' in batch:
+        theta_index = batch['index']['theta']
+        y_index = batch['index']['y']
+    else:
+        theta_index = None
+        y_index = None
 
     vs = model.vector_field(
         theta=theta_t,
-        theta_label=labels["theta"],
-        theta_index=batch.get("theta_index", None),
+        theta_label=batch['labels']["theta"],
+        theta_index=theta_index,
         theta_mask=theta_mask,
         time=times,
-        context=batch["y"],
-        context_label=labels["y"],
-        context_index=batch.get("y_index", None),
+        context=batch["data"]["y"],
+        context_label=batch["labels"]["y"],
+        context_index=y_index,
         context_mask=context_mask,
         cross_mask=cross_mask,
     )
@@ -103,36 +135,31 @@ def _cfm_loss(
 
     # loss has to be masked with the padding mask `batch['theta_mask']`
     # the denominator has to also be derived from the padding mask
-    if 'theta_padding_mask' in batch:
-        loss = jnp.sum(
-            jnp.square(vs - uts) * batch['theta_padding_mask']
-        ) / jnp.sum(batch['theta_padding_mask'])
-    else:
-        loss = jnp.mean(jnp.square(vs - uts))
+    if 'mask' in batch and 'padding' in batch['mask']:
+        theta_padding_mask = batch['mask']['padding']['theta']
+        return jnp.sum(
+            jnp.square(vs - uts) * theta_padding_mask
+        ) / jnp.sum(theta_padding_mask)
 
-    return loss
+    return jnp.mean(jnp.square(vs - uts))
 
 class SFMPE(NE):
 
     def __init__(
         self,
         density_estimator,
-        theta_batch_shapes,
         **kwargs
         ):
         super().__init__(
             density_estimator,
             **kwargs
         )
-        self.theta_batch_shapes = theta_batch_shapes
 
     def fit(
         self,
         rng_key,
         train_iter,
         val_iter,
-        labels,
-        masks,
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
         n_iter: int = 1000,
         n_early_stopping_patience: int = 10,
@@ -172,8 +199,6 @@ class SFMPE(NE):
             n_iter=n_iter,
             n_early_stopping_patience=n_early_stopping_patience,
             n_early_stopping_delta=n_early_stopping_delta,
-            labels=labels,
-            attention_masks=masks,
         )
 
         return losses
@@ -187,8 +212,6 @@ class SFMPE(NE):
         n_iter,
         n_early_stopping_patience,
         n_early_stopping_delta,
-        labels,
-        attention_masks,
     ):
         nnx_optimizer = nnx.Optimizer(self.model, optimizer)
 
@@ -201,8 +224,6 @@ class SFMPE(NE):
                 model,
                 rng,
                 batch,
-                labels,
-                attention_masks,
             )
             optimizer.update(grads)
             return loss
@@ -227,15 +248,13 @@ class SFMPE(NE):
                     batch
                 )
                 train_loss += batch_loss * (
-                    batch["y"].shape[0] / train_iter.num_samples
+                    batch['data']["y"].shape[0] / train_iter.num_samples
                 )
             val_key, rng_key = jr.split(rng_key)
             self.model.eval()
             validation_loss = self._validation_loss(
                 val_key,
                 val_iter,
-                labels,
-                attention_masks,
             )
             self.model.train()
             losses[i] = jnp.array([train_loss, validation_loss])
@@ -253,7 +272,7 @@ class SFMPE(NE):
         losses = jnp.vstack(losses)[: (i + 1), :] #type: ignore
         return losses
 
-    def _validation_loss(self, rng_key, val_iter, labels, masks):
+    def _validation_loss(self, rng_key, val_iter):
 
         @nnx.jit
         def body_fn(model, batch_key, batch):
@@ -261,10 +280,8 @@ class SFMPE(NE):
                 model,
                 batch_key,
                 batch,
-                labels,
-                masks,
             )
-            return loss * (batch["y"].shape[0] / val_iter.num_samples)
+            return loss * (batch['data']['y'].shape[0] / val_iter.num_samples)
 
         loss = 0.0
         for batch in val_iter:
@@ -277,8 +294,8 @@ class SFMPE(NE):
         key,
         observable,
         labels,
-        masks,
         theta_slices,
+        masks=None,
         index=None,
         n_samples=4_000,
     ):
@@ -286,8 +303,8 @@ class SFMPE(NE):
             key,
             observable,
             labels,
-            masks,
             theta_slices,
+            masks=masks,
             index=index,
             n_samples=n_samples,
         )
@@ -300,13 +317,13 @@ class SFMPE(NE):
         rng_key,
         context,
         labels,
-        masks,
         theta_slices,
+        masks=None,
         n_samples=4_000,
         index=None,
     ):
         if index is not None:
-            context_index = {k: index[k] for k in context.keys()}
+            context_index = {k: index[k] for k in context.keys()} #TODO: broken. Context will be flat
             theta_index = {k: index[k] for k in theta_slices.keys()}
         else:
             context_index = None
@@ -316,6 +333,8 @@ class SFMPE(NE):
             sum(prod(s['event_shape']) for s in theta_slices.values()),
             max(prod(s['batch_shape']) for s in theta_slices.values())
         )
+
+        context_mask, theta_mask, cross_mask = make_attention_masks(masks)
 
         self.model.eval()
 
@@ -331,12 +350,12 @@ class SFMPE(NE):
                 context=context,
                 context_label=labels['y'],
                 context_index=context_index,
-                context_mask=masks['y'],
+                context_mask=context_mask,
                 theta_shape=theta_shape,
                 theta_label=labels['theta'],
                 theta_index=theta_index,
-                theta_mask=masks['theta'],
-                cross_mask=masks['cross'],
+                theta_mask=theta_mask,
+                cross_mask=cross_mask,
                 sample_size=n_samples,
             )
 

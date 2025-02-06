@@ -1,5 +1,4 @@
 import pytest
-from functools import reduce
 from jax import numpy as jnp, random as jr, vmap, tree
 from tensorflow_probability.substrates.jax import distributions as tfd
 
@@ -8,8 +7,9 @@ from sfmpe.nn.make_continuous_flow import CNF
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.util.dataloader import (
     flatten_structured,
-    structured_as_batch_iterators,
+    flat_as_batch_iterators,
     pad_multidim_event,
+    combine_data
 )
 
 from sbijax import FMPE
@@ -17,12 +17,9 @@ from sbijax.nn import make_cnf
 
 from flax import nnx
 
-def prod(x):
-    return reduce(lambda x, y: x * y, x)
-
 def test_hierarchical_parameters():
     tol = 1e-3
-    n_rounds = 5
+    n_rounds = 2
     global_noise = 1e2
     local_noise = 1e-1
     measurement_noise = 1e-1
@@ -43,7 +40,7 @@ def test_hierarchical_parameters():
                 theta=tfd.Normal([[5.]], global_noise),
                 z=lambda theta: tfd.Independent(
                     tfd.Normal(
-                        jnp.broadcast_to(theta, (theta.shape[0], n_z, 1)),
+                        jnp.repeat(theta, n_z, axis=-2),
                         local_noise
                     ),
                     reinterpreted_batch_ndims=1
@@ -87,33 +84,17 @@ def test_hierarchical_parameters():
         index_dim=0,
         rngs=rngs
     )
-    model = CNF(
-        transform=nn
-    )
 
-    batch_shapes = {
-        'theta': (1,),
-        'z': (1,),
-        'obs': (1,)
-    }
+    model = CNF(transform=nn)
 
-    estim = SFMPE(model, batch_shapes)
+    estim = SFMPE(model)
 
-    data, data_slices = (None, {})
+    flat_data, data_slices = (None, {})
+    train_data = None
     for _ in range(n_rounds):
         # Fit p(z|theta, y)
         theta_key, obs_key, key = jr.split(key, 3)
-        if data is not None and data_slices:
-            (
-                flat_data,
-                labels,
-                masks,
-                _
-            ) = flatten_structured(
-                data,
-                independence=independence
-            )
-
+        if flat_data is not None and data_slices:
             choice_key, theta_key = jr.split(theta_key)
             theta_samples = vmap(
                 lambda key, obs: tree.map(
@@ -121,13 +102,13 @@ def test_hierarchical_parameters():
                     estim.sample_structured_posterior(
                         key,
                         jnp.expand_dims(obs, 0),
-                        labels,
-                        masks,
+                        flat_data['labels'], #type: ignore
                         data_slices['theta'], #type: ignore
+                        masks=flat_data['masks'], #type: ignore
                         n_samples=1
                     )
                 )
-            )(jr.split(theta_key, n_simulations), flat_data['y'])
+            )(jr.split(theta_key, n_simulations), flat_data['data']['y'])
             # z_choice = jr.choice(choice_key, n_z, (n_simulations,))
             theta_samples = {
                 'theta': theta_samples['theta'],
@@ -148,17 +129,20 @@ def test_hierarchical_parameters():
             }
         }
 
-        itr_key, key = jr.split(key)
-        (
-            train_iter,
-            val_iter,
-            labels,
-            masks,
-            _
-        ) = structured_as_batch_iterators(
-            itr_key,
+        z_flat, _ = flatten_structured(
             z_data,
             independence=independence
+        )
+
+        if train_data is None:
+            train_data = z_flat
+        else:
+            train_data = combine_data(train_data, z_flat)
+
+        itr_key, key = jr.split(key)
+        train_iter, val_iter = flat_as_batch_iterators(
+            itr_key,
+            train_data
         )
 
         fit_key, key = jr.split(key)
@@ -167,8 +151,6 @@ def test_hierarchical_parameters():
             fit_key,
             train_iter,
             val_iter,
-            labels,
-            masks,
             n_iter=n_epochs
         )
 
@@ -187,8 +169,6 @@ def test_hierarchical_parameters():
 
         (
             flat_z_sim,
-            labels,
-            masks,
             z_sim_slices
         ) = flatten_structured(
             z_sim,
@@ -202,13 +182,13 @@ def test_hierarchical_parameters():
                 estim.sample_structured_posterior(
                     key,
                     jnp.expand_dims(obs, 0),
-                    labels,
-                    masks,
+                    flat_z_sim['labels'],
                     z_sim_slices['theta'],
+                    masks=flat_z_sim['masks'],
                     n_samples=1
                 )
             )
-        )(jr.split(sample_key, n_simulations), flat_z_sim['y'])
+        )(jr.split(sample_key, n_simulations), flat_z_sim['data']['y'])
 
         # fit p(theta,z_vec|y_vec)
         data = {
@@ -221,25 +201,23 @@ def test_hierarchical_parameters():
             }
         }
 
-        train_key, itr_key, key = jr.split(key, 3)
-        (
-            train_iter,
-            val_iter,
-            labels,
-            masks,
-            data_slices
-        ) = structured_as_batch_iterators(
-            itr_key,
+        flat_data, data_slices = flatten_structured(
             data,
             independence=independence
+        )
+
+        train_data = combine_data(train_data, flat_data)
+
+        train_key, itr_key, key = jr.split(key, 3)
+        train_iter, val_iter = flat_as_batch_iterators(
+            itr_key,
+            train_data
         )
 
         estim.fit(
             train_key,
             train_iter,
             val_iter,
-            labels,
-            masks,
             n_iter=n_epochs
         )
 

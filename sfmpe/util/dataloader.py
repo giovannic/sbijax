@@ -76,6 +76,15 @@ def pad_multidim_event(
     arr_padded = jnp.pad(arr, pad_config, constant_values=pad_value)
     return arr_padded
 
+def pad_1d(a, new_size):
+    return pad_multidim_event(a, event_start=1, max_shape=(new_size,), pad_value=PAD_VALUE)
+
+def pad_2d(a, new_size):
+    return pad_multidim_event(a, event_start=1, max_shape=(new_size, new_size), pad_value=PAD_VALUE)
+
+def pad_2d_cross(a, new_size_x, new_size_y):
+    return pad_multidim_event(a, event_start=1, max_shape=(new_size_x, new_size_y), pad_value=PAD_VALUE)
+
 def _flatten_leaf(
     leaf: jnp.ndarray,
     sample_ndims: int,
@@ -364,23 +373,6 @@ def flatten_structured(
         pad_value,
         max_batch_size
     )
-
-    theta_attention = build_self_attention_mask(
-        theta_slices,
-        independence
-    )
-
-    y_attention = build_self_attention_mask(
-        y_slices,
-        independence
-    )
-
-    cross_attention = build_cross_attention_mask(
-        theta_slices,
-        y_slices,
-        independence
-    )
-
     labels = list(data['theta'].keys()) + list(data['y'].keys())
     label_map = {
         label: i for (i, label) in enumerate(labels)
@@ -402,54 +394,111 @@ def flatten_structured(
         'y': flat_y,
     }
 
-    if index is not None:
-        data['theta_index'] = _flatten_index(
-            { k: index[k] for k in data['theta'].keys() },
-            pad_value,
-            data_sample_ndims
-        )
-        data['y_index'] = _flatten_index(
-            { k: index[k] for k in data['y'].keys() },
-            pad_value,
-            data_sample_ndims
-        )
-
-    if event_shapes is not None:
-        sample_shape = jnp.shape(flat_y)[:data_sample_ndims]
-        theta_padding_mask = build_padding_mask(
-            theta_slices,
-            event_shapes['theta']
-        )
-        theta_padding_mask = jnp.broadcast_to(
-            theta_padding_mask,
-            sample_shape + theta_padding_mask.shape[data_sample_ndims:]
-        )
-        data['theta_padding_mask'] = theta_padding_mask
-
-        y_padding_mask = build_padding_mask(
-            y_slices,
-            event_shapes['y']
-        )
-        y_padding_mask = jnp.broadcast_to(
-            y_padding_mask,
-            sample_shape + y_padding_mask.shape[data_sample_ndims:]
-        )
-        data['y_padding_mask'] = y_padding_mask
-
     labels = {
         'theta': theta_labels,
         'y': context_labels
     }
-    masks = {
-        'theta': theta_attention,
-        'y': y_attention,
-        'cross': cross_attention
-    }
+    
     slices = {
         'theta': theta_slices,
         'y': y_slices
     }
-    return data, labels, masks, slices
+
+    ret = {'data': data, 'labels': labels}
+
+    if event_shapes is not None or independence:
+        masks = {}
+        if independence:
+            theta_attention = build_self_attention_mask(
+                theta_slices,
+                independence
+            )
+
+            y_attention = build_self_attention_mask(
+                y_slices,
+                independence
+            )
+
+            cross_attention = build_cross_attention_mask(
+                theta_slices,
+                y_slices,
+                independence
+            )
+            masks['attention'] = {
+                'y': jnp.expand_dims(y_attention, 0),
+                'theta': jnp.expand_dims(theta_attention, 0),
+                'cross': jnp.expand_dims(cross_attention, 0)
+            }
+        if event_shapes is not None:
+            sample_shape = jnp.shape(flat_y)[:data_sample_ndims]
+            theta_padding_mask = build_padding_mask(
+                theta_slices,
+                event_shapes['theta']
+            )
+            theta_padding_mask = jnp.broadcast_to(
+                theta_padding_mask,
+                sample_shape + theta_padding_mask.shape[data_sample_ndims:]
+            )
+
+            y_padding_mask = build_padding_mask(
+                y_slices,
+                event_shapes['y']
+            )
+            y_padding_mask = jnp.broadcast_to(
+                y_padding_mask,
+                sample_shape + y_padding_mask.shape[data_sample_ndims:]
+            )
+            masks['padding'] = {
+                'theta': theta_padding_mask,
+                'y': y_padding_mask
+            }
+        ret['masks'] = masks
+
+    if index is not None:
+        ret['index'] = {
+            'theta': _flatten_index(
+                { k: index[k] for k in data['theta'].keys() },
+                pad_value,
+                data_sample_ndims
+            ),
+            'y': _flatten_index(
+                { k: index[k] for k in data['y'].keys() },
+                pad_value,
+                data_sample_ndims
+            )
+        }
+
+    return ret, slices
+
+def flat_as_batch_iterators(
+    rng_key: Array,
+    data: PyTree,
+    batch_size=100,
+    split=.7,
+    shuffle=True,
+    data_sample_ndims=1
+    ):
+
+    # broadcast labels and masks to data sample shape
+    sample_shape = jnp.shape(data['data']['y'])[:data_sample_ndims]
+    data = tree.map(
+        lambda leaf: jnp.broadcast_to(
+            leaf,
+            sample_shape + leaf.shape[data_sample_ndims:]
+        ),
+        data
+    )
+
+    train_iter, val_iter = as_batch_iterators(
+        rng_key,
+        data,
+        batch_size,
+        split,
+        shuffle
+    )
+    
+    return train_iter, val_iter
+
 
 def structured_as_batch_iterators(
     rng_key: Array,
@@ -464,7 +513,7 @@ def structured_as_batch_iterators(
     independence: Dict={}
 ):
     
-    data, labels, masks, slices = flatten_structured(
+    data, slices = flatten_structured(
         data,
         data_sample_ndims=data_sample_ndims,
         data_batch_ndims=data_batch_ndims,
@@ -473,7 +522,7 @@ def structured_as_batch_iterators(
         independence=independence
     )
 
-    train_iter, val_iter = as_batch_iterators(
+    train_iter, val_iter = flat_as_batch_iterators(
         rng_key,
         data,
         batch_size,
@@ -481,7 +530,7 @@ def structured_as_batch_iterators(
         shuffle
     )
     
-    return train_iter, val_iter, labels, masks, slices
+    return train_iter, val_iter, slices
 
 def encode_unknown_theta(
     theta_slices,
@@ -582,6 +631,95 @@ def _flatten_index(index, pad_value, sample_ndims=1):
     # concatenate leaves in the event dimension
     return jnp.concatenate(flattened, axis=-2)
 
+def combine_data(x: Dict, y: Dict) -> Dict:
+    out = {}
+    out["data"] = {}
+
+    xss, yss = x["data"]["y"].shape[0], y["data"]["y"].shape[0]
+
+    def _combine_1d(x_leaf, y_leaf):
+        tx, ty = x_leaf.shape[1], y_leaf.shape[1]
+        max_t = max(tx, ty)
+        x_leaf = pad_1d(x_leaf, max_t)
+        y_leaf = pad_1d(y_leaf, max_t)
+        return jnp.concatenate([x_leaf, y_leaf], axis=0)
+
+    def _combine_broadcast(x_leaf, y_leaf, padder):
+        tx, ty = x_leaf.shape[1], y_leaf.shape[1]
+        max_t = max(tx, ty)
+        x_leaf = padder(x_leaf, max_t)
+        y_leaf = padder(y_leaf, max_t)
+        # broadcast to sample shape
+        x_leaf = jnp.broadcast_to(x_leaf, (xss,) + x_leaf.shape[1:])
+        y_leaf= jnp.broadcast_to(y_leaf, (yss,) + y_leaf.shape[1:])
+        return jnp.concatenate([x_leaf, y_leaf], axis=0)
+
+    def _combine_cross_broadcast(x_leaf, y_leaf):
+        tx_x, ty_x = x_leaf.shape[1], x_leaf.shape[2]
+        tx_y, ty_y = y_leaf.shape[1], y_leaf.shape[2]
+        max_tx = max(tx_x, tx_y)
+        max_ty = max(ty_x, ty_y)
+        x_leaf = pad_2d_cross(x_leaf, max_tx, max_ty)
+        y_leaf = pad_2d_cross(y_leaf, max_tx, max_ty)
+        # broadcast to sample shape
+        x_leaf = jnp.broadcast_to(x_leaf, (xss,) + x_leaf.shape[1:])
+        y_leaf= jnp.broadcast_to(y_leaf, (yss,) + y_leaf.shape[1:])
+        return jnp.concatenate([x_leaf, y_leaf], axis=0)
+
+    for block_key in ["theta", "y"]:
+        if block_key not in x["data"] or block_key not in y["data"]:
+            continue
+        out["data"][block_key] = _combine_1d(x["data"][block_key], y["data"][block_key])
+
+    if "labels" in x and "labels" in y:
+        out["labels"] = {}
+        for block_key in ["theta", "y"]:
+            if block_key in x["labels"] and block_key in y["labels"]:
+                out["labels"][block_key] = _combine_broadcast(
+                    x['labels'][block_key],
+                    y['labels'][block_key],
+                    pad_1d
+                )
+
+    if "masks" in x and "masks" in y:
+        out["masks"] = {}
+
+        if "padding" in x["masks"] and "padding" in y["masks"]:
+            out["masks"]["padding"] = {}
+            for block_key in ["theta", "y"]:
+                if block_key in x["masks"]["padding"] and block_key in y["masks"]["padding"]:
+                    out["masks"]["padding"][block_key] = _combine_broadcast(
+                        x['masks']['padding'][block_key],
+                        y['masks']['padding'][block_key],
+                        pad_1d
+                    )
+
+        if "attention" in x["masks"] and "attention" in y["masks"]:
+            out["masks"]["attention"] = {}
+
+            for block_key in ["theta", "y"]:
+                if block_key in x["masks"]["attention"] and block_key in y["masks"]["attention"]:
+                    out["masks"]["attention"][block_key] = _combine_broadcast(
+                        x['masks']['attention'][block_key],
+                        y['masks']['attention'][block_key],
+                        pad_2d
+                    )
+
+            if "cross" in x["masks"]["attention"] and "cross" in y["masks"]["attention"]:
+
+                out["masks"]["attention"]['cross'] = _combine_cross_broadcast(
+                    x['masks']['attention']['cross'],
+                    y['masks']['attention']['cross']
+                )
+
+    if "index" in x and "index" in y:
+        out["index"] = {}
+        for block_key in ["theta", "y"]:
+            if block_key in x["index"] and block_key in y["index"]:
+                out["masks"]["padding"][block_key] = _combine_broadcast(x['index'][block_key], y['index'][block_key], pad_1d)
+
+    return out
+
 # pylint: disable=missing-function-docstring
 def as_batch_iterators(
     rng_key: Array, data: PyTree, batch_size, split, shuffle
@@ -599,7 +737,7 @@ def as_batch_iterators(
     Returns:
         returns two iterators
     """
-    n = data["y"].shape[0]
+    n = data["data"]["y"].shape[0]
     n_train = int(n * split)
 
     if shuffle:
@@ -663,7 +801,7 @@ def as_batch_iterator(rng_key: Array, data: PyTree, batch_size, shuffle):
     """
     itr = tf.data.Dataset.from_tensor_slices(data)
     return as_batched_numpy_iterator_from_tf(
-        rng_key, itr, data["y"].shape[0], batch_size, shuffle
+        rng_key, itr, data['data']['y'].shape[0], batch_size, shuffle
     )
 
 def as_numpy_iterator_from_slices(data: PyTree, batch_size):
