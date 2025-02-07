@@ -76,14 +76,29 @@ def pad_multidim_event(
     arr_padded = jnp.pad(arr, pad_config, constant_values=pad_value)
     return arr_padded
 
-def pad_1d(a, new_size):
-    return pad_multidim_event(a, event_start=1, max_shape=(new_size,), pad_value=PAD_VALUE)
+def pad_1d(a, new_size, pad_value=PAD_VALUE):
+    return pad_multidim_event(
+        a,
+        event_start=1,
+        max_shape=(new_size,),
+        pad_value=pad_value
+    )
 
-def pad_2d(a, new_size):
-    return pad_multidim_event(a, event_start=1, max_shape=(new_size, new_size), pad_value=PAD_VALUE)
+def pad_2d(a, new_size, pad_value=PAD_VALUE):
+    return pad_multidim_event(
+        a,
+        event_start=1,
+        max_shape=(new_size, new_size),
+        pad_value=pad_value
+    )
 
-def pad_2d_cross(a, new_size_x, new_size_y):
-    return pad_multidim_event(a, event_start=1, max_shape=(new_size_x, new_size_y), pad_value=PAD_VALUE)
+def pad_2d_cross(a, new_size_x, new_size_y, pad_value=PAD_VALUE):
+    return pad_multidim_event(
+        a,
+        event_start=1,
+        max_shape=(new_size_x, new_size_y),
+        pad_value=pad_value
+    )
 
 def _flatten_leaf(
     leaf: jnp.ndarray,
@@ -373,9 +388,9 @@ def flatten_structured(
         pad_value,
         max_batch_size
     )
-    labels = list(data['theta'].keys()) + list(data['y'].keys())
+    labels = sorted(list(data['theta'].keys()) + list(data['y'].keys()))
     label_map = {
-        label: i for (i, label) in enumerate(labels)
+        label: i for i, label in enumerate(labels)
     }
 
     theta_labels = _get_flat_labels(
@@ -644,11 +659,11 @@ def combine_data(x: Dict, y: Dict) -> Dict:
         y_leaf = pad_1d(y_leaf, max_t)
         return jnp.concatenate([x_leaf, y_leaf], axis=0)
 
-    def _combine_broadcast(x_leaf, y_leaf, padder):
+    def _combine_broadcast(x_leaf, y_leaf, padder, pad_value=PAD_VALUE):
         tx, ty = x_leaf.shape[1], y_leaf.shape[1]
         max_t = max(tx, ty)
-        x_leaf = padder(x_leaf, max_t)
-        y_leaf = padder(y_leaf, max_t)
+        x_leaf = padder(x_leaf, max_t, pad_value=pad_value)
+        y_leaf = padder(y_leaf, max_t, pad_value=pad_value)
         # broadcast to sample shape
         x_leaf = jnp.broadcast_to(x_leaf, (xss,) + x_leaf.shape[1:])
         y_leaf= jnp.broadcast_to(y_leaf, (yss,) + y_leaf.shape[1:])
@@ -659,8 +674,8 @@ def combine_data(x: Dict, y: Dict) -> Dict:
         tx_y, ty_y = y_leaf.shape[1], y_leaf.shape[2]
         max_tx = max(tx_x, tx_y)
         max_ty = max(ty_x, ty_y)
-        x_leaf = pad_2d_cross(x_leaf, max_tx, max_ty)
-        y_leaf = pad_2d_cross(y_leaf, max_tx, max_ty)
+        x_leaf = pad_2d_cross(x_leaf, max_tx, max_ty, pad_value=0)
+        y_leaf = pad_2d_cross(y_leaf, max_tx, max_ty, pad_value=0)
         # broadcast to sample shape
         x_leaf = jnp.broadcast_to(x_leaf, (xss,) + x_leaf.shape[1:])
         y_leaf= jnp.broadcast_to(y_leaf, (yss,) + y_leaf.shape[1:])
@@ -678,7 +693,8 @@ def combine_data(x: Dict, y: Dict) -> Dict:
                 out["labels"][block_key] = _combine_broadcast(
                     x['labels'][block_key],
                     y['labels'][block_key],
-                    pad_1d
+                    pad_1d,
+                    pad_value=0
                 )
 
     if "masks" in x and "masks" in y:
@@ -691,7 +707,8 @@ def combine_data(x: Dict, y: Dict) -> Dict:
                     out["masks"]["padding"][block_key] = _combine_broadcast(
                         x['masks']['padding'][block_key],
                         y['masks']['padding'][block_key],
-                        pad_1d
+                        pad_1d,
+                        pad_value=0
                     )
 
         if "attention" in x["masks"] and "attention" in y["masks"]:
@@ -702,7 +719,8 @@ def combine_data(x: Dict, y: Dict) -> Dict:
                     out["masks"]["attention"][block_key] = _combine_broadcast(
                         x['masks']['attention'][block_key],
                         y['masks']['attention'][block_key],
-                        pad_2d
+                        pad_2d,
+                        pad_value=0
                     )
 
             if "cross" in x["masks"]["attention"] and "cross" in y["masks"]["attention"]:

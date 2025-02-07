@@ -39,11 +39,6 @@ class CNF(nnx.Module):
         cross_mask,
         sample_size=1,
         ):
-        """Sample from the pushforward.
-
-        Args:
-            context: array of conditioning variables
-        """
         theta_0= random.normal(
             rngs.base_dist(),
             (sample_size,) + theta_shape

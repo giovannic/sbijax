@@ -37,14 +37,14 @@ class Embedding(nnx.Module):
             index_out_dim,
             rngs
         )
-        in_dim = value_dim + label_dim + index_out_dim + 1
+        in_dim = value_dim + label_dim + index_out_dim + 1 + 1
         self.linear = nnx.Linear(
-            in_dim, # value + label + index + time
+            in_dim, # value + label + index + time + context
             out_dim,
             rngs=rngs
         )
 
-    def __call__(self, values, labels, indices, time=None):
+    def __call__(self, values, labels, indices, time, is_context=False):
         """
         Embed random variables for encoding
 
@@ -61,7 +61,7 @@ class Embedding(nnx.Module):
             (values.shape[0],) + labels.shape[1:]
         )
 
-        # concatenate into tokens
+        # create time (pad if this is the context encoder)
         if time is None:
             time = jnp.full(
                 values.shape[:2] + (1,),
@@ -89,6 +89,16 @@ class Embedding(nnx.Module):
                 labels,
                 time
             ], axis=-1)
+
+        # add context identifier
+        x = jnp.concatenate([
+            x,
+            jnp.full(
+                x.shape[:-1] + (1,),
+                is_context,
+                dtype=x.dtype
+            )
+        ], axis=-1)
 
         # apply linear transform to tokens
         return self.linear(x)

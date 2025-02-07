@@ -5,6 +5,7 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 from sfmpe.fmpe import SFMPE
 from sfmpe.nn.make_continuous_flow import CNF
 from sfmpe.nn.transformer.transformer import Transformer
+from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.util.dataloader import (
     flatten_structured,
     flat_as_batch_iterators,
@@ -20,10 +21,10 @@ from flax import nnx
 def test_hierarchical_parameters():
     tol = 1e-3
     n_rounds = 2
-    global_noise = 1e2
-    local_noise = 1e-1
-    measurement_noise = 1e-1
-    n_simulations = 100
+    global_noise = 1e-1
+    local_noise = 1
+    measurement_noise = 1e-2
+    n_simulations = 1_000
     n_epochs = 1_000
     n_post_samples = 1_000
     n_z = 4
@@ -37,7 +38,7 @@ def test_hierarchical_parameters():
     def prior_fn(n_z):
         prior = tfd.JointDistributionNamed(
             dict(
-                theta=tfd.Normal([[5.]], global_noise),
+                theta=tfd.Normal(jnp.zeros((1, 1)), global_noise),
                 z=lambda theta: tfd.Independent(
                     tfd.Normal(
                         jnp.repeat(theta, n_z, axis=-2),
@@ -67,7 +68,7 @@ def test_hierarchical_parameters():
     rngs = nnx.Rngs(0)
     config = {
         'latent_dim': 64,
-        'label_dim': 64,
+        'label_dim': 8,
         'index_out_dim': 0,
         'n_encoder': 1,
         'n_decoder': 1,
@@ -80,10 +81,18 @@ def test_hierarchical_parameters():
     nn = Transformer(
         config,
         value_dim=1,
-        n_labels=1,
+        n_labels=3,
         index_dim=0,
         rngs=rngs
     )
+    # nn = MLPVectorField(
+        # config,
+        # n_labels=3,
+        # in_dim=2,
+        # value_dim=1,
+        # out_dim=1,
+        # rngs=rngs
+    # )
 
     model = CNF(transform=nn)
 
@@ -109,7 +118,6 @@ def test_hierarchical_parameters():
                     )
                 )
             )(jr.split(theta_key, n_simulations), flat_data['data']['y'])
-            # z_choice = jr.choice(choice_key, n_z, (n_simulations,))
             theta_samples = {
                 'theta': theta_samples['theta'],
                 'z': jr.choice(choice_key, theta_samples['z'], shape=(1,), axis=1)
@@ -139,6 +147,9 @@ def test_hierarchical_parameters():
         else:
             train_data = combine_data(train_data, z_flat)
 
+        #TODO: remove
+        # del train_data['masks']
+
         itr_key, key = jr.split(key)
         train_iter, val_iter = flat_as_batch_iterators(
             itr_key,
@@ -155,11 +166,13 @@ def test_hierarchical_parameters():
         )
 
         # simulate from p(z_vec|theta, y_vec)
+        #TODO: this seems broken
         z_sim = z_data.copy()
         sim_key, key = jr.split(key)
         z_sim['y']['obs'] = vmap(
             lambda k: jr.choice(k, z_data['y']['obs'], shape=(n_z,)) # type: ignore
         )(jr.split(sim_key, n_simulations))
+
         # pad z to n_z
         z_sim['theta']['z'] = pad_multidim_event(
             z_sim['theta']['z'],
@@ -176,6 +189,16 @@ def test_hierarchical_parameters():
         )
 
         sample_key, key = jr.split(key)
+        # print(flat_z_sim['data']['y'][:1])
+        # print(estim.sample_structured_posterior(
+                    # sample_key,
+                    # flat_z_sim['data']['y'][:1],
+                    # flat_z_sim['labels'],
+                    # z_sim_slices['theta'],
+                    # masks=flat_z_sim['masks'],
+                    # n_samples=10
+                # ))
+        # assert False
         z_vec = vmap(
             lambda key, obs: tree.map(
                 lambda leaf: leaf[0], #TODO: clean up
@@ -184,7 +207,7 @@ def test_hierarchical_parameters():
                     jnp.expand_dims(obs, 0),
                     flat_z_sim['labels'],
                     z_sim_slices['theta'],
-                    masks=flat_z_sim['masks'],
+                    #masks=flat_z_sim['masks'],
                     n_samples=1
                 )
             )
@@ -200,6 +223,7 @@ def test_hierarchical_parameters():
                 'obs': z_sim['y']['obs']
             }
         }
+        print(tree.map(lambda leaf: leaf[:10], data))
 
         flat_data, data_slices = flatten_structured(
             data,
@@ -226,9 +250,22 @@ def test_hierarchical_parameters():
     # flatten y_observed
     sbijax_y_observed = y_observed['obs'].reshape((1, -1)) # type: ignore
 
-    sbijax_nn = make_cnf(6)
+    sbijax_nn = make_cnf(5)
     def sbijax_prior_fn():
-        prior = prior_fn(n_z=n_z)
+        prior = tfd.JointDistributionNamed(
+            dict(
+                theta=tfd.Normal(5., global_noise),
+                z=lambda theta: tfd.Independent(
+                    tfd.Normal(
+                        jnp.full((n_z,), theta),
+                        local_noise
+                    ),
+                    reinterpreted_batch_ndims=1
+                )
+            ),
+            batch_ndims=1,
+            use_vectorized_map=True
+        )
 
         return tfd.JointDistributionNamed(
             dict(
@@ -238,8 +275,8 @@ def test_hierarchical_parameters():
         )
 
     def sbijax_simulator_fn(seed, theta):
-        arg = { 'theta': theta[...,:1], 'z': theta[...,1:] }
-        return simulator_fn(seed, arg)
+        arg = { 'theta': theta['theta'][...,:1], 'z': theta['theta'][...,1:] }
+        return simulator_fn(seed, arg)['obs']
 
     sbijax_estim = FMPE(
         (sbijax_prior_fn, sbijax_simulator_fn),
@@ -253,7 +290,7 @@ def test_hierarchical_parameters():
             params=params,
             observable=sbijax_y_observed,
             data=data,
-            n_simulations=n_simulations,
+            n_simulations=n_simulations // n_z,
         )
         params, _ = sbijax_estim.fit(
             jr.PRNGKey(2),
@@ -261,10 +298,16 @@ def test_hierarchical_parameters():
             n_iter=n_epochs
         )
 
-    posterior, _ = estim.sample_posterior( 
+    obs_flat, _ = flatten_structured(
+        { 'theta': theta_truth, 'y': y_observed },
+        independence=independence
+    )
+    posterior = estim.sample_structured_posterior( 
         jr.PRNGKey(3),
-        y_observed,
-        data_slices['theta'],
+        obs_flat['data']['y'],
+        flat_data['labels'], #type: ignore
+        data_slices['theta'], #type: ignore
+        masks=flat_data['masks'], #type: ignore
         n_samples=n_post_samples,
     )
 
@@ -274,13 +317,31 @@ def test_hierarchical_parameters():
         observable=sbijax_y_observed,
         n_samples=n_post_samples,
     )
-    sbijax_theta_hat = jnp.mean(jnp.array(sbijax_posterior.posterior.theta), keepdims=True, axis=0) # type: ignore
-    sbijax_z_hat = jnp.mean(jnp.array(sbijax_posterior.posterior.z), keepdims=True, axis=0) # type: ignore
-    theta_hat = jnp.mean(jnp.array(posterior.posterior.theta), keepdims=True, axis=0) # type: ignore
-    z_hat = jnp.mean(jnp.array(posterior.posterior.z), keepdims=True, axis=0) # type: ignore
-    theta_truth = theta_truth['theta'] # type: ignore
-    assert sbijax_theta_hat == pytest.approx(theta_truth['theta'], tol)
-    assert theta_hat == pytest.approx(theta_truth['theta'], tol)
-    assert sbijax_z_hat == pytest.approx(theta_truth['z'], tol)
-    assert z_hat == pytest.approx(theta_truth['z'], tol)
+    sbijax_theta_hat_array = jnp.array(sbijax_posterior.posterior.theta).reshape( # type: ignore
+        (n_post_samples, (1 + n_z))
+    )
+    sbijax_theta_hat = jnp.mean(
+            sbijax_theta_hat_array[..., :1],
+        keepdims=True,
+        axis=0
+    )
+    sbijax_z_hat = jnp.mean(
+        sbijax_theta_hat_array[..., 1:],
+        keepdims=True,
+        axis=0
+    )
+    theta_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
+    z_hat = jnp.mean(posterior['z'], keepdims=True, axis=0)
+    print('theta')
+    print(theta_truth['theta']) # type: ignore
+    print(theta_hat)
+    print(sbijax_theta_hat)
+    print('z')
+    print(theta_truth['z']) # type: ignore
+    print(z_hat)
+    print(sbijax_z_hat)
+    assert sbijax_theta_hat[None,...] == pytest.approx(theta_truth['theta'], tol) # type: ignore
+    assert theta_hat == pytest.approx(theta_truth['theta'], tol) # type: ignore
+    assert sbijax_z_hat[None,...] == pytest.approx(theta_truth['z'], tol) # type: ignore
+    assert z_hat == pytest.approx(theta_truth['z'], tol) # type: ignore
     assert False

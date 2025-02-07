@@ -4,7 +4,7 @@ from .embedding import Embedding
 
 class Transformer(nnx.Module):
     """Transformer with encoder-decoder architecture
-    which encodes observations and decodes a vector field
+    which encodes context and decodes a vector field
     for flow matching.
     """
 
@@ -79,6 +79,7 @@ class Transformer(nnx.Module):
             context_label,
             context_index,
             context_mask,
+            time
         )
         decoded = self.decode(
             theta,
@@ -97,11 +98,14 @@ class Transformer(nnx.Module):
         context_label,
         context_index,
         context_mask,
+        time
         ):
         x = self.embedding(
             context,
             context_label,
             context_index,
+            time,
+            is_context=True
         )
         @nnx.split_rngs(splits=self.n_encoder)
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
