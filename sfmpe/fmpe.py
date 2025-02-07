@@ -37,7 +37,7 @@ def cross_2d_masks(a, b):
     Returns:
         (sample_size, token_size_1, token_size_2)
     """
-    return jnp.expand_dims(a, 3) * jnp.expand_dims(b, 2)
+    return jnp.expand_dims(a, 2) * jnp.expand_dims(b, 1)
 
 def make_cross_attention_mask(
     ind_mask,
@@ -66,7 +66,7 @@ def make_attention_masks(masks):
         theta_padding_mask = p_masks['theta']
         theta_mask = cross_2d_masks(theta_padding_mask, theta_padding_mask)
         y_padding_mask = p_masks['y']
-        context_mask = cross_2d_masks(y_padding_mask, theta_padding_mask)
+        context_mask = cross_2d_masks(y_padding_mask, y_padding_mask)
         cross_mask = cross_2d_masks(theta_padding_mask, y_padding_mask)
 
     if 'attention' in masks:
@@ -74,10 +74,16 @@ def make_attention_masks(masks):
 
         if theta_mask is not None:
             theta_mask = theta_mask * a_masks['theta']
+        else:
+            theta_mask = a_masks['theta']
         if context_mask is not None:
             context_mask = context_mask * a_masks['y']
+        else:
+            context_mask = a_masks['y']
         if cross_mask is not None:
             cross_mask = cross_mask * a_masks['cross']
+        else:
+            cross_mask = a_masks['cross']
 
     # add extra dim for heads
     if theta_mask is not None:
@@ -334,7 +340,7 @@ class SFMPE(NE):
             max(prod(s['batch_shape']) for s in theta_slices.values())
         )
 
-        context_mask, theta_mask, cross_mask = make_attention_masks(masks)
+        theta_mask, context_mask, cross_mask = make_attention_masks(masks)
 
         self.model.eval()
 

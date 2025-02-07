@@ -700,16 +700,22 @@ def combine_data(x: Dict, y: Dict) -> Dict:
     if "masks" in x and "masks" in y:
         out["masks"] = {}
 
-        if "padding" in x["masks"] and "padding" in y["masks"]:
-            out["masks"]["padding"] = {}
-            for block_key in ["theta", "y"]:
-                if block_key in x["masks"]["padding"] and block_key in y["masks"]["padding"]:
-                    out["masks"]["padding"][block_key] = _combine_broadcast(
-                        x['masks']['padding'][block_key],
-                        y['masks']['padding'][block_key],
-                        pad_1d,
-                        pad_value=0
-                    )
+        # Always create a "padding" field in the output
+        out["masks"]["padding"] = {}
+        for block_key in ["theta", "y"]:
+            # Try to get the padding mask; if missing, use a default (a 0 array of shape (1, T) based on the corresponding data)
+            x_padding = x["masks"].get("padding", {}).get(block_key, None)
+            y_padding = y["masks"].get("padding", {}).get(block_key, None)
+            if x_padding is None:
+                x_padding = jnp.ones((1, x["data"][block_key].shape[1]), dtype=x["data"][block_key].dtype)
+            if y_padding is None:
+                y_padding = jnp.ones((1, y["data"][block_key].shape[1]), dtype=y["data"][block_key].dtype)
+            out["masks"]["padding"][block_key] = _combine_broadcast(
+                x_padding,
+                y_padding,
+                pad_1d,
+                pad_value=0
+            )
 
         if "attention" in x["masks"] and "attention" in y["masks"]:
             out["masks"]["attention"] = {}

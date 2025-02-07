@@ -198,7 +198,8 @@ def test_hierarchical_parameters():
                     # masks=flat_z_sim['masks'],
                     # n_samples=10
                 # ))
-        # assert False
+
+
         z_vec = vmap(
             lambda key, obs: tree.map(
                 lambda leaf: leaf[0], #TODO: clean up
@@ -207,7 +208,7 @@ def test_hierarchical_parameters():
                     jnp.expand_dims(obs, 0),
                     flat_z_sim['labels'],
                     z_sim_slices['theta'],
-                    #masks=flat_z_sim['masks'],
+                    masks=flat_z_sim['masks'],
                     n_samples=1
                 )
             )
