@@ -305,22 +305,22 @@ def _get_max_batch_size(data, batch_ndims_tree):
 
 
 def build_padding_mask(
-    event_shapes: Dict[str, jnp.ndarray],
     block_slices: Dict[str, dict],
+    event_shapes: Dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     """
     Build a 0/1 mask indicating which tokens are valid
     Pre: assumes block_slices are sorted by block["offset"]
 
     Args:
-      event_shapes: dict of actual event shapes,
-		ndarrays are of shape [sample_shape + (n_event_dims,)].
-
       block_slices:
         { (key): {
             "offset": <int>,
-            "shape":  tuple,  # the padded shape
+            "event_shape":  tuple,  # the padded shape
           }, ... }
+
+      event_shapes: dict of actual event shapes,
+		ndarrays are of shape [sample_shape + (n_event_dims,)].
 
     Returns:
       mask: jnp.ndarray of shape sample_shape + (T,),
@@ -445,23 +445,13 @@ def flatten_structured(
                 'cross': jnp.expand_dims(cross_attention, 0)
             }
         if event_shapes is not None:
-            sample_shape = jnp.shape(flat_y)[:data_sample_ndims]
             theta_padding_mask = build_padding_mask(
                 theta_slices,
                 event_shapes['theta']
             )
-            theta_padding_mask = jnp.broadcast_to(
-                theta_padding_mask,
-                sample_shape + theta_padding_mask.shape[data_sample_ndims:]
-            )
-
             y_padding_mask = build_padding_mask(
                 y_slices,
                 event_shapes['y']
-            )
-            y_padding_mask = jnp.broadcast_to(
-                y_padding_mask,
-                sample_shape + y_padding_mask.shape[data_sample_ndims:]
             )
             masks['padding'] = {
                 'theta': theta_padding_mask,
@@ -646,7 +636,7 @@ def _flatten_index(index, pad_value, sample_ndims=1):
     # concatenate leaves in the event dimension
     return jnp.concatenate(flattened, axis=-2)
 
-def combine_data(x: Dict, y: Dict) -> Dict:
+def combine_data(x: Dict, y: Dict, pad_value=PAD_VALUE) -> Dict:
     out = {}
     out["data"] = {}
 
@@ -655,15 +645,15 @@ def combine_data(x: Dict, y: Dict) -> Dict:
     def _combine_1d(x_leaf, y_leaf):
         tx, ty = x_leaf.shape[1], y_leaf.shape[1]
         max_t = max(tx, ty)
-        x_leaf = pad_1d(x_leaf, max_t)
-        y_leaf = pad_1d(y_leaf, max_t)
+        x_leaf = pad_1d(x_leaf, max_t, pad_value=pad_value)
+        y_leaf = pad_1d(y_leaf, max_t, pad_value=pad_value)
         return jnp.concatenate([x_leaf, y_leaf], axis=0)
 
-    def _combine_broadcast(x_leaf, y_leaf, padder, pad_value=PAD_VALUE):
+    def _combine_broadcast(x_leaf, y_leaf, padder, pv=pad_value):
         tx, ty = x_leaf.shape[1], y_leaf.shape[1]
         max_t = max(tx, ty)
-        x_leaf = padder(x_leaf, max_t, pad_value=pad_value)
-        y_leaf = padder(y_leaf, max_t, pad_value=pad_value)
+        x_leaf = padder(x_leaf, max_t, pad_value=pv)
+        y_leaf = padder(y_leaf, max_t, pad_value=pv)
         # broadcast to sample shape
         x_leaf = jnp.broadcast_to(x_leaf, (xss,) + x_leaf.shape[1:])
         y_leaf= jnp.broadcast_to(y_leaf, (yss,) + y_leaf.shape[1:])
@@ -694,29 +684,28 @@ def combine_data(x: Dict, y: Dict) -> Dict:
                     x['labels'][block_key],
                     y['labels'][block_key],
                     pad_1d,
-                    pad_value=0
+                    pv=0
                 )
 
+    # Always create a "padding" field in the output
+    out["masks"] = {}
+    out["masks"]["padding"] = {}
+    for block_key in ["theta", "y"]:
+        # Try to get the padding mask; if missing, use a default (a 0 array of shape (1, T) based on the corresponding data)
+        x_padding = x.get("masks", {}).get("padding", {}).get(block_key, None)
+        y_padding = y.get("masks", {}).get("padding", {}).get(block_key, None)
+        if x_padding is None:
+            x_padding = jnp.ones((1, x["data"][block_key].shape[1]), dtype=x["data"][block_key].dtype)
+        if y_padding is None:
+            y_padding = jnp.ones((1, y["data"][block_key].shape[1]), dtype=y["data"][block_key].dtype)
+        out["masks"]["padding"][block_key] = _combine_broadcast(
+            x_padding,
+            y_padding,
+            pad_1d,
+            pv=0
+        )
+
     if "masks" in x and "masks" in y:
-        out["masks"] = {}
-
-        # Always create a "padding" field in the output
-        out["masks"]["padding"] = {}
-        for block_key in ["theta", "y"]:
-            # Try to get the padding mask; if missing, use a default (a 0 array of shape (1, T) based on the corresponding data)
-            x_padding = x["masks"].get("padding", {}).get(block_key, None)
-            y_padding = y["masks"].get("padding", {}).get(block_key, None)
-            if x_padding is None:
-                x_padding = jnp.ones((1, x["data"][block_key].shape[1]), dtype=x["data"][block_key].dtype)
-            if y_padding is None:
-                y_padding = jnp.ones((1, y["data"][block_key].shape[1]), dtype=y["data"][block_key].dtype)
-            out["masks"]["padding"][block_key] = _combine_broadcast(
-                x_padding,
-                y_padding,
-                pad_1d,
-                pad_value=0
-            )
-
         if "attention" in x["masks"] and "attention" in y["masks"]:
             out["masks"]["attention"] = {}
 
@@ -726,7 +715,7 @@ def combine_data(x: Dict, y: Dict) -> Dict:
                         x['masks']['attention'][block_key],
                         y['masks']['attention'][block_key],
                         pad_2d,
-                        pad_value=0
+                        pv=0
                     )
 
             if "cross" in x["masks"]["attention"] and "cross" in y["masks"]["attention"]:
@@ -740,7 +729,7 @@ def combine_data(x: Dict, y: Dict) -> Dict:
         out["index"] = {}
         for block_key in ["theta", "y"]:
             if block_key in x["index"] and block_key in y["index"]:
-                out["masks"]["padding"][block_key] = _combine_broadcast(x['index'][block_key], y['index'][block_key], pad_1d)
+                out["index"][block_key] = _combine_broadcast(x['index'][block_key], y['index'][block_key], pad_1d)
 
     return out
 

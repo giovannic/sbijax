@@ -141,8 +141,8 @@ def _cfm_loss(
 
     # loss has to be masked with the padding mask `batch['theta_mask']`
     # the denominator has to also be derived from the padding mask
-    if 'mask' in batch and 'padding' in batch['mask']:
-        theta_padding_mask = batch['mask']['padding']['theta']
+    if 'masks' in batch and 'padding' in batch['masks']:
+        theta_padding_mask = jnp.expand_dims(batch['masks']['padding']['theta'], -1)
         return jnp.sum(
             jnp.square(vs - uts) * theta_padding_mask
         ) / jnp.sum(theta_padding_mask)
@@ -242,7 +242,7 @@ class SFMPE(NE):
         best_state = nnx.state(self.model)
         best_loss = np.inf
         logging.info("training model")
-        for i in tqdm(range(n_iter)):
+        for i in (pbar := tqdm(range(n_iter))):
             train_loss = 0.0
             rng_key = jr.fold_in(seed, i)
             for batch in train_iter:
@@ -264,6 +264,7 @@ class SFMPE(NE):
             )
             self.model.train()
             losses[i] = jnp.array([train_loss, validation_loss])
+            pbar.set_description(f"train_loss: {train_loss:.2f}, val_loss: {validation_loss:.2f}")
 
             _, early_stop = early_stop.update(validation_loss)
             if early_stop.should_stop:

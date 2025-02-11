@@ -105,19 +105,23 @@ def test_hierarchical_parameters():
         theta_key, obs_key, key = jr.split(key, 3)
         if flat_data is not None and data_slices:
             choice_key, theta_key = jr.split(theta_key)
-            theta_samples = vmap(
-                lambda key, obs: tree.map(
-                    lambda leaf: leaf[0], #TODO: clean up
-                    estim.sample_structured_posterior(
-                        key,
-                        jnp.expand_dims(obs, 0),
-                        flat_data['labels'], #type: ignore
-                        data_slices['theta'], #type: ignore
-                        masks=flat_data['masks'], #type: ignore
-                        n_samples=1
-                    )
-                )
-            )(jr.split(theta_key, n_simulations), flat_data['data']['y'])
+            flat_y_obs, data_slices = flatten_structured(
+                {
+                    'theta': data['theta'], #type: ignore
+                    'y': y_observed
+                },
+                independence=independence
+            )
+            theta_samples = estim.sample_structured_posterior(
+                theta_key,
+                flat_y_obs['data']['y'],
+                flat_data['labels'], #type: ignore
+                data_slices['theta'], #type: ignore
+                masks=flat_data['masks'], #type: ignore
+                n_samples=n_simulations
+            )
+            print(y_observed)
+            print(theta_samples['z'][:10])
             theta_samples = {
                 'theta': theta_samples['theta'],
                 'z': jr.choice(choice_key, theta_samples['z'], shape=(1,), axis=1)
@@ -147,9 +151,6 @@ def test_hierarchical_parameters():
         else:
             train_data = combine_data(train_data, z_flat)
 
-        #TODO: remove
-        # del train_data['masks']
-
         itr_key, key = jr.split(key)
         train_iter, val_iter = flat_as_batch_iterators(
             itr_key,
@@ -166,7 +167,6 @@ def test_hierarchical_parameters():
         )
 
         # simulate from p(z_vec|theta, y_vec)
-        #TODO: this seems broken
         z_sim = z_data.copy()
         sim_key, key = jr.split(key)
         z_sim['y']['obs'] = vmap(
@@ -189,16 +189,6 @@ def test_hierarchical_parameters():
         )
 
         sample_key, key = jr.split(key)
-        # print(flat_z_sim['data']['y'][:1])
-        # print(estim.sample_structured_posterior(
-                    # sample_key,
-                    # flat_z_sim['data']['y'][:1],
-                    # flat_z_sim['labels'],
-                    # z_sim_slices['theta'],
-                    # masks=flat_z_sim['masks'],
-                    # n_samples=10
-                # ))
-
 
         z_vec = vmap(
             lambda key, obs: tree.map(
@@ -224,11 +214,15 @@ def test_hierarchical_parameters():
                 'obs': z_sim['y']['obs']
             }
         }
-        print(tree.map(lambda leaf: leaf[:10], data))
 
         flat_data, data_slices = flatten_structured(
             data,
             independence=independence
+        )
+
+        train_data = tree.map(
+            lambda leaf: leaf[:n_simulations],
+            combine_data(train_data, flat_data)
         )
 
         train_data = combine_data(train_data, flat_data)
