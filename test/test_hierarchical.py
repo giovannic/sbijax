@@ -5,7 +5,6 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 from sfmpe.fmpe import SFMPE
 from sfmpe.nn.make_continuous_flow import CNF
 from sfmpe.nn.transformer.transformer import Transformer
-from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.util.dataloader import (
     flatten_structured,
     flat_as_batch_iterators,
@@ -85,14 +84,6 @@ def test_hierarchical_parameters():
         index_dim=0,
         rngs=rngs
     )
-    # nn = MLPVectorField(
-        # config,
-        # n_labels=3,
-        # in_dim=2,
-        # value_dim=1,
-        # out_dim=1,
-        # rngs=rngs
-    # )
 
     model = CNF(transform=nn)
 
@@ -120,8 +111,6 @@ def test_hierarchical_parameters():
                 masks=flat_data['masks'], #type: ignore
                 n_samples=n_simulations
             )
-            print(y_observed)
-            print(theta_samples['z'][:10])
             theta_samples = {
                 'theta': theta_samples['theta'],
                 'z': jr.choice(choice_key, theta_samples['z'], shape=(1,), axis=1)
@@ -327,16 +316,7 @@ def test_hierarchical_parameters():
     )
     theta_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
     z_hat = jnp.mean(posterior['z'], keepdims=True, axis=0)
-    print('theta')
-    print(theta_truth['theta']) # type: ignore
-    print(theta_hat)
-    print(sbijax_theta_hat)
-    print('z')
-    print(theta_truth['z']) # type: ignore
-    print(z_hat)
-    print(sbijax_z_hat)
     assert sbijax_theta_hat[None,...] == pytest.approx(theta_truth['theta'], tol) # type: ignore
     assert theta_hat == pytest.approx(theta_truth['theta'], tol) # type: ignore
     assert sbijax_z_hat[None,...] == pytest.approx(theta_truth['z'], tol) # type: ignore
     assert z_hat == pytest.approx(theta_truth['z'], tol) # type: ignore
-    assert False
