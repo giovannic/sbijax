@@ -28,8 +28,8 @@ tfb = tfp.bijectors
 
 def prior_fn(n_z):
     return tfd.JointDistributionNamed(dict(
-        beta_0 = tfd.uniform([1e-3], [.5]), #type: ignore
-        amp = lambda beta: tfd.Uniform(jnp.zeros((n_z,)), beta), #type: ignore
+        beta_0 = tfd.Uniform([1e-3], [.5]), #type: ignore
+        amp = lambda beta_0: tfd.Uniform(jnp.zeros((n_z,)), beta_0), #type: ignore
         phi = tfd.Uniform(jnp.zeros((n_z,)), jnp.pi), #type: ignore
         t_season = tfd.Uniform(
             jnp.full((n_z,), 365 * 2 - 100.), #type: ignore
@@ -38,8 +38,8 @@ def prior_fn(n_z):
     ))
 
 # ode function for SIR model
-def dy_dt(t, state, *args):
-    s, i, _, _, _ = state
+def dy_dt(state, t, *args):
+    s, i, _ = state
     (
         beta_0,
         amp,
@@ -47,7 +47,7 @@ def dy_dt(t, state, *args):
         t_season
     ) = args
 
-    gamma = 1./14. # recovery rate
+    gamma = jnp.array([1./14.]) # recovery rate
 
     beta = beta_0 * (1 + amp * jnp.sin(2 * jnp.pi * t / t_season - phi))
     return jnp.array([
@@ -56,29 +56,42 @@ def dy_dt(t, state, *args):
         gamma * i, # recovered
     ])
 
-def simulator_fn(seed, theta, **kwargs):
+def simulator_fn(seed, theta):
     beta_0 = theta['beta_0']
     amp = theta['amp']
     phi = theta['phi']
     t_season = theta['t_season']
-    pop = kwargs['pop']
-    inf_0 = kwargs['inf_0']
+    pop = 1000
+    inf_0 = 10
 
     # solve ode
-    y0 = jnp.array([pop - inf_0, inf_0, 0., 0., 0.])
+    y0 = jnp.array([pop - inf_0, inf_0, 0.])
     y = vmap(
-        odeint,
+        vmap(
+            odeint,
+            in_axes=(
+                None, #dy_dt
+                None, #y0
+                None, #t
+                0, #beta0
+                0, #amp
+                0, #phi
+                0 #t_season
+            )
+        ),
         in_axes=(
             None, #dy_dt
             None, #y0
-            0, #beta0
-            0, #amp
-            0, #phi
-            0 #t_season
+            None, #t
+            None, #beta0
+            1, #amp
+            1, #phi
+            1 #t_season
         )
     )(
         dy_dt,
         y0,
+        jnp.linspace(0., 100),
         beta_0,
         amp,
         phi,
@@ -94,18 +107,14 @@ def simulator_fn(seed, theta, **kwargs):
 
 def sfmpe_inference(
     key,
-    sample_size,
+    n_z,
+    n_simulations,
     obs,
-    post_samples,
-    n_iter,
-    theta_cal,
-    x_cal
+    n_post_samples
     ):
 
     n_rounds = 2
-    n_simulations = 100
     n_epochs = 100
-    n_z = 10
 
     key, sample_key, fit_key, post_key = jr.split(key, 4)
     rngs = nnx.Rngs(fit_key)
@@ -182,7 +191,7 @@ def sfmpe_inference(
             },
             'y': {
                 'beta_0': theta_samples['beta_0'], #type: ignore
-                'obs': y_samples['obs']
+                'obs_inc': y_samples['obs_inc']
             }
         }
 
@@ -258,7 +267,7 @@ def sfmpe_inference(
                 't_season': z_vec['t_season'],
             },
             'y': {
-                'obs': z_sim['y']['obs']
+                'obs': z_sim['y']['obs_inc']
             }
         }
 
@@ -287,27 +296,20 @@ def sfmpe_inference(
             n_iter=n_epochs
         )
 
-
-    # sample calibration data
-    post_samples_cal = posterior.sample_batched((1,), x=x_cal)[0]
-
-    flow_inverse_transform = lambda theta, x: npe.net._transform(theta, context=x)[0]
-    flow_base_dist = torch.distributions.MultivariateNormal(
-        torch.zeros(2), torch.eye(2)
-    ) # same as npe.net._distribution
-
-    evaluation = evaluate(
-        theta_cal,
-        x_cal,
-        post_samples_cal,
-        flow_inverse_transform,
-        flow_base_dist,
-        obs
+    obs_flat, _ = flatten_structured(
+        { 'theta': theta_truth, 'y': y_observed },
+        independence=independence
+    )
+    posterior = estim.sample_structured_posterior( 
+        post_key,
+        obs_flat['data']['y'],
+        flat_data['labels'], #type: ignore
+        data_slices['theta'], #type: ignore
+        masks=flat_data['masks'], #type: ignore
+        n_samples=n_post_samples,
     )
 
-    return inference_results, evaluation
-
-
+    return posterior
 
 def fmpe_inference(
     key,
@@ -447,3 +449,23 @@ def inference(key):
         # theta_cal,
         # x_cal
     # )
+
+if __name__ == "__main__":
+    # Parameterisation
+    key = jr.PRNGKey(0)
+    n_z = 10 # number of sites
+    sample_size = 10
+    post_samples = 100
+
+    # Generate truth
+    theta_key, y_key, key = jr.split(key, 3)
+    theta_truth = prior_fn(n_z).sample((1,), seed=theta_key)
+    y_observed = simulator_fn(y_key, theta_truth)
+
+    posterior = sfmpe_inference(
+        key,
+        n_z,
+        sample_size,
+        y_observed,
+        post_samples
+    )
