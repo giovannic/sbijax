@@ -190,8 +190,8 @@ class SFMPE(NE):
                 "local": List[ key, ... ],
                 "cross": List[ (key1, key2), ... ],
                 "cross_local": List[ (key1, key2, map), ... ],
-                # map=None => diagonal mask
-                # map=List[ (i,j) ]
+                # map=None => diagonal mask for single event dimension
+                # map=([i],[j]) ] diagonal mask across event dimension i in key1 and corresponding event dimension j in key2
             }
         Returns:
             a tuple of parameters and a tuple of the training information

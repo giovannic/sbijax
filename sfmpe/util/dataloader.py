@@ -1,4 +1,4 @@
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
 from functools import reduce
 from typing import Optional
 import tensorflow as tf
@@ -41,6 +41,43 @@ def flatten_index_tuple(idx_tuple, shape):
     for i, dim_size in zip(idx_tuple[1:], shape[1:]):
         linear = linear * dim_size + i
     return linear
+
+def event_indices(shape: Tuple[int, ...], dim: int) -> List[np.ndarray]:
+    """
+    Generate flat (row-major) indices that reproduce “:`” slicing at a given axis.
+
+    For a C-contiguous array `x` of shape `shape`, let:
+
+        indices = event_indices(shape, dim)
+
+    Then for each i in range(shape[dim]):
+
+        x[..., i, ...].ravel() == x.flat[indices[i]]
+
+    In other words, applying `:` to every dimension before and after `dim` and
+    fixing the `dim`-th index to `i` corresponds exactly to selecting the 1D
+    slice of `x.flat` at positions `indices[i]`.
+
+    Parameters
+    ----------
+    shape : Tuple[int, ...]
+        The full shape of the array.
+    dim : int
+        The axis along which you want to “slice” with `:` semantics.
+
+    Returns
+    -------
+    List[np.ndarray]
+        A list of length `shape[dim]`, where each entry is a 1D array of flat
+        indices into `x.flat` corresponding to `x[..., i, ...]`.
+    """
+    # total number of elements in the array
+    total_elems = int(np.prod(shape))
+    # create a flat-index array and reshape into the target shape
+    flat_idx = np.arange(total_elems, dtype=int).reshape(shape)
+
+    # for each position i along `dim`, take the slice and flatten it
+    return [flat_idx.take(i, axis=dim).ravel() for i in range(shape[dim])]
 
 def pad_multidim_event(
     arr: jnp.ndarray,
@@ -234,16 +271,19 @@ def build_self_attention_mask(
                 mask_np[offA+i, offB+i] = 1
                 mask_np[offB+i, offA+i] = 1
         else:
-            # idx_map is list of pairs of multi-dim coords => flatten them
+            # idx_map is a tuple of matching event dimensions, flatten them to find matching event blocks
             if shapeA is None or shapeB is None:
                 raise ValueError("We cannot interpret multi-dim coords if shape is None")
-            for (coordsA, coordsB) in idx_map:
-                iA = flatten_index_tuple(coordsA, shapeA)
-                iB = flatten_index_tuple(coordsB, shapeB)
-                if iA >= sizeA or iB >= sizeB:
-                    raise IndexError(f"Index out of range for cross_local map: {coordsA}/{coordsB}")
-                mask_np[offA + iA, offB + iB] = 1
-                mask_np[offB + iB, offA + iA] = 1
+            for dim_a, dim_b in zip(shapeA, shapeB):
+                if dim_a >= len(shapeA) or dim_b >= len(shapeB):
+                    raise ValueError("Index map has invalid event shape dimensions")
+                if shapeA[dim_a] != shapeB[dim_b]:
+                    raise ValueError("Cannot do cross_local if event shapes do not match")
+                a_idx = event_indices(shapeA, dim_a)
+                b_idx = event_indices(shapeB, dim_b)
+                for (a, b) in zip(a_idx, b_idx):
+                    mask_np[offA+a, offB+b] = 1
+                    mask_np[offB+b, offA+a] = 1
 
     mask = jnp.array(mask_np, dtype=jnp.float32)
     return mask
@@ -284,11 +324,16 @@ def build_cross_attention_mask(
                 for i in range(q_size):
                     mask_np[q_off + i, k_off + i] = 1
             else:
-                # user-specified pairs => flatten multi-dim indices if needed
-                for (coordsA, coordsB) in idx_map:
-                    iA = flatten_index_tuple(coordsA, q_shape)
-                    iB = flatten_index_tuple(coordsB, k_shape)
-                    mask_np[q_off + iA, k_off + iB] = 1
+                for dim_a, dim_b in zip(q_shape, k_shape):
+                    if dim_a >= len(q_shape) or dim_b >= len(k_shape):
+                        raise ValueError("Index map has invalid event shape dimensions")
+                    if q_shape[dim_a] != k_shape[dim_b]:
+                        raise ValueError("Cannot do cross_local if event shapes do not match")
+                    a_idx = event_indices(q_shape, dim_a)
+                    b_idx = event_indices(k_shape, dim_b)
+                    for (a, b) in zip(a_idx, b_idx):
+                        mask_np[q_off+a, k_off+b] = 1
+                        mask_np[k_off+b, q_off+a] = 1
 
     return jnp.array(mask_np, dtype=jnp.float32)
 
