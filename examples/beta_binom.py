@@ -1,4 +1,5 @@
 import pytest
+
 from jax import numpy as jnp, random as jr
 from tensorflow_probability.substrates.jax import distributions as tfd
 
@@ -12,15 +13,15 @@ from sbijax.nn import make_cnf
 
 from flax import nnx
 
-def test_hierarchical_parameters():
+from jax import tree
+
+def run():
     tol = 1e-3
+    n_bin= 100
     n_rounds = 2
-    global_noise = 1e-1
-    local_noise = 1
-    measurement_noise = 1e-2
     n_simulations = 1_000
     n_epochs = 1_000
-    n_post_samples = 1_000
+    n_post_samples = 10
     n_z = 4
 
     independence = {
@@ -29,14 +30,15 @@ def test_hierarchical_parameters():
     }
 
     # make prior distribution
-    def prior_fn(n_z):
+    def prior_fn(n):
         prior = tfd.JointDistributionNamed(
             dict(
-                theta=tfd.Normal(jnp.zeros((1, 1)), global_noise),
-                z=lambda theta: tfd.Independent(
-                    tfd.Normal(
-                        jnp.repeat(theta, n_z, axis=-2),
-                        local_noise
+                alpha = tfd.Uniform(jnp.zeros((1, 1)), jnp.ones((1, 1))), #type:ignore
+                beta = tfd.Uniform(jnp.zeros((1, 1)), jnp.ones((1, 1))), #type:ignore
+                p = lambda alpha, beta: tfd.Independent(
+                    tfd.Beta(
+                        jnp.repeat(alpha, n, axis=-2),
+                        jnp.repeat(beta, n, axis=-2),
                     ),
                     reinterpreted_batch_ndims=1
                 )
@@ -48,7 +50,7 @@ def test_hierarchical_parameters():
     # make simulator function
     def simulator_fn(seed, theta):
         return {
-            'obs': tfd.Normal(theta['z'], measurement_noise).sample(
+            'obs': tfd.Binomial(theta['p'], n_bin).sample(
                 seed=seed
             )
         }
@@ -59,59 +61,59 @@ def test_hierarchical_parameters():
     theta_truth = prior_fn(n_z).sample((1,), seed=theta_key)
     y_observed = simulator_fn(y_key, theta_truth)
 
-    rngs = nnx.Rngs(0)
-    config = {
-        'latent_dim': 64,
-        'label_dim': 8,
-        'index_out_dim': 0,
-        'n_encoder': 1,
-        'n_decoder': 1,
-        'n_heads': 2,
-        'n_ff': 2,
-        'dropout': .1,
-        'activation': nnx.relu,
-    }
+    # rngs = nnx.Rngs(0)
+    # config = {
+        # 'latent_dim': 64,
+        # 'label_dim': 8,
+        # 'index_out_dim': 0,
+        # 'n_encoder': 1,
+        # 'n_decoder': 1,
+        # 'n_heads': 2,
+        # 'n_ff': 2,
+        # 'dropout': .1,
+        # 'activation': nnx.relu,
+    # }
 
-    nn = Transformer(
-        config,
-        value_dim=1,
-        n_labels=3,
-        index_dim=0,
-        rngs=rngs
-    )
+    # nn = Transformer(
+        # config,
+        # value_dim=1,
+        # n_labels=3,
+        # index_dim=0,
+        # rngs=rngs
+    # )
 
-    model = CNF(transform=nn)
+    # model = CNF(transform=nn)
 
-    estim = SFMPE(model)
+    # estim = SFMPE(model)
 
-    train_key, key = jr.split(key)
-    labels, slices, masks = train_bottom_up(
-        train_key,
-        estim,
-        prior_fn,
-        simulator_fn,
-        ['theta'],
-        ['z'],
-        n_z,
-        n_rounds,
-        n_simulations,
-        n_epochs,
-        y_observed,
-        independence
-    )
+    # train_key, key = jr.split(key)
+    # labels, slices, masks = train_bottom_up(
+        # train_key,
+        # estim,
+        # prior_fn,
+        # simulator_fn,
+        # ['theta'],
+        # ['z'],
+        # n_z,
+        # n_rounds,
+        # n_simulations,
+        # n_epochs,
+        # y_observed,
+        # independence
+    # )
 
-    post_key, key = jr.split(key)
-    posterior = get_posterior(
-        post_key,
-        estim,
-        labels,
-        slices,
-        masks,
-        n_post_samples,
-        theta_truth,
-        y_observed,
-        independence
-    )
+    # post_key, key = jr.split(key)
+    # posterior = get_posterior(
+        # post_key,
+        # estim,
+        # labels,
+        # slices,
+        # masks,
+        # n_post_samples,
+        # theta_truth,
+        # y_observed,
+        # independence
+    # )
 
     print('sbijax')
 
@@ -122,7 +124,7 @@ def test_hierarchical_parameters():
     def sbijax_prior_fn():
         prior = tfd.JointDistributionNamed(
             dict(
-                theta=tfd.Normal(5., global_noise),
+                theta=tfd.Normal(0., global_noise),
                 z=lambda theta: tfd.Independent(
                     tfd.Normal(
                         jnp.full((n_z,), theta),
@@ -151,23 +153,28 @@ def test_hierarchical_parameters():
         sbijax_nn,
     )
 
+    print(theta_truth)
     data, params = None, {}
     for _ in range(n_rounds):
+        sample_key, key = jr.split(key)
         data, params = sbijax_estim.simulate_data_and_possibly_append(
-            jr.PRNGKey(1),
+            sample_key,
             params=params,
             observable=sbijax_y_observed,
             data=data,
-            n_simulations=n_simulations // n_z,
+            n_simulations=n_simulations, #TODO add back // n_z,
         )
+        print(tree.map(lambda x: jnp.mean(x, axis=0), data))
+        train_key, key = jr.split(key)
         params, _ = sbijax_estim.fit(
-            jr.PRNGKey(2),
+            train_key,
             data=data,
             n_iter=n_epochs
         )
 
+    post_key, key = jr.split(key)
     sbijax_posterior, _ = sbijax_estim.sample_posterior(
-        rng_key=jr.PRNGKey(3),
+        rng_key=post_key,
         params=params,
         observable=sbijax_y_observed,
         n_samples=n_post_samples,
@@ -185,9 +192,16 @@ def test_hierarchical_parameters():
         keepdims=True,
         axis=0
     )
-    theta_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
-    z_hat = jnp.mean(posterior['z'], keepdims=True, axis=0)
+    # theta_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
+    # z_hat = jnp.mean(posterior['z'], keepdims=True, axis=0)
+    # print(theta_hat)
+    # print(z_hat)
+    print(sbijax_theta_hat)
+    print(sbijax_z_hat)
     assert sbijax_theta_hat[None,...] == pytest.approx(theta_truth['theta'], tol) # type: ignore
-    assert theta_hat == pytest.approx(theta_truth['theta'], tol) # type: ignore
+    # assert theta_hat == pytest.approx(theta_truth['theta'], tol) # type: ignore
     assert sbijax_z_hat[None,...] == pytest.approx(theta_truth['z'], tol) # type: ignore
-    assert z_hat == pytest.approx(theta_truth['z'], tol) # type: ignore
+    # assert z_hat == pytest.approx(theta_truth['z'], tol) # type: ignore
+
+if __name__ == "__main__":
+    run()
