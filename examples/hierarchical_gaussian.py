@@ -29,7 +29,7 @@ def run():
 
     independence = {
         'local': ['theta', 'obs'],
-        'cross_local': [('theta', 'obs', None)],
+        'cross_local': [('theta', 'obs', (0, 0))],
     }
 
     # make prior distribution
@@ -56,7 +56,7 @@ def run():
             reinterpreted_batch_ndims=1
         ).sample((n_obs,), seed=seed)
         # obs = jnp.swapaxes(obs, 0, -1)[0] #type:ignore
-        obs = jnp.swapaxes(obs, 0, 1) #type:ignore
+        obs = jnp.transpose(obs, (1, 2, 0, 3)) #type:ignore
         return {
             'obs': obs
         }
@@ -67,59 +67,59 @@ def run():
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
     y_observed = simulator_fn(y_key, theta_truth)
 
-    # rngs = nnx.Rngs(0)
-    # config = {
-        # 'latent_dim': 64,
-        # 'label_dim': 8,
-        # 'index_out_dim': 0,
-        # 'n_encoder': 1,
-        # 'n_decoder': 2,
-        # 'n_heads': 2,
-        # 'n_ff': 2,
-        # 'dropout': .1,
-        # 'activation': nnx.relu,
-    # }
+    rngs = nnx.Rngs(0)
+    config = {
+        'latent_dim': 64,
+        'label_dim': 8,
+        'index_out_dim': 0,
+        'n_encoder': 1,
+        'n_decoder': 2,
+        'n_heads': 2,
+        'n_ff': 2,
+        'dropout': .1,
+        'activation': nnx.relu,
+    }
 
-    # nn = Transformer(
-        # config,
-        # value_dim=n_obs,
-        # n_labels=3,
-        # index_dim=0,
-        # rngs=rngs
-    # )
+    nn = Transformer(
+        config,
+        value_dim=1,
+        n_labels=3,
+        index_dim=0,
+        rngs=rngs
+    )
 
-    # model = CNF(transform=nn)
+    model = CNF(transform=nn)
 
-    # estim = SFMPE(model)
+    estim = SFMPE(model)
 
-    # train_key, key = jr.split(key)
-    # labels, slices, masks = train_bottom_up(
-        # train_key,
-        # estim,
-        # prior_fn,
-        # simulator_fn,
-        # ['mu'],
-        # ['theta'],
-        # n_theta,
-        # n_rounds,
-        # n_simulations,
-        # n_epochs,
-        # y_observed,
-        # independence
-    # )
+    train_key, key = jr.split(key)
+    labels, slices, masks = train_bottom_up(
+        train_key,
+        estim,
+        prior_fn,
+        simulator_fn,
+        ['mu'],
+        ['theta'],
+        n_theta,
+        n_rounds,
+        n_simulations,
+        n_epochs,
+        y_observed,
+        independence
+    )
 
-    # post_key, key = jr.split(key)
-    # posterior = get_posterior(
-        # post_key,
-        # estim,
-        # labels,
-        # slices,
-        # masks,
-        # n_post_samples,
-        # theta_truth,
-        # y_observed,
-        # independence
-    # )
+    post_key, key = jr.split(key)
+    posterior = get_posterior(
+        post_key,
+        estim,
+        labels,
+        slices,
+        masks,
+        n_post_samples,
+        theta_truth,
+        y_observed,
+        independence
+    )
 
     print('sbijax')
 
@@ -201,16 +201,16 @@ def run():
         keepdims=True,
         axis=0
     )
-    # theta_hat = jnp.mean(posterior['mu'], keepdims=True, axis=0)
-    # z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
-    # print(theta_hat)
-    # print(z_hat)
+    theta_hat = jnp.mean(posterior['mu'], keepdims=True, axis=0)
+    z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
+    print(theta_hat)
+    print(z_hat)
     print(sbijax_theta_hat)
     print(sbijax_z_hat)
     assert sbijax_theta_hat[None,...] == pytest.approx(theta_truth['theta'], tol) # type: ignore
-    # assert theta_hat == pytest.approx(theta_truth['theta'], tol) # type: ignore
+    assert theta_hat == pytest.approx(theta_truth['theta'], tol) # type: ignore
     assert sbijax_z_hat[None,...] == pytest.approx(theta_truth['z'], tol) # type: ignore
-    # assert z_hat == pytest.approx(theta_truth['z'], tol) # type: ignore
+    assert z_hat == pytest.approx(theta_truth['z'], tol) # type: ignore
 
 if __name__ == "__main__":
     run()

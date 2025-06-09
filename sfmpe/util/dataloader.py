@@ -272,18 +272,16 @@ def build_self_attention_mask(
                 mask_np[offB+i, offA+i] = 1
         else:
             # idx_map is a tuple of matching event dimensions, flatten them to find matching event blocks
-            if shapeA is None or shapeB is None:
-                raise ValueError("We cannot interpret multi-dim coords if shape is None")
-            for dim_a, dim_b in zip(shapeA, shapeB):
-                if dim_a >= len(shapeA) or dim_b >= len(shapeB):
-                    raise ValueError("Index map has invalid event shape dimensions")
-                if shapeA[dim_a] != shapeB[dim_b]:
-                    raise ValueError("Cannot do cross_local if event shapes do not match")
-                a_idx = event_indices(shapeA, dim_a)
-                b_idx = event_indices(shapeB, dim_b)
-                for (a, b) in zip(a_idx, b_idx):
-                    mask_np[offA+a, offB+b] = 1
-                    mask_np[offB+b, offA+a] = 1
+            dim_a, dim_b = idx_map
+            if dim_a >= len(shapeA) or dim_b >= len(shapeB):
+                raise ValueError("Index map has invalid event shape dimensions")
+            if shapeA[dim_a] != shapeB[dim_b]:
+                raise ValueError("Cannot do cross_local if event shapes do not match")
+            a_idx = event_indices(shapeA, dim_a)
+            b_idx = event_indices(shapeB, dim_b)
+            for (a, b) in zip(a_idx, b_idx):
+                mask_np[offA+a, offB+b] = 1
+                mask_np[offB+b, offA+a] = 1
 
     mask = jnp.array(mask_np, dtype=jnp.float32)
     return mask
@@ -324,16 +322,15 @@ def build_cross_attention_mask(
                 for i in range(q_size):
                     mask_np[q_off + i, k_off + i] = 1
             else:
-                for dim_a, dim_b in zip(q_shape, k_shape):
-                    if dim_a >= len(q_shape) or dim_b >= len(k_shape):
-                        raise ValueError("Index map has invalid event shape dimensions")
-                    if q_shape[dim_a] != k_shape[dim_b]:
-                        raise ValueError("Cannot do cross_local if event shapes do not match")
-                    a_idx = event_indices(q_shape, dim_a)
-                    b_idx = event_indices(k_shape, dim_b)
-                    for (a, b) in zip(a_idx, b_idx):
-                        mask_np[q_off+a, k_off+b] = 1
-                        mask_np[k_off+b, q_off+a] = 1
+                dim_a, dim_b = idx_map
+                if dim_a >= len(q_shape) or dim_b >= len(k_shape):
+                    raise ValueError("Index map has invalid event shape dimensions")
+                if q_shape[dim_a] != k_shape[dim_b]:
+                    raise ValueError("Cannot do cross_local if event shapes do not match")
+                a_idx = event_indices(q_shape, dim_a)
+                b_idx = event_indices(k_shape, dim_b)
+                for (a, b) in zip(a_idx, b_idx):
+                    mask_np[q_off+a, k_off+b] = 1
 
     return jnp.array(mask_np, dtype=jnp.float32)
 

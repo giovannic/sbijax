@@ -76,6 +76,8 @@ def train_bottom_up(
             }
         }
 
+        print(tree.map(lambda x: x.shape, z_data))
+
         z_flat, _ = flatten_structured(
             z_data,
             independence=independence
@@ -85,6 +87,9 @@ def train_bottom_up(
             train_data = z_flat
         else:
             train_data = combine_data(train_data, z_flat)
+
+        #TODO: where is the padding mask??
+        print(tree.map(lambda x: x.shape, train_data))
 
         itr_key, key = jr.split(key)
         train_iter, val_iter = flat_as_batch_iterators(
@@ -143,13 +148,18 @@ def train_bottom_up(
         # fit p(theta,z_vec|y_vec)
         data = {
             'theta': {
-                'z': z_vec['z'],
-                'theta': z_sim['y']['theta']
+                l: z_vec[l] #type: ignore
+                for l in local_names
+            } | {
+                g: z_sim['y'][g] #type: ignore
+                for g in global_names
             },
             'y': {
                 'obs': z_sim['y']['obs']
             }
         }
+
+        print(tree.map(lambda x: x.shape, data))
 
         flat_data, data_slices = flatten_structured(
             data,
