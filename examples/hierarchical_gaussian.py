@@ -21,8 +21,8 @@ def run():
     n_simulations = 1_000
     n_epochs = 1_000
     n_post_samples = 10
-    var_theta = 10.
-    var_mu = 10.
+    var_theta = 1.
+    var_mu = 1.
     var_obs = 1.
     n_obs = 50
     n_theta = 20
@@ -55,7 +55,6 @@ def run():
             tfd.Normal(theta['theta'], var_obs),
             reinterpreted_batch_ndims=1
         ).sample((n_obs,), seed=seed)
-        # obs = jnp.swapaxes(obs, 0, -1)[0] #type:ignore
         obs = jnp.transpose(obs, (1, 2, 0, 3)) #type:ignore
         return {
             'obs': obs
@@ -151,8 +150,8 @@ def run():
 
     def sbijax_simulator_fn(seed, theta):
         arg = {
-            'mu': theta['theta'][...,:1],
-            'theta': theta['theta'][...,1:]
+            'mu': theta['theta'][...,:1, None],
+            'theta': theta['theta'][...,1:, None]
         }
         n_samples = arg['mu'].shape[0]
         obs = simulator_fn(seed, arg)['obs']
@@ -203,6 +202,7 @@ def run():
     )
     theta_hat = jnp.mean(posterior['mu'], keepdims=True, axis=0)
     z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
+    print(theta_truth)
     print(theta_hat)
     print(z_hat)
     print(sbijax_theta_hat)

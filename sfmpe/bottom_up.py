@@ -5,7 +5,7 @@ from sfmpe.util.dataloader import (
     combine_data
 )
 
-from jax import numpy as jnp, random as jr, vmap, tree
+from jax import numpy as jnp, random as jr, jit, vmap, tree
 
 def train_bottom_up(
     key,
@@ -23,12 +23,12 @@ def train_bottom_up(
     ):
 
     data = {}
-    flat_data, data_slices = (None, {})
+    flat_data, data_slices = ({'labels': None, 'masks': None}, {})
     train_data = None
-    for _ in range(n_rounds):
+    for i in range(n_rounds):
         # Fit p(z|theta, y)
         theta_key, obs_key, key = jr.split(key, 3)
-        if flat_data is not None and data_slices:
+        if i > 0:
             flat_y_obs, data_slices = flatten_structured(
                 {
                     'theta': data['theta'],
@@ -76,8 +76,6 @@ def train_bottom_up(
             }
         }
 
-        print(tree.map(lambda x: x.shape, z_data))
-
         z_flat, _ = flatten_structured(
             z_data,
             independence=independence
@@ -87,9 +85,6 @@ def train_bottom_up(
             train_data = z_flat
         else:
             train_data = combine_data(train_data, z_flat)
-
-        #TODO: where is the padding mask??
-        print(tree.map(lambda x: x.shape, train_data))
 
         itr_key, key = jr.split(key)
         train_iter, val_iter = flat_as_batch_iterators(
@@ -109,9 +104,14 @@ def train_bottom_up(
         # simulate from p(z_vec|theta, y_vec)
         z_sim = z_data.copy()
         sim_key, key = jr.split(key)
-        z_sim['y']['obs'] = vmap(
-            lambda k: jr.choice(k, z_data['y']['obs'], shape=(n_local,)) # type: ignore
-        )(jr.split(sim_key, n_simulations))
+
+
+        z_sim['y']['obs'] = jr.choice(
+            sim_key,
+            z_data['y']['obs'],
+            shape=(n_local,),
+            axis=1
+        )
 
         # pad z to n_z
         for l in local_names:
@@ -131,19 +131,41 @@ def train_bottom_up(
 
         sample_key, key = jr.split(key)
 
-        z_vec = vmap(
-            lambda key, obs: tree.map(
-                lambda leaf: leaf[0], #TODO: clean up
-                estim.sample_structured_posterior(
-                    key,
-                    jnp.expand_dims(obs, 0),
-                    flat_z_sim['labels'],
-                    z_sim_slices['theta'],
-                    masks=flat_z_sim['masks'],
-                    n_samples=1
-                )
+        print(tree.map(lambda x: x.shape, flat_z_sim))
+        # _ = estim.sample_structured_posterior(
+            # sample_key,
+            # flat_z_sim['data']['y'][0:1],
+            # flat_z_sim['labels'],
+            # z_sim_slices['theta'],
+            # masks=flat_z_sim['masks'],
+            # n_samples=1
+        # )
+        # z_vec = estim.sample_structured_posterior(
+            # sample_key,
+            # flat_z_sim['data']['y'],
+            # flat_z_sim['labels'],
+            # z_sim_slices['theta'],
+            # masks=flat_z_sim['masks'],
+            # n_samples=1
+        # )
+
+        @jit
+        @vmap
+        def sample_for_context(key, context):
+            post = estim.sample_structured_posterior(
+                key,
+                jnp.expand_dims(context, 0),
+                flat_z_sim['labels'],
+                z_sim_slices['theta'],
+                masks=flat_z_sim['masks'],
+                n_samples=1
             )
-        )(jr.split(sample_key, n_simulations), flat_z_sim['data']['y'])
+            return tree.map(lambda leaf: leaf[0], post)
+
+        z_vec = sample_for_context(
+            jr.split(sample_key, n_simulations),
+            flat_z_sim['data']['y']
+        )
 
         # fit p(theta,z_vec|y_vec)
         data = {
@@ -159,8 +181,6 @@ def train_bottom_up(
             }
         }
 
-        print(tree.map(lambda x: x.shape, data))
-
         flat_data, data_slices = flatten_structured(
             data,
             independence=independence
@@ -172,7 +192,6 @@ def train_bottom_up(
         )
 
         train_data = combine_data(train_data, flat_data)
-
         train_key, itr_key, key = jr.split(key, 3)
         train_iter, val_iter = flat_as_batch_iterators(
             itr_key,
@@ -186,12 +205,12 @@ def train_bottom_up(
             n_iter=n_epochs
         )
 
-        # TODO: refactor into structuring code or estimator
-        return (
-            flat_data['labels'],
-            data_slices['theta'],
-            flat_data['masks']
-        )
+    # TODO: refactor into structuring code or estimator
+    return (
+        flat_data['labels'],
+        data_slices['theta'],
+        flat_data['masks']
+    )
 
 
 def get_posterior(
