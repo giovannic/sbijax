@@ -1,16 +1,13 @@
-import numpy as np
 import optax
 from jax import jit
-from absl import logging
 from jax import numpy as jnp
 from jax import random as jr
-from tqdm import tqdm
 
 from ._ne_base import NE
 from .util.data import as_inference_data
-from .util.early_stopping import EarlyStopping
 
 from .util.dataloader import (decode_theta, prod)
+from .train import fit_model
 
 from flax import nnx
 
@@ -219,82 +216,15 @@ class SFMPE(NE):
         n_early_stopping_patience,
         n_early_stopping_delta,
     ):
-        nnx_optimizer = nnx.Optimizer(self.model, optimizer)
-
-        # set model to train
-        self.model.train()
-
-        @nnx.jit
-        def step(model, rng, optimizer, batch):
-            loss, grads = nnx.value_and_grad(_cfm_loss)(
-                model,
-                rng,
-                batch,
-            )
-            optimizer.update(grads)
-            return loss
-
-        losses = np.zeros([n_iter, 2])
-        early_stop = EarlyStopping(
+        fit_model(
+            seed,
+            train_iter,
+            val_iter,
+            optimizer,
+            n_iter,
+            n_early_stopping_patience,
             n_early_stopping_delta,
-            n_early_stopping_patience
         )
-        best_state = nnx.state(self.model)
-        best_loss = np.inf
-        logging.info("training model")
-        for i in (pbar := tqdm(range(n_iter))):
-            train_loss = 0.0
-            rng_key = jr.fold_in(seed, i)
-            for batch in train_iter:
-                train_key, rng_key = jr.split(rng_key)
-                batch_loss = step(
-                    self.model,
-                    train_key,
-                    nnx_optimizer,
-                    batch
-                )
-                train_loss += batch_loss * (
-                    batch['data']["y"].shape[0] / train_iter.num_samples
-                )
-            val_key, rng_key = jr.split(rng_key)
-            self.model.eval()
-            validation_loss = self._validation_loss(
-                val_key,
-                val_iter,
-            )
-            self.model.train()
-            losses[i] = jnp.array([train_loss, validation_loss])
-            pbar.set_description(f"train_loss: {train_loss:.2f}, val_loss: {validation_loss:.2f}")
-
-            _, early_stop = early_stop.update(validation_loss)
-            if early_stop.should_stop:
-                logging.info("early stopping criterion found")
-                break
-            if validation_loss < best_loss:
-                best_loss = validation_loss
-                best_state = nnx.state(self.model)
-
-        # set the model to the best state
-        nnx.update(self.model, best_state)
-        losses = jnp.vstack(losses)[: (i + 1), :] #type: ignore
-        return losses
-
-    def _validation_loss(self, rng_key, val_iter):
-
-        @nnx.jit
-        def body_fn(model, batch_key, batch):
-            loss = _cfm_loss(
-                model,
-                batch_key,
-                batch,
-            )
-            return loss * (batch['data']['y'].shape[0] / val_iter.num_samples)
-
-        loss = 0.0
-        for batch in val_iter:
-            val_key, rng_key = jr.split(rng_key)
-            loss += body_fn(self.model, val_key, batch)
-        return loss
 
     def sample_posterior(
         self,

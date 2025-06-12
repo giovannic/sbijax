@@ -131,24 +131,6 @@ def train_bottom_up(
 
         sample_key, key = jr.split(key)
 
-        print(tree.map(lambda x: x.shape, flat_z_sim))
-        # _ = estim.sample_structured_posterior(
-            # sample_key,
-            # flat_z_sim['data']['y'][0:1],
-            # flat_z_sim['labels'],
-            # z_sim_slices['theta'],
-            # masks=flat_z_sim['masks'],
-            # n_samples=1
-        # )
-        # z_vec = estim.sample_structured_posterior(
-            # sample_key,
-            # flat_z_sim['data']['y'],
-            # flat_z_sim['labels'],
-            # z_sim_slices['theta'],
-            # masks=flat_z_sim['masks'],
-            # n_samples=1
-        # )
-
         @jit
         @vmap
         def sample_for_context(key, context):

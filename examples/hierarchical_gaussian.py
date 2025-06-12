@@ -13,19 +13,17 @@ from sbijax.nn import make_cnf
 
 from flax import nnx
 
-from jax import tree
-
 def run():
     tol = 1e-3
-    n_rounds = 2
+    n_rounds = 10
     n_simulations = 1_000
     n_epochs = 1_000
     n_post_samples = 10
     var_theta = 1.
     var_mu = 1.
     var_obs = 1.
-    n_obs = 50
-    n_theta = 20
+    n_obs = 10
+    n_theta = 5
 
     independence = {
         'local': ['theta', 'obs'],
@@ -171,7 +169,7 @@ def run():
             params=params,
             observable=sbijax_y_observed,
             data=data,
-            n_simulations=n_simulations, #TODO add back // n_theta,
+            n_simulations=n_simulations // n_theta,
         )
         train_key, key = jr.split(key)
         params, _ = sbijax_estim.fit(
@@ -202,6 +200,12 @@ def run():
     )
     theta_hat = jnp.mean(posterior['mu'], keepdims=True, axis=0)
     z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
+    metrics = {
+        'lc2stnf': {
+            'sfmpe': lc2stnf(estim, prior_fn, simulator_fn),
+            'sbijax': lc2stnf(sbijax_estim, sbijax_prior_fn, sbijax_simulator_fn)
+        }
+    }
     print(theta_truth)
     print(theta_hat)
     print(z_hat)

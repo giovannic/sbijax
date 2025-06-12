@@ -52,20 +52,5 @@ class MLPVectorField(nnx.Module):
         x = jnp.concatenate([
             self.embedding(context, context_label, context_index, time, is_context=True),
             theta,
-            # jnp.broadcast_to(
-                # time,
-                # theta.shape[:1] + (1, self.latent_dim)
-            # )
         ], axis=1)
-        # import jax
-        # jax.debug.print('broken {}', x[:2])
-        # jax.debug.print('working {}', jnp.concatenate([
-            # self.embedding(context, context_label, context_index),
-            # theta,
-            # jnp.broadcast_to(
-                # time,
-                # theta.shape[:1] + (1, self.latent_dim)
-            # )
-        # ], axis=1)[:2])
-        # jax.debug.print('time {}', time[:2])
         return self.out_linear(self.mlp(self.in_linear(x)))
