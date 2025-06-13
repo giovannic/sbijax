@@ -1,4 +1,7 @@
 import pytest
+from pathlib import Path
+from typing import Tuple, Callable
+from jaxtyping import PyTree
 
 from jax import numpy as jnp, random as jr
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -7,6 +10,13 @@ from sfmpe.fmpe import SFMPE
 from sfmpe.bottom_up import train_bottom_up, get_posterior
 from sfmpe.nn.make_continuous_flow import CNF
 from sfmpe.nn.transformer.transformer import Transformer
+from sfmpe.lc2stnf import (
+    train_l_c2st_nf_main_classifier,
+    precompute_null_distribution_nf_classifiers,
+    evaluate_l_c2st_nf,
+    BinaryMLPClassifier,
+    lc2st_quant_plot
+)
 
 from sbijax import FMPE
 from sbijax.nn import make_cnf
@@ -200,6 +210,40 @@ def run():
     )
     theta_hat = jnp.mean(posterior['mu'], keepdims=True, axis=0)
     z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
+
+    cal_key, key = jr.split(key)
+    d = create_calibration_dataset(
+        cal_key,
+        sbijax_prior_fn,
+        sbijax_simulator_fn
+    )
+
+    def inverse(theta, x):
+        return estim.inverse_transform(theta, x)
+
+    def inverse_sbijax(theta, x):
+        return sbijax_estim.inverse_transform(theta, x)
+
+    n_cal = 100
+    analyse_key, key = jr.split(key)
+    out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'
+    analyse_lc2stnf(
+        analyse_key,
+        d,
+        inverse,
+        y_observed['obs'],
+        n_cal,
+        out_dir/'sfmpe'
+    )
+    analyse_lc2stnf(
+        analyse_key,
+        d,
+        inverse_sbijax,
+        y_observed['obs'],
+        n_cal,
+        out_dir/'sbijax'
+    )
+
     metrics = {
         'lc2stnf': {
             'sfmpe': lc2stnf(estim, prior_fn, simulator_fn),
@@ -215,6 +259,82 @@ def run():
     assert theta_hat == pytest.approx(theta_truth['theta'], tol) # type: ignore
     assert sbijax_z_hat[None,...] == pytest.approx(theta_truth['z'], tol) # type: ignore
     assert z_hat == pytest.approx(theta_truth['z'], tol) # type: ignore
+
+def analyse_lc2stnf(
+    key: jnp.ndarray,
+    d: Tuple[jnp.ndarray, jnp.ndarray],
+    inverse: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    observation: jnp.ndarray,
+    n_cal: int,
+    out_dir: Path
+    ):
+    # Train main classifier
+    main_key, null_key, key = jr.split(key, 3)
+    n_layers = 1
+    n_null = 5
+    activation = nnx.relu
+    dim = d[0].shape[-1] + d[1].shape[-1]
+    main= BinaryMLPClassifier(
+        dim=dim,
+        n_layers=n_layers,
+        activation=activation,
+        rngs=nnx.Rngs(key),
+    )
+    train_l_c2st_nf_main_classifier(
+        main_key,
+        main,
+        d,
+        inverse,
+        n_cal
+    )
+
+    keys_null = jr.split(null_key, n_null)
+    null_clfs = [
+        BinaryMLPClassifier(
+            dim=dim,
+            n_layers=n_layers,
+            activation=activation,
+            rngs=nnx.Rngs(key_null)
+        )
+        for key_null in keys_null
+    ]
+    train_key, key = jr.split(key)
+    precompute_null_distribution_nf_classifiers(
+        train_key,
+        d,
+        null_clfs,
+    )
+
+    ev_key, key = jr.split(key)
+    null_stats, main_stat, p_value = evaluate_l_c2st_nf(
+        ev_key,
+        observation,
+        main,
+        null_clfs,
+        latent_dim=d[0].shape[-1],
+        Nv=n_cal
+    )
+
+    # Make quant plot
+    lc2st_quant_plot(
+        T_data = main_stat,
+        T_null = null_stats,
+        p_value = p_value,
+        reject = bool(p_value < 0.05),
+        conf_alpha = 0.05,
+        out_path = out_dir / 'quant_plot.png'
+    )
+
+def create_calibration_dataset(
+    key: jnp.ndarray,
+    prior_fn: Callable[..., PyTree],
+    simulator_fn: Callable[..., PyTree]) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    #TODO: update to flatten sfmpe version
+    prior = prior_fn(key)
+    x = prior['theta']
+    y = simulator_fn(prior)
+    y = y['obs'].reshape(y['obs'].shape[0], -1)
+    return x, y
 
 if __name__ == "__main__":
     run()

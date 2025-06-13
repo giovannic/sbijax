@@ -218,6 +218,8 @@ class SFMPE(NE):
     ):
         fit_model(
             seed,
+            self.model,
+            _cfm_loss,
             train_iter,
             val_iter,
             optimizer,
@@ -258,6 +260,8 @@ class SFMPE(NE):
         masks=None,
         n_samples=4_000,
         index=None,
+        theta_0=None,
+        direction='forward'
     ):
         if index is not None:
             context_index = {k: index[k] for k in context.keys()} #TODO: broken. Context will be flat
@@ -294,6 +298,8 @@ class SFMPE(NE):
                 theta_mask=theta_mask,
                 cross_mask=cross_mask,
                 sample_size=n_samples,
+                theta_0=theta_0,
+                direction=direction
             )
 
             return res
