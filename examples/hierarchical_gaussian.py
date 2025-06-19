@@ -25,14 +25,14 @@ from flax import nnx
 
 def run():
     tol = 1e-3
-    n_rounds = 10
+    n_rounds = 2 #TODO: change to 10
     n_simulations = 1_000
     n_epochs = 1_000
     n_post_samples = 10
-    var_theta = 1.
-    var_mu = 1.
+    var_theta = 1. #TODO: change to 10
+    var_mu = 1. #TODO: change to 10
     var_obs = 1.
-    n_obs = 10
+    n_obs = 10 #TODO: scale up
     n_theta = 5
 
     independence = {
@@ -196,10 +196,10 @@ def run():
         n_samples=n_post_samples,
     )
     sbijax_theta_hat_array = jnp.array(sbijax_posterior.posterior.theta).reshape( # type: ignore
-        (n_post_samples, (1 + n_theta))
+        (n_post_samples, -1)
     )
     sbijax_theta_hat = jnp.mean(
-            sbijax_theta_hat_array[..., :1],
+        sbijax_theta_hat_array[..., :1],
         keepdims=True,
         axis=0
     )
@@ -218,11 +218,39 @@ def run():
         sbijax_simulator_fn
     )
 
+    dummy_key = jr.PRNGKey(0)
     def inverse(theta, x):
-        return estim.inverse_transform(theta, x)
+        z_struct = estim.sample_structured_posterior(
+            dummy_key,
+            x,
+            labels,
+            slices,
+            masks=masks,
+            n_samples=1,
+            theta_0=theta,
+            direction='backward'
+        )
+        z = jnp.concatenate([
+            z_struct['mu'].reshape((x.shape[0], -1)),
+            z_struct['theta'].reshape((x.shape[0], -1))
+        ], axis=1)
+        return z
+
 
     def inverse_sbijax(theta, x):
-        return sbijax_estim.inverse_transform(theta, x)
+        z_data = sbijax_estim.sample_posterior(
+            dummy_key,
+            params,
+            x,
+            n_samples=1,
+            theta_0=theta,
+            direction='backward'
+        )
+        z = jnp.concatenate([
+            jnp.ndarray(z_data.posterior.mu.reshape((x.shape[0], -1))), #type:ignore
+            jnp.ndarray(z_data.posterior.theta).reshape((x.shape[0], -1)) #type:ignore
+        ])
+        return z
 
     n_cal = 100
     analyse_key, key = jr.split(key)
@@ -244,12 +272,6 @@ def run():
         out_dir/'sbijax'
     )
 
-    metrics = {
-        'lc2stnf': {
-            'sfmpe': lc2stnf(estim, prior_fn, simulator_fn),
-            'sbijax': lc2stnf(sbijax_estim, sbijax_prior_fn, sbijax_simulator_fn)
-        }
-    }
     print(theta_truth)
     print(theta_hat)
     print(z_hat)

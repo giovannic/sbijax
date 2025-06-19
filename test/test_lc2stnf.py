@@ -189,7 +189,8 @@ def test_evaluate_l_c2st_nf_output(dim, Nv):
     ]
 
     # Evaluate
-    t_stat, p_val = evaluate_l_c2st_nf(
+    #TODO: test null stats
+    _, t_stat, p_val = evaluate_l_c2st_nf(
         rng_key=key,
         xo=xo,
         main_classifier=main_clf,

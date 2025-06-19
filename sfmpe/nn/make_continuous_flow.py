@@ -38,11 +38,14 @@ class CNF(nnx.Module):
         theta_mask,
         cross_mask,
         sample_size=1,
+        theta_0=None,
+        direction='forward',
         ):
-        theta_0= random.normal(
-            rngs.base_dist(),
-            (sample_size,) + theta_shape
-        )
+        if theta_0 is None:
+            theta_0 = random.normal(
+                rngs.base_dist(),
+                (sample_size,) + theta_shape
+            )
 
         def ode_func(theta_t, time, *_):
             theta_t = theta_t.reshape((1,) + theta_0.shape[1:]) # sample x token x feature
@@ -61,12 +64,19 @@ class CNF(nnx.Module):
             )
             return ret.reshape(-1)
 
+        if direction == 'forward':
+            t = jnp.array([0.0, 1.0])
+        elif direction == 'backward':
+            t = jnp.array([1.0, 0.0])
+        else:
+            raise ValueError(f'Unknown direction: {direction}')
+
         # vmap odeint over sample shape
         def solve(theta_0):
             return odeint(
                 ode_func,
                 theta_0,
-                jnp.array([0.0, 1.0]),
+                t,
                 rtol=1e-5,
                 atol=1e-5
             )
