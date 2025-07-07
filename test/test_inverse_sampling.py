@@ -257,6 +257,57 @@ def test_sample_size_parameter_consistency(basic_cnf_setup):
         assert forward_samples.shape == (sample_size, 1, n_dim)
         assert backward_samples.shape == (sample_size, 1, n_dim)
 
-def test_cnf_can_recover_initial_parameters():
-    """Test that CNF can recover initial parameters."""
-    pass
+def test_cnf_can_recover_initial_parameters(basic_cnf_setup):
+    """Test that CNF can recover initial parameters by forward then backward sampling."""
+    cnf, rngs, n_context, n_dim = basic_cnf_setup
+    
+    # Mock context and other parameters
+    context = jnp.zeros((1, n_context))
+    context_label = jnp.ones((1, 1, 1), dtype=jnp.int32)
+    context_index = jnp.zeros((1, 1, 1), dtype=jnp.int32)
+    context_mask = jnp.ones((1, 1, 1))
+    theta_shape = (1, n_dim)
+    theta_label = jnp.ones((1, 1, 1), dtype=jnp.int32)
+    theta_index = jnp.zeros((1, 1, 1), dtype=jnp.int32)
+    theta_mask = jnp.ones((1, 1, 1))
+    cross_mask = jnp.ones((1, 1, 1))
+    
+    # Create initial parameters
+    initial_theta = jnp.array([[[1.0, 2.0]]])
+    
+    # Forward pass: transform from initial parameters
+    forward_samples = cnf.sample(
+        rngs=rngs,
+        context=context,
+        context_label=context_label,
+        context_index=context_index,
+        context_mask=context_mask,
+        theta_shape=theta_shape,
+        theta_label=theta_label,
+        theta_index=theta_index,
+        theta_mask=theta_mask,
+        cross_mask=cross_mask,
+        sample_size=1,
+        theta_0=initial_theta,
+        direction='forward'
+    )
+    
+    # Backward pass: recover initial parameters
+    recovered_theta = cnf.sample(
+        rngs=rngs,
+        context=context,
+        context_label=context_label,
+        context_index=context_index,
+        context_mask=context_mask,
+        theta_shape=theta_shape,
+        theta_label=theta_label,
+        theta_index=theta_index,
+        theta_mask=theta_mask,
+        cross_mask=cross_mask,
+        sample_size=1,
+        theta_0=forward_samples,
+        direction='backward'
+    )
+    
+    # Check that we can recover initial parameters (within numerical tolerance)
+    assert jnp.allclose(initial_theta, recovered_theta, rtol=1e-3, atol=1e-3)
