@@ -1,15 +1,36 @@
 import pytest
 from jax import numpy as jnp
 from jax import random as jr
+from flax import nnx
 
 from sfmpe.fmpe import SFMPE
-from sfmpe.nn import make_cnf
+from sfmpe.nn.make_continuous_flow import CNF
+from sfmpe.nn.transformer.transformer import Transformer
 
 
 def test_fmpe(prior_simulator_tuple):
     tol: float = 1e-3
     y_observed = jnp.array([-1.0, 1.0])
-    estim = SFMPE(prior_simulator_tuple, make_cnf(2))
+    rngs = nnx.Rngs(0)
+    config = {
+        'latent_dim': 64,
+        'label_dim': 8,
+        'index_out_dim': 0,
+        'n_encoder': 1,
+        'n_decoder': 2,
+        'n_heads': 2,
+        'n_ff': 2,
+        'dropout': .1,
+        'activation': nnx.relu,
+    }
+    nn = Transformer(
+        config,
+        value_dim=1,
+        n_labels=3,
+        index_dim=0,
+        rngs=rngs
+    )
+    estim = SFMPE(prior_simulator_tuple, CNF(nn))
     data, params = None, {}
     for _ in range(2):
         data, _ = estim.simulate_data_and_possibly_append(

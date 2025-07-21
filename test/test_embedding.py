@@ -1,4 +1,4 @@
-from .embedding import Embedding
+from sfmpe.nn.transformer.embedding import Embedding
 from jax import numpy as jnp
 import pytest
 

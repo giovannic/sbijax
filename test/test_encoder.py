@@ -1,7 +1,7 @@
 import pytest
 import jax.numpy as jnp
 from flax import nnx
-from .encoder import EncoderBlock, EncoderDecoderBlock
+from sfmpe.nn.transformer.encoder import EncoderBlock, DecoderBlock
 
 @pytest.mark.parametrize('batch_dim', [2])
 @pytest.mark.parametrize('token_dim', [3])
@@ -43,7 +43,7 @@ def test_encoder_decoder_block_forward_pass_dims(
     x= jnp.zeros((batch_dim, token_dim, embed_dim))
     encoded = jnp.zeros((batch_dim, enc_token_dim, embed_dim))
 
-    encoder_block = EncoderDecoderBlock(
+    encoder_block = DecoderBlock(
         n_heads=n_heads,
         dim=embed_dim,
         n_ff=2,

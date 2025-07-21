@@ -1,7 +1,7 @@
 import pytest
 from jax import numpy as jnp
 from flax import nnx
-from .transformer import Transformer
+from sfmpe.nn.transformer.transformer import Transformer
 
 @pytest.mark.parametrize('batch_dim', [4])
 @pytest.mark.parametrize('context_value_dim', [1])
