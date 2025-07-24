@@ -19,7 +19,7 @@ from sfmpe.lc2stnf import (
 from sfmpe.nn.mlp import MLPVectorField
 import optax
 
-n_epochs_train = 10 #1_000
+n_epochs_train = 1_000
 
 def create_transformer_schedule(
     peak_lr: float = 1e-4,
@@ -101,7 +101,6 @@ def create_mlp(rngs, config, dim):
     ]
 )
 def test_lc2stnf_on_learned_distribution_sfmpe(dim, batch_size, num_classifiers, builder):
-    num_classifiers = 10
     key = jr.PRNGKey(0)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
@@ -150,13 +149,12 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, batch_size, num_classifiers,
         val_iter,
         n_iter=n_epochs_train,
         optimizer = optimiser,
-        n_early_stopping_patience=500,
+        n_early_stopping_patience=100,
     )
 
     def inverse(theta, y):
         theta, y = theta[..., None], y[..., None]
         def sample_pair(theta, y):
-            print(theta.shape, y.shape)
             return estim.sample_structured_posterior(
                 key,
                 y[None, ...],
@@ -169,7 +167,6 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, batch_size, num_classifiers,
             )
 
         z = vmap(sample_pair)(theta, y)
-        print(z['theta'].shape)
         return z['theta'].reshape((y.shape[0], -1))
 
     # Create calibration data

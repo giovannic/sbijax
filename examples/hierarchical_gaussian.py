@@ -15,6 +15,7 @@ from sfmpe.lc2stnf import (
     precompute_null_distribution_nf_classifiers,
     evaluate_l_c2st_nf,
     BinaryMLPClassifier,
+    MultiBinaryMLPClassifier,
     lc2st_quant_plot
 )
 
@@ -112,8 +113,6 @@ def run():
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
     y_observed = simulator_fn(y_key, theta_truth)
 
-    
-    
     rngs = nnx.Rngs(0)
     config = {
         'latent_dim': 64,
@@ -383,22 +382,20 @@ def analyse_lc2stnf(
         n_epochs
     )
 
-    keys_null = jr.split(null_key, n_null)
-    null_clfs = [
-        BinaryMLPClassifier(
-            dim=dim,
-            n_layers=n_layers,
-            activation=activation,
-            rngs=nnx.Rngs(key_null)
-        )
-        for key_null in keys_null
-    ]
+    null_key, key = jr.split(null_key)
+    null_cls = MultiBinaryMLPClassifier(
+        dim=dim,
+        n_layers=n_layers,
+        activation=activation,
+        n=n_null,
+        rngs=nnx.Rngs(null_key)
+    )
     train_key, key = jr.split(key)
     print(f'Training {n_null} null classifiers with {n_epochs} epochs')
     precompute_null_distribution_nf_classifiers(
         train_key,
         d,
-        null_clfs,
+        null_cls,
         n_epochs
     )
 
@@ -407,7 +404,7 @@ def analyse_lc2stnf(
         ev_key,
         observation,
         main,
-        null_clfs,
+        null_cls,
         latent_dim=d[0].shape[-1],
         Nv=n_cal
     )

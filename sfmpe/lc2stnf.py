@@ -1,7 +1,7 @@
 from typing import Callable, Tuple
 from pathlib import Path
 from jaxtyping import PyTree
-from jax import random as jr, numpy as jnp, tree
+from jax import random as jr, numpy as jnp, tree, vmap
 from flax import nnx
 import optax
 from .train import fit_model_no_branch
@@ -179,7 +179,7 @@ def precompute_null_distribution_nf_classifiers(
 
     @nnx.vmap
     def fit_multi_classifier(rng_key, params, x, z, labels):
-        # add singleton dimension for multi-classifier training
+        # add singleton dimension for multi-classifier forward pass
         params = tree.map(lambda x: x[None, ...], params)
         classifier = nnx.merge(graphdef, params)
         losses = fit_classifier(
@@ -191,9 +191,15 @@ def precompute_null_distribution_nf_classifiers(
             num_epochs=num_epochs,
             batch_size=batch_size
         )
-        return losses, nnx.state(classifier)
+        # remove singleton dimension
+        params = nnx.state(classifier)
+        params = tree.map(
+            lambda leaf: leaf[0],
+            params
+        )
+        return losses, params
 
-    (train_loss, val_loss), params = fit_multi_classifier(
+    losses, params = fit_multi_classifier(
         jr.split(rng_key, n_classifiers),
         params,
         x_per_classifier,
@@ -201,9 +207,7 @@ def precompute_null_distribution_nf_classifiers(
         labels_per_classifier,
     )
     nnx.update(classifiers, params)
-    print(tree.map(lambda leaf: leaf.shape, (train_loss, val_loss)))
-    print(val_loss[0])
-    print(val_loss[1])
+    return losses
 
 def _ce_loss(model: Classifier, _: jnp.ndarray, batch: PyTree) -> jnp.ndarray:
     """Calculates binary cross-entropy loss for the classifier."""
@@ -282,14 +286,13 @@ def evaluate_l_c2st_nf(
         (Nv, xo.shape[-1])
     )
 
-    d_main = main_classifier(z_eval, xo_expanded)
+    d_null = null_classifier(z_eval, xo_expanded)
+    null_test_statistics = jnp.mean((d_null - 0.5)**2, axis=0)
 
     # Compute Test Statistics
     # t̂MSE0(xo) = (1/Nv) * sum((d(Z_n, xo) - 1/2)^2)
+    d_main = main_classifier(z_eval, xo_expanded)
     t_mse0_val = jnp.mean((d_main - 0.5)**2)
-
-    d_null = null_classifier(z_eval, xo_expanded)
-    null_test_statistics = jnp.mean((d_null - 0.5)**2, axis=0)
 
     # Compute p-value
     # p̂(xo) = (1/NH) * sum(I(t̂h(xo) > t̂MSE0(xo)))

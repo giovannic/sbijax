@@ -164,14 +164,27 @@ def test_precompute_null_distribution(dim, d_size, batch_size, num_classifiers):
 
     post_train_params = nnx.state(null_classifier)
 
+    # Check parameters are same shape
+    assert all(
+        tree.leaves(
+            tree.map(
+                lambda leaf1, leaf2: leaf1.shape == leaf2.shape,
+                pre_train_params,
+                post_train_params
+            )
+        )
+    )
+
+
+    # Check parameters have updated
     changed = tree.map(
         lambda leaf1, leaf2: jnp.any(jnp.abs(leaf1 - leaf2) > delta),
         pre_train_params,
         post_train_params
     )
-    print(tree.map(lambda x, y: x - y, post_train_params, pre_train_params))
     assert all(tree.leaves(changed)), "Expected all classifiers to be updated"
-    # Compare first vs others to ensure not all identical
+
+    # And in different ways
     identical = all(
         tree.leaves(
             tree.map(
@@ -269,4 +282,3 @@ def test_multi_classifier_shapes(dim, n):
 
     prob = cls(z, x)
     assert prob.shape == (n, 100)
-
