@@ -32,7 +32,7 @@ def _cfm_loss(
     n = theta.shape[0]
 
     t_key, rng_key = jr.split(rng_key)
-    times = jr.uniform(t_key, shape=(n,))
+    times = jr.uniform(t_key, shape=(n, 1))
 
     theta_key, rng_key = jr.split(rng_key)
     theta_t = _sample_theta_t(
@@ -89,30 +89,8 @@ class FMPE(NE):
             a tuple of parameters and a tuple of the training information
         """
 
-        losses = self._fit_model_single_round(
-            seed=rng_key,
-            train_iter=train_iter,
-            val_iter=val_iter,
-            optimizer=optimizer,
-            n_iter=n_iter,
-            n_early_stopping_patience=n_early_stopping_patience,
-            n_early_stopping_delta=n_early_stopping_delta,
-        )
-
-        return losses
-
-    def _fit_model_single_round(
-        self,
-        seed,
-        train_iter,
-        val_iter,
-        optimizer,
-        n_iter,
-        n_early_stopping_patience,
-        n_early_stopping_delta,
-    ):
         fit_model(
-            seed,
+            rng_key,
             self.model,
             _cfm_loss,
             train_iter,
@@ -127,6 +105,7 @@ class FMPE(NE):
         self,
         rng_key,
         context,
+        theta_shape,
         n_samples=4_000,
         theta_0=None,
         direction='forward'
@@ -143,6 +122,7 @@ class FMPE(NE):
             res = model.sample(
                 rngs=nnx.Rngs(rng_key),
                 context=context,
+                theta_shape=theta_shape,
                 sample_size=n_samples,
                 theta_0=theta_0,
                 direction=direction
