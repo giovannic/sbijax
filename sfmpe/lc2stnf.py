@@ -29,6 +29,7 @@ class BinaryMLPClassifier(nnx.Module):
     def __init__(
         self,
         dim,
+        latent_dim,
         n_layers,
         activation,
         rngs=nnx.Rngs(0)
@@ -37,11 +38,12 @@ class BinaryMLPClassifier(nnx.Module):
         @nnx.split_rngs(splits=n_layers)
         @nnx.vmap(in_axes=(0,), out_axes=0)
         def create_layer(rngs):
-            return FFLayer(dim, activation, rngs=rngs)
+            return FFLayer(latent_dim, activation, rngs=rngs)
 
         self.layers = create_layer(rngs)
         self.n_layers = n_layers
-        self.output = nnx.Linear(dim, 1, rngs=rngs)
+        self.in_layer = nnx.Linear(dim, latent_dim, rngs=rngs)
+        self.output = nnx.Linear(latent_dim, 1, rngs=rngs)
 
     def __call__(self, z, x):
         @nnx.split_rngs(splits=self.n_layers)
@@ -51,6 +53,7 @@ class BinaryMLPClassifier(nnx.Module):
             return x
 
         x = jnp.concatenate([z, x], axis=-1)
+        x = self.in_layer(x)
         x = forward(x, self.layers)
         x = self.output(x)[..., 0]
         return nnx.sigmoid(x)
@@ -60,6 +63,7 @@ class MultiBinaryMLPClassifier(nnx.Module):
     def __init__(
         self,
         dim: int,
+        latent_dim: int,
         n_layers: int,
         activation: Callable,
         n: int,
@@ -75,7 +79,7 @@ class MultiBinaryMLPClassifier(nnx.Module):
         @nnx.split_rngs(splits=n)
         @nnx.vmap
         def create_classifier(rngs):
-            return BinaryMLPClassifier(dim, n_layers, activation, rngs=rngs)
+            return BinaryMLPClassifier(dim, latent_dim, n_layers, activation, rngs=rngs)
 
         self.classifiers = create_classifier(rngs)
         self.n = n
@@ -119,6 +123,8 @@ def train_l_c2st_nf_main_classifier(
     # Class C=1: (Z_q_n, X_n) where Z_q_n = T_phi_inv(Theta_n, X_n), X_n from D_cal
     # This involves applying the inverse NF transformation to the true (theta, x) pairs.
     z_q_c1_samples = inverse_transform(theta_cal, x_cal)
+    print(f'z mean: {jnp.mean(z_q_c1_samples)}')
+    print(f'z std: {jnp.std(z_q_c1_samples)}')
     x_c1_samples = x_cal # Use original X_n from D_cal
 
     # Combine data and labels for training
@@ -153,6 +159,7 @@ def precompute_null_distribution_nf_classifiers(
     """
     theta_cal, x_cal = calibration_data
     N_cal = x_cal.shape[0]
+    x_dim = x_cal.shape[1]
     m = theta_cal.shape[1]
     n_classifiers = classifiers.n
 
@@ -166,7 +173,7 @@ def precompute_null_distribution_nf_classifiers(
     )
     x_per_classifier = jnp.broadcast_to(
         jnp.tile(x_cal, (2, 1))[None, ...],
-        (n_classifiers, N_cal * 2, m)
+        (n_classifiers, N_cal * 2, x_dim)
     ) # X_n from D_cal
 
     labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)

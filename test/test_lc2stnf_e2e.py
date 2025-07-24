@@ -23,7 +23,7 @@ from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.nn.vanilla_mlp import VanillaMLPVectorField
 import optax
 
-n_epochs_train = 100
+n_epochs_train = 1_000
 
 def create_transformer_schedule(
     peak_lr: float = 1e-4,
@@ -70,13 +70,14 @@ def create_transformer(rngs, config, dim):
         index_dim=0,
         rngs=rngs
     )
-    optimiser = optax.adam(
-        create_transformer_schedule(
-            peak_lr=3e-4,
-            warmup_steps=int(0.5 * n_epochs_train),
-            total_steps=n_epochs_train
-        )
-    )
+    optimiser = optax.adam(3e-4)
+    # optimiser = optax.adam(
+        # create_transformer_schedule(
+            # peak_lr=3e-4,
+            # warmup_steps=int(0.5 * n_epochs_train),
+            # total_steps=n_epochs_train
+        # )
+    # )
 
     return estimator, optimiser
 
@@ -131,7 +132,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, batch_size, num_classifiers,
     sample_key, key = jr.split(key)
     theta = jr.normal(sample_key, (batch_size, 1, dim))
 
-    sigma = 1e-2
+    sigma = 1e-5
     noise = jr.normal(sample_key, theta.shape) * sigma
     y = theta + noise
     data = {
@@ -184,6 +185,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, batch_size, num_classifiers,
     activation = nnx.relu
     main = BinaryMLPClassifier(
         dim=dim * 2,
+        latent_dim=64,
         n_layers=n_layers,
         activation=activation,
         rngs=rngs,
@@ -201,6 +203,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, batch_size, num_classifiers,
     # Initialize null classifiers
     null_classifier = MultiBinaryMLPClassifier(
         dim=dim * 2,
+        latent_dim=64,
         n_layers=2,
         activation=nnx.relu,
         n=num_classifiers,
@@ -232,26 +235,27 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, batch_size, num_classifiers,
     assert p_value > 0.05
 
 @pytest.mark.parametrize(
-    "dim,batch_size,num_classifiers",
+    "dim,train_size,cal_size,num_classifiers",
     [
-        (1, 1_000, 100),
+        (1, 10_000, 1_000, 100),
     ],
 )
-def test_lc2stnf_on_learned_distribution_fmpe(dim, batch_size, num_classifiers):
+def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_classifiers):
     key = jr.PRNGKey(0)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
     n_epochs = 100
+    n_obs = 10
 
     nn = VanillaMLPVectorField(
         theta_dim=dim,
-        context_dim=dim,
+        context_dim=dim * n_obs,
         latent_dim=64,
         n_layers=1,
         dropout=.1,
         activation=nnx.relu
     )
-    optimiser = optax.adam(1e-3)
+    optimiser = optax.adam(3e-4)
 
     model = VanillaCNF(transform=nn)
 
@@ -259,11 +263,11 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, batch_size, num_classifiers):
 
     # Create training data
     sample_key, key = jr.split(key)
-    theta = jr.normal(sample_key, (batch_size, dim))
+    theta = jr.normal(sample_key, (train_size, dim))
 
-    sigma = 1e-2
-    noise = jr.normal(sample_key, theta.shape) * sigma
-    y = theta + noise
+    sigma = 1e-5
+    noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
+    y = jnp.tile(theta, (1, n_obs)) + noise
     data = {
         'data': {
             'theta': theta,
@@ -275,7 +279,7 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, batch_size, num_classifiers):
     train_iter, val_iter = as_batch_iterators(
         itr_key,
         data,
-        batch_size=100,
+        batch_size=train_size // 10,
         split=.8,
         shuffle=True
     )
@@ -304,15 +308,17 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, batch_size, num_classifiers):
 
     # Create calibration data
     key_theta, key_x, key = jr.split(key, 3)
-    theta_cal = jr.normal(key_theta, (batch_size, dim))
-    x_cal = theta_cal + jr.normal(key_x, theta_cal.shape) * sigma
+    theta_cal = jr.normal(key_theta, (cal_size, dim))
+    x_cal = jnp.tile(theta_cal, (1, n_obs)) + \
+            jr.normal(key_x, (cal_size, dim * n_obs)) * sigma
     calibration_data = (theta_cal, x_cal)
 
     # Train main classifier
     n_layers = 1
     activation = nnx.relu
     main = BinaryMLPClassifier(
-        dim=dim * 2,
+        dim=dim + dim * n_obs,
+        latent_dim=64,
         n_layers=n_layers,
         activation=activation,
         rngs=rngs,
@@ -329,7 +335,8 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, batch_size, num_classifiers):
 
     # Initialize null classifiers
     null_classifier = MultiBinaryMLPClassifier(
-        dim=dim * 2,
+        dim=dim + dim * n_obs,
+        latent_dim=64,
         n_layers=2,
         activation=nnx.relu,
         n=num_classifiers,
@@ -345,8 +352,20 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, batch_size, num_classifiers):
     )
 
     # Evaluate LC2ST-NF
-    ev_key, key = jr.split(key)
-    observation = jr.normal(ev_key, (dim,))
+    ev_key, ev_noise_key, key = jr.split(key, 3)
+    theta_truth = jr.normal(ev_key, (dim,))
+    obs_noise = jr.normal(ev_noise_key, (dim * n_obs,)) * sigma
+    observation = jnp.tile(theta_truth, (n_obs,)) + obs_noise * sigma
+    posterior = estim.sample_posterior(
+        key,
+        observation[None,...],
+        theta_shape = (dim,),
+        n_samples=100
+    )
+    print(f'truth: {theta_truth}')
+    print(f'observation: {observation}')
+    print(f'posterior mean: {jnp.mean(posterior)}')
+    print(f'posterior std: {jnp.std(posterior)}')
     n_cal = 100
     null_stats, main_stat, p_value = evaluate_l_c2st_nf(
         ev_key,

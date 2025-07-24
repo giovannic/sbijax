@@ -15,11 +15,22 @@ class MLPVectorField(nnx.Module):
             config['latent_dim'],
             rngs=rngs
         )
-        self.in_linear = nnx.LinearGeneral(
-            (in_dim, config['latent_dim']),
+        # self.in_linear = nnx.LinearGeneral(
+            # (in_dim, config['latent_dim']),
+            # config['latent_dim'],
+            # rngs=rngs,
+            # axis=(-2, -1)
+        # )
+        # self.in_linear = nnx.LinearGeneral(
+            # (in_dim + 1, value_dim),
+            # config['latent_dim'],
+            # rngs=rngs,
+            # axis=(-2, -1)
+        # )
+        self.in_linear = nnx.Linear(
+            (in_dim * value_dim + 1),
             config['latent_dim'],
-            rngs=rngs,
-            axis=(-2, -1)
+            rngs=rngs
         )
         self.mlp = MLP(
             dim=config['latent_dim'],
@@ -28,7 +39,7 @@ class MLPVectorField(nnx.Module):
             activation=config['activation'],
             rngs=rngs
         )
-        self.out_linear= nnx.LinearGeneral(
+        self.out_linear = nnx.LinearGeneral(
             config['latent_dim'],
             (out_dim, 1),
             rngs=rngs,
@@ -48,15 +59,21 @@ class MLPVectorField(nnx.Module):
         cross_mask,
         time,
         ):
-        theta = self.embedding(theta, theta_label, theta_index, time)
-        context = self.embedding(
-            context,
-            context_label,
-            context_index,
-            time,
-            is_context=True
-        )
-        x = jnp.concatenate([context, theta], axis=1)
+        # theta = self.embedding(theta, theta_label, theta_index, time)
+        # context = self.embedding(
+            # context,
+            # context_label,
+            # context_index,
+            # time,
+            # is_context=True
+        # )
+        # x = jnp.concatenate([context, theta, time], axis=1)
+        x = jnp.concatenate([
+            context.reshape(context.shape[0], -1),
+            theta.reshape(theta.shape[0], -1),
+            time.reshape(time.shape[0], -1),
+        ], axis=-1)
+        # x = jnp.concatenate([context, theta, time], axis=1)
         x = self.in_linear(x)
         x = self.mlp(x)
         return self.out_linear(x)
