@@ -92,7 +92,6 @@ def make_attention_masks(masks):
 
     return theta_mask, context_mask, cross_mask
 
-
 def _cfm_loss(
     model,
     rng_key,

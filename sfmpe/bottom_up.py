@@ -4,6 +4,7 @@ from sfmpe.util.dataloader import (
     pad_multidim_event,
     combine_data
 )
+import optax
 
 from jax import numpy as jnp, random as jr, jit, vmap, tree
 
@@ -19,7 +20,10 @@ def train_bottom_up(
     n_simulations,
     n_epochs,
     y_observed,
-    independence
+    independence,
+    n_early_stopping_patience=10,
+    n_early_stopping_delta=1e-3,
+    optimiser=optax.adam(0.0003),
     ):
 
     data = {}
@@ -61,7 +65,7 @@ def train_bottom_up(
                 sample_shape=(n_simulations,)
             )
 
-        y_samples= simulator_fn(obs_key, theta_samples)
+        y_samples = simulator_fn(obs_key, theta_samples)
 
         z_data = {
             'theta': {
@@ -98,13 +102,15 @@ def train_bottom_up(
             fit_key,
             train_iter,
             val_iter,
-            n_iter=n_epochs
+            n_iter=n_epochs,
+            n_early_stopping_patience=n_early_stopping_patience,
+            n_early_stopping_delta=n_early_stopping_delta,
+            optimizer=optimiser
         )
 
         # simulate from p(z_vec|theta, y_vec)
         z_sim = z_data.copy()
         sim_key, key = jr.split(key)
-
 
         z_sim['y']['obs'] = jr.choice(
             sim_key,
@@ -184,7 +190,10 @@ def train_bottom_up(
             train_key,
             train_iter,
             val_iter,
-            n_iter=n_epochs
+            n_iter=n_epochs,
+            n_early_stopping_patience=n_early_stopping_patience,
+            n_early_stopping_delta=n_early_stopping_delta,
+            optimizer=optimiser
         )
 
     # TODO: refactor into structuring code or estimator

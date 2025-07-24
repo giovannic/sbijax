@@ -3,6 +3,7 @@ from jax import numpy as jnp, random as jr, tree
 import flax.nnx as nnx
 from sfmpe.lc2stnf import (
     BinaryMLPClassifier,
+    MultiBinaryMLPClassifier,
     train_l_c2st_nf_main_classifier,
     precompute_null_distribution_nf_classifiers,
     evaluate_l_c2st_nf
@@ -54,13 +55,13 @@ def test_binary_mlp_shape(dim, n_layers, activation, batch_size):
     )
 
 @pytest.mark.parametrize(
-    "dim,batch_size",
+    "dim,d_size,batch_size",
     [
-        (8, 100),  # 100 samples, single batch
-        (16, 200)  # 200 samples
+        (8, 100, 10),
+        (16, 200, 20)
     ],
 )
-def test_train_main_classifier_updates_params(dim, batch_size):
+def test_train_main_classifier_updates_params(dim, d_size, batch_size):
     """
     Test that train_l_c2st_nf_main_classifier runs for 1 epoch and updates classifier parameters.
     """
@@ -75,8 +76,8 @@ def test_train_main_classifier_updates_params(dim, batch_size):
     )
     # Generate calibration data
     key_theta, key_x = jr.split(key)
-    theta_cal = jr.normal(key_theta, (batch_size, dim))
-    x_cal = jr.normal(key_x, (batch_size, dim))
+    theta_cal = jr.normal(key_theta, (d_size, dim))
+    x_cal = jr.normal(key_x, (d_size, dim))
     calibration_data = (theta_cal, x_cal)
 
     # Inverse transform for testing
@@ -92,6 +93,7 @@ def test_train_main_classifier_updates_params(dim, batch_size):
         calibration_data=calibration_data,
         inverse_transform=inverse_transform,
         num_epochs=1,
+        batch_size=batch_size
     )
 
     # Check that at least one parameter has changed
@@ -103,58 +105,87 @@ def test_train_main_classifier_updates_params(dim, batch_size):
     assert params_changed, "Expected classifier parameters to update after training"
 
 @pytest.mark.parametrize(
-    "dim,batch_size,num_classifiers",
+    "dim,d_size,batch_size,num_classifiers",
     [
-        (8, 100, 3),  # 3 null classifiers
-        (16, 200, 5)  # 5 null classifiers
+        (8, 100, 10, 3),  # 3 null classifiers
+        (16, 200, 10, 5)  # 5 null classifiers
     ],
 )
-def test_precompute_null_distribution(dim, batch_size, num_classifiers):
+def test_precompute_null_distribution(dim, d_size, batch_size, num_classifiers):
     """
     Test that precompute_null_distribution_nf_classifiers trains multiple null classifiers
     with fresh RNGs and results differ.
     """
     key = jr.PRNGKey(0)
     # Split key for each classifier
-    keys = jr.split(key, num_classifiers)
-    # Initialize null classifiers
-    null_cls_list = [
-        BinaryMLPClassifier(
-            dim=dim * 2,
-            n_layers=2,
-            activation=nnx.relu,
-            rngs=nnx.Rngs(k),
-        )
-        for k in keys
-    ]
+
+    # Initialize null classifier
+    null_classifier = MultiBinaryMLPClassifier(
+        dim=dim * 2,
+        n_layers=2,
+        activation=nnx.relu,
+        n=num_classifiers,
+        rngs=nnx.Rngs(0)
+    )
 
     # Create calibration data
     key_theta, key_x = jr.split(key)
-    theta_cal = jr.normal(key_theta, (batch_size, dim))
-    x_cal = jr.normal(key_x, (batch_size, dim))
+    theta_cal = jr.normal(key_theta, (d_size, dim))
+    x_cal = jr.normal(key_x, (d_size, dim))
     calibration_data = (theta_cal, x_cal)
+
+    pre_train_params = nnx.state(null_classifier)
+    assert all(
+        tree.leaves(
+            tree.map(lambda leaf: leaf.shape[0] == num_classifiers, pre_train_params)
+        )
+    )
+    delta = 1e-5
+
+    # Compare first vs others to ensure not all identical
+    identical = all(
+        tree.leaves(
+            tree.map(
+                lambda leaf: jnp.all(jnp.diff(leaf, axis=0) < delta),
+                pre_train_params
+            )
+        )
+    )
+    assert not identical, "Expected at least two null classifiers to have different parameters"
 
     # Precompute null distribution classifiers
     precompute_null_distribution_nf_classifiers(
         rng_key=key,
         calibration_data=calibration_data,
-        classifiers=null_cls_list,
+        classifiers=null_classifier,
         num_epochs=1,
+        batch_size=batch_size
     )
 
-    # Verify each has params and at least two differ
-    all_params = [tree.leaves(nnx.state(c)) for c in null_cls_list]
+    post_train_params = nnx.state(null_classifier)
+
+    changed = tree.map(
+        lambda leaf1, leaf2: jnp.any(jnp.abs(leaf1 - leaf2) > delta),
+        pre_train_params,
+        post_train_params
+    )
+    print(tree.map(lambda x, y: x - y, post_train_params, pre_train_params))
+    assert all(tree.leaves(changed)), "Expected all classifiers to be updated"
     # Compare first vs others to ensure not all identical
     identical = all(
-        all(jnp.allclose(p0, p1) for p0, p1 in zip(all_params[0], params))
-        for params in all_params[1:]
+        tree.leaves(
+            tree.map(
+                lambda leaf: jnp.all(jnp.diff(leaf, axis=0) < delta),
+                post_train_params
+            )
+        )
     )
     assert not identical, "Expected at least two null classifiers to have different parameters"
 
 @pytest.mark.parametrize(
     "dim,Nv",
     [
-        (8, 10),  # small dim and validation size
+        (8, 10),
         (16, 20),
     ],
 )
@@ -177,24 +208,20 @@ def test_evaluate_l_c2st_nf_output(dim, Nv):
 
     # Null classifiers
     num_null = 3
-    keys_null = jr.split(key, num_null)
-    null_clfs = [
-        BinaryMLPClassifier(
-            dim=dim * 2,
-            n_layers=2,
-            activation=nnx.relu,
-            rngs=nnx.Rngs(k),
-        )
-        for k in keys_null
-    ]
-
+    rngs = nnx.Rngs(0)
+    null_clf = MultiBinaryMLPClassifier(
+        dim=dim*2,
+        n_layers=2,
+        activation=nnx.relu,
+        n=num_null,
+        rngs=rngs,
+    )
     # Evaluate
-    #TODO: test null stats
     _, t_stat, p_val = evaluate_l_c2st_nf(
         rng_key=key,
         xo=xo,
         main_classifier=main_clf,
-        null_classifiers=null_clfs,
+        null_classifier=null_clf,
         latent_dim=dim,
         Nv=Nv,
     )
@@ -206,3 +233,40 @@ def test_evaluate_l_c2st_nf_output(dim, Nv):
             f"Expected shape (), got {arr.shape}"
         )
         assert arr >= 0, "Expected non-negative values"
+
+@pytest.mark.parametrize(
+    "dim,n",
+    [
+        (8, 3),
+        (16, 5),
+    ],
+)
+def test_multi_classifier_shapes(dim, n):
+    """
+    Test that the multi classifier initialises parameters with the correct shapes
+    and when called outputs probabilities with the correct shape.
+    """
+    # Initialize null classifier
+    cls = MultiBinaryMLPClassifier(
+        dim=dim * 2,
+        n_layers=2,
+        activation=nnx.relu,
+        n=n,
+        rngs=nnx.Rngs(0)
+    )
+
+    state = nnx.state(cls)
+
+    assert all(
+        tree.leaves(
+            tree.map(lambda leaf: leaf.shape[0] == n, state)
+        )
+    )
+
+    # Create input data
+    x = jnp.zeros((100, dim))
+    z = jnp.zeros((100, dim))
+
+    prob = cls(z, x)
+    assert prob.shape == (n, 100)
+

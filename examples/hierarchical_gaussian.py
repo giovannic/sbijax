@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Tuple, Callable
 from jaxtyping import PyTree
 
-from jax import numpy as jnp, random as jr
+from jax import numpy as jnp, random as jr, vmap
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 from sfmpe.fmpe import SFMPE
@@ -22,10 +22,48 @@ from sbijax import FMPE
 from sbijax.nn import make_cnf
 
 from flax import nnx
+import optax
+
+def create_transformer_schedule(
+    peak_lr: float = 1e-4,
+    warmup_steps: int = 4000,
+    total_steps: int = 100000,
+    end_lr_factor: float = 0.01
+):
+    """
+    Creates a learning rate schedule with linear warmup followed by cosine decay.
+    
+    Args:
+        peak_lr: Maximum learning rate reached after warmup
+        warmup_steps: Number of steps for linear warmup
+        total_steps: Total number of training steps
+        end_lr_factor: Final LR as fraction of peak_lr (e.g., 0.01 = 1% of peak)
+    
+    Returns:
+        optax schedule function
+    """
+    
+    warmup_schedule = optax.constant_schedule(peak_lr)
+    
+    # Cosine decay from peak_lr to end_lr
+    cosine_schedule = optax.cosine_decay_schedule(
+        init_value=peak_lr,
+        decay_steps=total_steps - warmup_steps,
+        alpha=end_lr_factor  # End LR = alpha * init_value
+    )
+    
+    # Combine schedules
+    schedule = optax.join_schedules(
+        schedules=[warmup_schedule, cosine_schedule],
+        boundaries=[warmup_steps]
+    )
+    
+    return schedule
+
 
 def run():
     tol = 1e-3
-    n_rounds = 2 #TODO: change to 10
+    n_rounds =  2 #TODO: change to 10
     n_simulations = 1_000
     n_epochs = 1_000
     n_post_samples = 10
@@ -36,7 +74,7 @@ def run():
     n_theta = 5
 
     independence = {
-        'local': ['theta', 'obs'],
+        'local': ['theta', 'obs'], # Shouldn't this be commented out?
         'cross_local': [('theta', 'obs', (0, 0))],
     }
 
@@ -74,6 +112,8 @@ def run():
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
     y_observed = simulator_fn(y_key, theta_truth)
 
+    
+    
     rngs = nnx.Rngs(0)
     config = {
         'latent_dim': 64,
@@ -112,7 +152,14 @@ def run():
         n_simulations,
         n_epochs,
         y_observed,
-        independence
+        independence,
+        n_early_stopping_patience=500,
+        n_early_stopping_delta=1e-3,
+        optimiser=optax.adam(create_transformer_schedule(
+            peak_lr=3e-4,
+            warmup_steps=int(0.1 * n_epochs),
+            total_steps=n_epochs
+        ))
     )
 
     post_key, key = jr.split(key)
@@ -212,24 +259,32 @@ def run():
     z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
 
     cal_key, key = jr.split(key)
+    n_cal = 10_000
     d = create_calibration_dataset(
         cal_key,
-        sbijax_prior_fn,
-        sbijax_simulator_fn
+        prior_fn,
+        simulator_fn,
+        n_theta,
+        n_cal,
     )
 
     dummy_key = jr.PRNGKey(0)
+
     def inverse(theta, x):
-        z_struct = estim.sample_structured_posterior(
-            dummy_key,
-            x,
-            labels,
-            slices,
-            masks=masks,
-            n_samples=1,
-            theta_0=theta,
-            direction='backward'
-        )
+        theta, x = theta[..., None], x[..., None]
+        def sample_pair(theta, x):
+            return estim.sample_structured_posterior(
+                key,
+                x[None, ...],
+                labels,
+                slices,
+                masks=masks,
+                n_samples=1,
+                theta_0=theta[None, ...],
+                direction='backward'
+            )
+
+        z_struct = vmap(sample_pair)(theta, x)
         z = jnp.concatenate([
             z_struct['mu'].reshape((x.shape[0], -1)),
             z_struct['theta'].reshape((x.shape[0], -1))
@@ -238,6 +293,9 @@ def run():
 
 
     def inverse_sbijax(theta, x):
+        #TODO: this is going to fail
+        import warnings
+        warnings.warn('this is going to fail')
         z_data = sbijax_estim.sample_posterior(
             dummy_key,
             params,
@@ -252,14 +310,15 @@ def run():
         ])
         return z
 
-    n_cal = 100
+    n_cal_epochs = 100
     analyse_key, key = jr.split(key)
     out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'
     analyse_lc2stnf(
         analyse_key,
         d,
         inverse,
-        y_observed['obs'],
+        y_observed['obs'].reshape(-1),
+        n_cal_epochs,
         n_cal,
         out_dir/'sfmpe'
     )
@@ -269,6 +328,7 @@ def run():
         inverse_sbijax,
         y_observed['obs'],
         n_cal,
+        n_cal_epochs,
         out_dir/'sbijax'
     )
 
@@ -287,27 +347,40 @@ def analyse_lc2stnf(
     d: Tuple[jnp.ndarray, jnp.ndarray],
     inverse: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
     observation: jnp.ndarray,
+    n_epochs: int,
     n_cal: int,
     out_dir: Path
     ):
+    """
+    Analyse LC2ST-NF
+
+    Input:
+        key: JAX PRNG key for reproducibility.
+        d: Tuple of (Theta_n, X_n) sampled from p(theta, x). Expects a flat dataset
+        inverse: Callable that applies the inverse NF transformation .
+        observation: Observation.
+        n_cal: Number of calibration samples.
+        out_dir: Output directory.
+    """
     # Train main classifier
     main_key, null_key, key = jr.split(key, 3)
     n_layers = 1
-    n_null = 5
+    n_null = 100
     activation = nnx.relu
     dim = d[0].shape[-1] + d[1].shape[-1]
-    main= BinaryMLPClassifier(
+    main = BinaryMLPClassifier(
         dim=dim,
         n_layers=n_layers,
         activation=activation,
         rngs=nnx.Rngs(key),
     )
+    print(f'Training main classifier with {n_epochs} epochs')
     train_l_c2st_nf_main_classifier(
         main_key,
         main,
         d,
         inverse,
-        n_cal
+        n_epochs
     )
 
     keys_null = jr.split(null_key, n_null)
@@ -321,10 +394,12 @@ def analyse_lc2stnf(
         for key_null in keys_null
     ]
     train_key, key = jr.split(key)
+    print(f'Training {n_null} null classifiers with {n_epochs} epochs')
     precompute_null_distribution_nf_classifiers(
         train_key,
         d,
         null_clfs,
+        n_epochs
     )
 
     ev_key, key = jr.split(key)
@@ -344,18 +419,34 @@ def analyse_lc2stnf(
         p_value = p_value,
         reject = bool(p_value < 0.05),
         conf_alpha = 0.05,
-        out_path = out_dir / 'quant_plot.png'
+        out_path = out_dir / 'quant_plot.jpg'
+    )
+
+def _flatten(x: PyTree) -> jnp.ndarray:
+    """
+    Flatten a batched SFMPE PyTree into a 2D array.
+
+    SFMPE PyTrees are dicts with the (name, samples) items for each variable.
+    Samples are shaped as (batch_dims, event_dims, sample_dim). Sample dims are always 1. In this example batch dims are 1. And so the remaining dims to be flattened are the event dims.
+    """
+    return jnp.concatenate(
+        [v.reshape(v.shape[0], -1) for v in x.values()],
+        axis=-1
     )
 
 def create_calibration_dataset(
     key: jnp.ndarray,
     prior_fn: Callable[..., PyTree],
-    simulator_fn: Callable[..., PyTree]) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    simulator_fn: Callable[..., PyTree],
+    n_theta: int,
+    n: int
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    prior_key, sim_key = jr.split(key)
     #TODO: update to flatten sfmpe version
-    prior = prior_fn(key)
-    x = prior['theta']
-    y = simulator_fn(prior)
-    y = y['obs'].reshape(y['obs'].shape[0], -1)
+    prior = prior_fn(n_theta).sample((n,), seed=prior_key)
+    x = _flatten(prior)
+    y = simulator_fn(sim_key, prior)
+    y = _flatten(y)
     return x, y
 
 if __name__ == "__main__":

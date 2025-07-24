@@ -49,8 +49,14 @@ class MLPVectorField(nnx.Module):
         time,
         ):
         theta = self.embedding(theta, theta_label, theta_index, time)
-        x = jnp.concatenate([
-            self.embedding(context, context_label, context_index, time, is_context=True),
-            theta,
-        ], axis=1)
-        return self.out_linear(self.mlp(self.in_linear(x)))
+        context = self.embedding(
+            context,
+            context_label,
+            context_index,
+            time,
+            is_context=True
+        )
+        x = jnp.concatenate([context, theta], axis=1)
+        x = self.in_linear(x)
+        x = self.mlp(x)
+        return self.out_linear(x)

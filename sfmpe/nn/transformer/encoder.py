@@ -112,7 +112,7 @@ class DecoderBlock(nnx.Module):
             decode=False,
             rngs=rngs
         )
-        self.norm= nnx.LayerNorm(dim, rngs=rngs)
+        self.norm = nnx.LayerNorm(dim, rngs=rngs)
         self.ff = MLP(
             dim=dim,
             n_layers=n_ff,

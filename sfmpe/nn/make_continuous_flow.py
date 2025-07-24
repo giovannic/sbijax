@@ -46,6 +46,8 @@ class CNF(nnx.Module):
                 rngs.base_dist(),
                 (sample_size,) + theta_shape
             )
+        else:
+            assert theta_0.shape == (sample_size,) + theta_shape, f'Expected theta_0 to have shape {(sample_size,) + theta_shape} but got {theta_0.shape}'
 
 
         if direction == 'forward':

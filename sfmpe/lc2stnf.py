@@ -1,11 +1,10 @@
-from typing import Callable, List, Tuple
+from typing import Callable, Tuple
 from pathlib import Path
 from jaxtyping import PyTree
-from jax import random as jr, numpy as jnp
+from jax import random as jr, numpy as jnp, tree
 from flax import nnx
 import optax
-from .util.dataloader import as_batch_iterators
-from .train import fit_model
+from .train import fit_model_no_branch
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -56,12 +55,47 @@ class BinaryMLPClassifier(nnx.Module):
         x = self.output(x)[..., 0]
         return nnx.sigmoid(x)
 
+class MultiBinaryMLPClassifier(nnx.Module):
+
+    def __init__(
+        self,
+        dim: int,
+        n_layers: int,
+        activation: Callable,
+        n: int,
+        rngs=nnx.Rngs(0)
+        ):
+        """
+        dim: int the latent dimension
+        n_layers: int number of layers
+        activation: Callable activation function
+        n: int number of classifiers to map over
+        rngs: nnx.Rngs
+        """
+        @nnx.split_rngs(splits=n)
+        @nnx.vmap
+        def create_classifier(rngs):
+            return BinaryMLPClassifier(dim, n_layers, activation, rngs=rngs)
+
+        self.classifiers = create_classifier(rngs)
+        self.n = n
+
+    def __call__(self, z, x):
+        @nnx.vmap
+        def call_classifier(cls):
+            return cls(z, x)
+
+        return call_classifier(self.classifiers)
+
+Classifier = BinaryMLPClassifier | MultiBinaryMLPClassifier
+
 def train_l_c2st_nf_main_classifier(
         rng_key: jnp.ndarray,
         classifier: BinaryMLPClassifier,
         calibration_data: Tuple[jnp.ndarray, jnp.ndarray], # D_cal = (Theta_cal, X_cal)
         inverse_transform: Callable,
-        num_epochs: int = 100
+        num_epochs: int = 100,
+        batch_size: int = 100
     ):
     """
     ℓ-C2ST-NF – training the main classifier
@@ -98,14 +132,16 @@ def train_l_c2st_nf_main_classifier(
         x,
         z,
         labels,
-        num_epochs=num_epochs
+        num_epochs=num_epochs,
+        batch_size=batch_size
     )
 
 def precompute_null_distribution_nf_classifiers(
 		rng_key,
 		calibration_data: Tuple[jnp.ndarray, jnp.ndarray], # D_cal = (Theta_cal, X_cal)
-		classifiers: List[BinaryMLPClassifier],
-		num_epochs: int = 100
+		classifiers: MultiBinaryMLPClassifier,
+		num_epochs: int = 100,
+        batch_size: int = 100
 	):
     """
     ℓ-C2ST-NF – precompute the null distribution for any estimator.
@@ -118,43 +154,68 @@ def precompute_null_distribution_nf_classifiers(
     theta_cal, x_cal = calibration_data
     N_cal = x_cal.shape[0]
     m = theta_cal.shape[1]
+    n_classifiers = classifiers.n
 
-    for classifier in classifiers:
-        rng_key, z_c0_key, z_c1_key = jr.split(rng_key, 3)
+    rng_key, z_key = jr.split(rng_key)
 
-        # Construct classification training set under the Null [2]
-        # Both classes (C=0 and C=1) now draw their latent samples (Z) from N(0, Im)
-        z_c0_null_samples = jr.normal(z_c0_key, shape=(N_cal, m))
-        x_c0_null_samples = x_cal # X_n from D_cal
+    # Construct classification training set under the Null [2]
+    # Both classes (C=0 and C=1) now draw their latent samples (Z) from N(0, Im)
+    z_per_classifier = jr.normal(
+        z_key,
+        shape=(n_classifiers, N_cal * 2, m)
+    )
+    x_per_classifier = jnp.broadcast_to(
+        jnp.tile(x_cal, (2, 1))[None, ...],
+        (n_classifiers, N_cal * 2, m)
+    ) # X_n from D_cal
 
-        z_c1_null_samples = jr.normal(z_c1_key, shape=(N_cal, m))
-        x_c1_null_samples = x_cal # X_n from D_cal
+    labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)
+    labels_per_classifier = jnp.broadcast_to(
+        labels[None, ...],
+        (n_classifiers, N_cal * 2)
+    )
 
-        z = jnp.concatenate([z_c0_null_samples, z_c1_null_samples], axis=0)
-        x = jnp.concatenate([x_c0_null_samples, x_c1_null_samples], axis=0)
-        labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)
+    graphdef, params = nnx.split(classifiers)
 
-        fit_classifier(
+    @nnx.vmap
+    def fit_multi_classifier(rng_key, params, x, z, labels):
+        # add singleton dimension for multi-classifier training
+        params = tree.map(lambda x: x[None, ...], params)
+        classifier = nnx.merge(graphdef, params)
+        losses = fit_classifier(
             rng_key,
-            classifier, 
+            classifier,
             x,
             z,
             labels,
-            num_epochs=num_epochs
+            num_epochs=num_epochs,
+            batch_size=batch_size
         )
+        return losses, nnx.state(classifier)
 
+    (train_loss, val_loss), params = fit_multi_classifier(
+        jr.split(rng_key, n_classifiers),
+        params,
+        x_per_classifier,
+        z_per_classifier,
+        labels_per_classifier,
+    )
+    nnx.update(classifiers, params)
+    print(tree.map(lambda leaf: leaf.shape, (train_loss, val_loss)))
+    print(val_loss[0])
+    print(val_loss[1])
 
-def _ce_loss(model: BinaryMLPClassifier, _: jnp.ndarray, batch: PyTree) -> jnp.ndarray:
+def _ce_loss(model: Classifier, _: jnp.ndarray, batch: PyTree) -> jnp.ndarray:
     """Calculates binary cross-entropy loss for the classifier."""
     preds = model(batch['data']['z'], batch['data']['x'])
-    labels = batch['data']['y'].astype(jnp.float32) # Ensure shape matches
+    labels = batch['data']['y']
     preds = jnp.clip(preds, 1e-7, 1 - 1e-7) # Clip to avoid log(0)
     loss = -jnp.mean(labels * jnp.log(preds) + (1 - labels) * jnp.log(1 - preds))
     return loss
 
 def fit_classifier(
         seed: jnp.ndarray,
-        classifier: BinaryMLPClassifier, 
+        classifier: Classifier, 
         x: jnp.ndarray,
         z: jnp.ndarray,
         labels: jnp.ndarray,
@@ -163,33 +224,30 @@ def fit_classifier(
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
     ):
 
-    # make iterator from z and x
-    iter_key, seed = jr.split(seed)
-    train_iter, val_iter = as_batch_iterators(
-        iter_key,
-        {"data": {"x": x, "z": z, "y": labels}},
-        batch_size,
-        0.8,
-        shuffle=True
-    )
-    fit_model(
-        seed,
+    data = {"data": {"x": x, "z": z, "y": labels}}
+    split = .8
+    n_train = int(x.shape[0] * split)
+    train = tree.map(lambda x: x[:n_train], data)
+    val = tree.map(lambda x: x[n_train:], data)
+
+    assert n_train % batch_size == 0, f"Batch size ({batch_size}) must divide n_train ({n_train})"
+
+    return fit_model_no_branch(
         classifier,
+        seed,
         loss_fn=_ce_loss,
-        train_iter=train_iter,
-        val_iter=val_iter,
+        train=train,
+        val=val,
         optimizer=optimizer,
         n_iter=num_epochs,
-        n_early_stopping_patience=5,
-        n_early_stopping_delta=0.001
+        batch_size=batch_size
     )
-
 
 def evaluate_l_c2st_nf(
     rng_key: jnp.ndarray,
     xo: jnp.ndarray, # The specific observation for local evaluation
     main_classifier: BinaryMLPClassifier,
-    null_classifiers: List[BinaryMLPClassifier],
+    null_classifier: MultiBinaryMLPClassifier,
     latent_dim: int,
     Nv: int # Number of validation samples
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -209,35 +267,36 @@ def evaluate_l_c2st_nf(
     # Create a batched version of the classifier's apply function for efficiency
     # This maps over the Nv samples (z_samples) and repeats xo for each.
 
-    # 1. Generate Samples and Predicted Probabilities [10]
-    # For ℓ-C2ST-NF evaluation, the classifier is evaluated on Nv samples from N(0, Im) [3].
+    # Generate Samples and Predicted Probabilities
+    # For ℓ-C2ST-NF evaluation, the classifier is evaluated on Nv samples from N(0, Im)
     rng_key, z_eval_key = jr.split(rng_key)
-    z_eval = jr.normal(z_eval_key, shape=(Nv, latent_dim))
+    z_eval = jr.normal(
+        z_eval_key,
+        shape=(Nv, latent_dim)
+    )
     
-    # xo needs to be broadcast or repeated for each z_eval_sample
-    # If xo is (d,), make it (1, d) then vmap will handle it if in_axes for x_input is None
-    xo_expanded = jnp.expand_dims(xo, axis=0) # (1, d)
-    xo_expanded = jnp.broadcast_to(jnp.expand_dims(xo, axis=0), z_eval.shape) # (1, d)
+    # xo needs to be broadcast to (Nv, d)
+    xo_expanded = xo[None, ...]
+    xo_expanded = jnp.broadcast_to(
+        xo_expanded,
+        (Nv, xo.shape[-1])
+    )
 
     d_main = main_classifier(z_eval, xo_expanded)
 
-    # 2. Compute Test Statistics [10]
+    # Compute Test Statistics
     # t̂MSE0(xo) = (1/Nv) * sum((d(Z_n, xo) - 1/2)^2)
     t_mse0_val = jnp.mean((d_main - 0.5)**2)
 
-    null_test_statistics = []
-    for null_classifier in null_classifiers:
-        d_null = null_classifier(z_eval, xo_expanded)
-        null_test_statistics.append(jnp.mean((d_null - 0.5)**2))
+    d_null = null_classifier(z_eval, xo_expanded)
+    null_test_statistics = jnp.mean((d_null - 0.5)**2, axis=0)
 
-    null_test_statistics = jnp.array(null_test_statistics)
-
-    # 3. Compute p-value [10]
+    # Compute p-value
     # p̂(xo) = (1/NH) * sum(I(t̂h(xo) > t̂MSE0(xo)))
     p_value = jnp.mean(null_test_statistics >= t_mse0_val)
     # Add a small value to the denominator to prevent p_value from being 0 if all nulls are smaller
     # This also helps to ensure the lowest p-value is 1/(NH+1) rather than 0.
-    p_value = jnp.maximum(p_value, 1.0 / (len(null_classifiers) + 1))
+    p_value = jnp.maximum(p_value, 1.0 / (null_classifier.n + 1))
 
     return null_test_statistics, t_mse0_val, p_value
 
@@ -250,7 +309,7 @@ def lc2st_quant_plot(
     out_path: Path
     ):
 
-    _, axes = plt.subplots(1,1,figsize=(12,3))
+    _, axes = plt.subplots(1, 1, figsize=(20, 10))
 
     # plot 95% confidence interval
     quantiles = np.quantile(T_null, [0, 1-conf_alpha])
