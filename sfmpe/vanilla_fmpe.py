@@ -5,9 +5,11 @@ from jax import random as jr
 
 from ._ne_base import NE
 
-from .train import fit_model
+from .train import fit_model, fit_model_no_branch
 
 from flax import nnx
+
+Array = jnp.ndarray
 
 
 def _theta_t_gauss(theta_0, times, theta, sigma_min):
@@ -84,16 +86,6 @@ class FMPE(NE):
     ):
         """Fit the model.
 
-        Args:
-            rng_key: a jax random key
-            data: data set for training, a dictionary with `y`, `y_index`, `theta`, `theta_index`.
-            optimizer: an optax optimizer object
-            n_iter: maximal number of training iterations per round
-            batch_size:  batch size used for training the model
-            percentage_data_as_validation_set: percentage of the simulated
-                data that is used for validation and early stopping
-            n_early_stopping_patience: number of iterations of no improvement
-                of training the flow before stopping optimisation
         Returns:
             a tuple of parameters and a tuple of the training information
         """
@@ -109,6 +101,34 @@ class FMPE(NE):
             n_early_stopping_patience,
             n_early_stopping_delta,
         )
+
+    def fit_fast(
+        self,
+        rng_key: Array,
+        train: Array,
+        val: Array,
+        optimizer: optax.GradientTransformation = optax.adam(0.0003),
+        n_iter: int = 1000,
+        batch_size: int = 100
+    ):
+        """Fit the model.
+
+        Returns:
+            a tuple of parameters and a tuple of the training information
+        """
+
+        fit_model_no_branch(
+            self.model,
+            rng_key,
+            _cfm_loss,
+            train,
+            val,
+            optimizer,
+            n_iter,
+            batch_size
+        )
+
+
 
 
     def sample_posterior( #type: ignore

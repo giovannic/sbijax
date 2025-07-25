@@ -1,10 +1,9 @@
 import pytest
-from jax import numpy as jnp, random as jr, vmap
+from jax import numpy as jnp, random as jr, vmap, tree
 
 from sfmpe.util.dataloader import (
     flatten_structured,
-    flat_as_batch_iterators,
-    as_batch_iterators
+    flat_as_batch_iterators
 )
 import flax.nnx as nnx
 from sfmpe.nn.transformer.transformer import Transformer
@@ -275,21 +274,21 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         }
     }
 
-    train_key, itr_key, key = jr.split(key, 3)
-    train_iter, val_iter = as_batch_iterators(
-        itr_key,
-        data,
-        batch_size=train_size // 10,
-        split=.8,
-        shuffle=True
-    )
-    estim.fit(
+    batch_size = train_size // 10
+    n_train = int(train_size * 0.8)
+
+    train = tree.map(lambda x: x[:n_train], data)
+    val = tree.map(lambda x: x[n_train:], data)
+
+    train_key, key = jr.split(key)
+
+    estim.fit_fast(
         train_key,
-        train_iter,
-        val_iter,
+        train,
+        val,
         n_iter=n_epochs_train,
         optimizer = optimiser,
-        n_early_stopping_patience=100,
+        batch_size=batch_size
     )
 
     def inverse(theta, y):
@@ -376,5 +375,5 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         Nv=n_cal
     )
     print(null_stats, main_stat, p_value)
-    assert main_stat < jnp.quantile(null_stats, 0.99)
-    assert p_value > 0.01
+    assert main_stat < jnp.quantile(null_stats, 0.95)
+    assert p_value > 0.05
