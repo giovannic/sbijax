@@ -25,43 +25,6 @@ from sbijax.nn import make_cnf
 from flax import nnx
 import optax
 
-def create_transformer_schedule(
-    peak_lr: float = 1e-4,
-    warmup_steps: int = 4000,
-    total_steps: int = 100000,
-    end_lr_factor: float = 0.01
-):
-    """
-    Creates a learning rate schedule with linear warmup followed by cosine decay.
-    
-    Args:
-        peak_lr: Maximum learning rate reached after warmup
-        warmup_steps: Number of steps for linear warmup
-        total_steps: Total number of training steps
-        end_lr_factor: Final LR as fraction of peak_lr (e.g., 0.01 = 1% of peak)
-    
-    Returns:
-        optax schedule function
-    """
-    
-    warmup_schedule = optax.constant_schedule(peak_lr)
-    
-    # Cosine decay from peak_lr to end_lr
-    cosine_schedule = optax.cosine_decay_schedule(
-        init_value=peak_lr,
-        decay_steps=total_steps - warmup_steps,
-        alpha=end_lr_factor  # End LR = alpha * init_value
-    )
-    
-    # Combine schedules
-    schedule = optax.join_schedules(
-        schedules=[warmup_schedule, cosine_schedule],
-        boundaries=[warmup_steps]
-    )
-    
-    return schedule
-
-
 def run():
     tol = 1e-3
     n_rounds =  2 #TODO: change to 10
@@ -154,11 +117,7 @@ def run():
         independence,
         n_early_stopping_patience=500,
         n_early_stopping_delta=1e-3,
-        optimiser=optax.adam(create_transformer_schedule(
-            peak_lr=3e-4,
-            warmup_steps=int(0.1 * n_epochs),
-            total_steps=n_epochs
-        ))
+        optimiser=optax.adam(3e-4)
     )
 
     post_key, key = jr.split(key)

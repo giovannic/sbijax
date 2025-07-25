@@ -120,7 +120,7 @@ def test_can_recover_base_distribution_sfmpe(dim, train_size, builder):
     sample_key, key = jr.split(key)
     theta = jr.normal(sample_key, (train_size, 1, dim))
 
-    sigma = 1e-5
+    sigma = 1e-1
     noise = jr.normal(sample_key, theta.shape) * sigma
     y = theta + noise
     data = {
@@ -237,7 +237,13 @@ def test_can_recover_base_distribution_fmpe(dim, train_size):
         z = vmap(sample_pair)(theta, y)
         return z[..., 0, :]
 
-    z = inverse(theta, y)
+    obs = y[0:1]
+    true_posterior = theta[0] + jr.normal(key, shape=(train_size, dim)) * sigma
+
+    z = inverse(
+        true_posterior,
+        jnp.broadcast_to(obs, (train_size,) + obs.shape[1:])
+    )
 
     # check each dimension is normal
     print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
@@ -274,7 +280,7 @@ def test_cnf_can_estimate_gaussian_fmpe(dim, train_size):
     sample_key, key = jr.split(key)
     theta = jr.normal(sample_key, (train_size, dim))
 
-    sigma = 1e-5
+    sigma = 1e-1
     noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
     y = jnp.tile(theta, (1, n_obs)) + noise
     data = {
@@ -311,3 +317,29 @@ def test_cnf_can_estimate_gaussian_fmpe(dim, train_size):
     )
     theta_truth = theta[0]
     assert jnp.allclose(jnp.mean(theta_hat), theta_truth, atol=1e-1)
+
+    # check that reverse flow recover the base distribution
+    def inverse(theta, y):
+        def sample_pair(theta, y):
+            return estim.sample_posterior(
+                key,
+                y[None, ...],
+                theta_shape = (dim,),
+                n_samples=1,
+                theta_0=theta[None, ...],
+                direction='backward'
+            )
+
+        z = vmap(sample_pair)(theta, y)
+        return z[..., 0, :]
+
+    z = inverse(
+        theta_hat,
+        jnp.broadcast_to(test_y[None, ...], (theta_hat.shape[0], n_obs * dim))
+    )
+
+    # check each dimension is normal
+    print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
+    ks_response = vmap(lambda x: ks_norm_test(x, alpha=0.01), in_axes=(1,))(z)
+    print(ks_response)
+    assert jnp.all(~ks_response['reject_null'])

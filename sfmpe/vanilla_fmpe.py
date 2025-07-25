@@ -110,6 +110,7 @@ class FMPE(NE):
             n_early_stopping_delta,
         )
 
+
     def sample_posterior( #type: ignore
         self,
         rng_key,

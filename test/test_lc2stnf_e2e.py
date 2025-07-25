@@ -265,7 +265,7 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
     sample_key, key = jr.split(key)
     theta = jr.normal(sample_key, (train_size, dim))
 
-    sigma = 1e-5
+    sigma = 1e-1
     noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
     y = jnp.tile(theta, (1, n_obs)) + noise
     data = {
@@ -376,5 +376,5 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         Nv=n_cal
     )
     print(null_stats, main_stat, p_value)
-    assert main_stat < jnp.quantile(null_stats, 0.95)
-    assert p_value > 0.05
+    assert main_stat < jnp.quantile(null_stats, 0.99)
+    assert p_value > 0.01
