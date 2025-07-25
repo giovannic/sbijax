@@ -9,15 +9,18 @@ from .train import fit_model
 
 from flax import nnx
 
-def _sample_theta_t(rng_key, times, theta, sigma_min):
-    mus = times * theta
-    sigma= 1.0 - (1.0 - sigma_min) * times
 
-    noise = jr.normal(rng_key, shape=theta.shape)
-    theta_t = noise * sigma + mus
-    return theta_t
+def _theta_t_gauss(theta_0, times, theta, sigma_min):
+    return times * theta  + jnp.square(1.0 - times) * theta_0
 
-def _ut(theta_t, theta, times, sigma_min):
+def _theta_t_linear(theta_0, times, theta, sigma_min):
+    sigma = 1.0 - (1.0 - sigma_min) * times
+    return theta_0 * sigma + theta * times
+
+def _ut_gauss(theta_t, theta, times, sigma_min):
+    return (theta - theta_t) / (1. - times)
+
+def _ut_linear(theta_t, theta, times, sigma_min):
     num = theta - (1.0 - sigma_min) * theta_t
     denom = 1.0 - (1.0 - sigma_min) * times
     return num / denom
@@ -26,17 +29,18 @@ def _cfm_loss(
     model,
     rng_key,
     batch,
-    sigma_min=0.001,
+    sigma_min=1e-5,
 ):
     theta = batch["data"]["theta"]
     n = theta.shape[0]
 
     t_key, rng_key = jr.split(rng_key)
     times = jr.uniform(t_key, shape=(n, 1))
-
     theta_key, rng_key = jr.split(rng_key)
-    theta_t = _sample_theta_t(
-        theta_key,
+    theta_0 = jr.normal(theta_key, shape=theta.shape)
+
+    theta_t = _theta_t_linear(
+        theta_0,
         times,
         theta,
         sigma_min
@@ -47,9 +51,14 @@ def _cfm_loss(
         time=times,
         context=batch["data"]["y"]
     )
-    uts = _ut(theta_t, theta, times, sigma_min)
+    us = _ut_linear(
+        theta_t,
+        theta,
+        times,
+        sigma_min
+    )
 
-    return jnp.mean(jnp.square(vs - uts))
+    return jnp.mean(jnp.square(vs - us))
 
 class FMPE(NE):
 

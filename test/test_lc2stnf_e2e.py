@@ -251,7 +251,7 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         theta_dim=dim,
         context_dim=dim * n_obs,
         latent_dim=64,
-        n_layers=1,
+        n_layers=2,
         dropout=.1,
         activation=nnx.relu
     )
@@ -355,7 +355,7 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
     ev_key, ev_noise_key, key = jr.split(key, 3)
     theta_truth = jr.normal(ev_key, (dim,))
     obs_noise = jr.normal(ev_noise_key, (dim * n_obs,)) * sigma
-    observation = jnp.tile(theta_truth, (n_obs,)) + obs_noise * sigma
+    observation = jnp.tile(theta_truth, (n_obs,)) + obs_noise
     posterior = estim.sample_posterior(
         key,
         observation[None,...],
