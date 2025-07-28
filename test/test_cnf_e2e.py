@@ -1,19 +1,21 @@
 import pytest
-from jax import numpy as jnp, random as jr, vmap, scipy as js
-
-from sfmpe.util.dataloader import (
-    flatten_structured,
-    flat_as_batch_iterators,
-    as_batch_iterators
+from jax import (
+    numpy as jnp,
+    random as jr,
+    vmap,
+    scipy as js,
+    tree
 )
+
 import flax.nnx as nnx
+from sfmpe.util.dataloader import flatten_structured
 from sfmpe.nn.transformer.transformer import Transformer
-from sfmpe.nn.make_continuous_flow import CNF
-from sfmpe.nn.make_vanilla_cnf import VanillaCNF
-from sfmpe.fmpe import SFMPE
-from sfmpe.vanilla_fmpe import FMPE
+from sfmpe.structured_cnf import StructuredCNF
+from sfmpe.cnf import CNF
+from sfmpe.sfmpe import SFMPE
+from sfmpe.fmpe import FMPE
+from sfmpe.nn.smlp import MLPStructuredVectorField
 from sfmpe.nn.mlp import MLPVectorField
-from sfmpe.nn.vanilla_mlp import VanillaMLPVectorField
 import optax
 
 n_epochs_train = 1_000
@@ -58,7 +60,7 @@ def ks_norm_test(data, alpha=0.05):
         'sample_size': n
     }
 
-def create_transformer(rngs, config, dim):
+def _create_transformer(rngs, config, dim):
     estimator = Transformer(
         config,
         value_dim=dim,
@@ -68,8 +70,8 @@ def create_transformer(rngs, config, dim):
     )
     return estimator
 
-def create_mlp(rngs, config, dim):
-    estimator = MLPVectorField(
+def _create_mlp(rngs, config, dim):
+    estimator = MLPStructuredVectorField(
         config,
         in_dim=2 * dim,
         out_dim=dim,
@@ -79,13 +81,21 @@ def create_mlp(rngs, config, dim):
     )
     return estimator
 
+def _split_data(data, size, split=.8):
+    n_train = int(size * split)
+
+    train = tree.map(lambda x: x[:n_train], data)
+    val = tree.map(lambda x: x[n_train:], data)
+
+    return train, val
+
 @pytest.mark.parametrize(
     "dim,train_size,builder",
     [
-        (1, 1_000, create_transformer),
-        (1, 1_000, create_mlp),
-        (10, 1_000, create_transformer),
-        (10, 1_000, create_mlp),
+        (1, 1_000, _create_transformer),
+        (1, 1_000, _create_mlp),
+        (10, 1_000, _create_transformer),
+        (10, 1_000, _create_mlp),
     ],
     ids=[
         "transformer-1",
@@ -100,7 +110,7 @@ def test_can_recover_base_distribution_sfmpe(dim, train_size, builder):
     rngs = nnx.Rngs(nnx_key)
     config = {
         'latent_dim': 64,
-        'label_dim': 1,
+        'label_dim': 2,
         'index_out_dim': 0,
         'n_encoder': 1,
         'n_decoder': 1,
@@ -112,7 +122,7 @@ def test_can_recover_base_distribution_sfmpe(dim, train_size, builder):
 
     nn = builder(rngs, config, dim)
 
-    model = CNF(transform=nn)
+    model = StructuredCNF(nn)
 
     estim = SFMPE(model)
 
@@ -149,7 +159,7 @@ def test_can_recover_base_distribution_sfmpe(dim, train_size, builder):
     def inverse(theta, y):
         theta, y = theta[..., None], y[..., None]
         def sample_pair(theta, y):
-            return estim.sample_structured_posterior(
+            return estim.sample_posterior(
                 key,
                 y[None, ...],
                 labels,
@@ -168,82 +178,184 @@ def test_can_recover_base_distribution_sfmpe(dim, train_size, builder):
     assert jnp.allclose(jnp.std(z), 1.)
 
 @pytest.mark.parametrize(
-    "dim,train_size",
+    "dim,train_size,builder",
     [
-        (1, 10_000),
-        (10, 10_000),
+        (1, 10_000, _create_transformer),
+        (10, 10_000, _create_transformer),
     ],
 )
-def test_can_recover_base_distribution_fmpe(dim, train_size):
-    key = jr.PRNGKey(0)
+def test_scnf_can_recover_base_distribution_from_training_set(
+    dim,
+    train_size,
+    builder
+    ):
     n_obs = 10
+    key = jr.PRNGKey(0)
+    nnx_key, key = jr.split(key)
+    rngs = nnx.Rngs(nnx_key)
+    config = {
+        'latent_dim': 64,
+        'label_dim': 1,
+        'index_out_dim': 0,
+        'n_encoder': 1,
+        'n_decoder': 1,
+        'n_heads': 1,
+        'n_ff': 2,
+        'dropout': .1,
+        'activation': nnx.relu,
+    }
 
-    nn = VanillaMLPVectorField(
-        theta_dim=dim,
-        context_dim=dim * n_obs,
-        latent_dim=64,
-        n_layers=2,
-        dropout=.1,
-        activation=nnx.relu
-    )
+    nn = builder(rngs, config, dim)
+
     optimiser = optax.adam(3e-4)
 
-    model = VanillaCNF(transform=nn)
+    model = StructuredCNF(nn)
 
-    estim = FMPE(model)
+    estim = SFMPE(model)
 
     # Create training data
     sample_key, key = jr.split(key)
     theta = jr.normal(sample_key, (train_size, dim))
 
-    sigma = 1e-5
+    sigma = 1e-1
     noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
     y = jnp.tile(theta, (1, n_obs)) + noise
     data = {
-        'data': {
-            'theta': theta,
-            'y': y
-        }
+        'theta': { 'theta': theta },
+        'y': {'y': y },
     }
 
-    train_key, itr_key, key = jr.split(key, 3)
-    train_iter, val_iter = as_batch_iterators(
-        itr_key,
-        data,
-        batch_size=train_size // 10,
-        split=.8,
-        shuffle=True
-    )
+    data, slices = flatten_structured(data)
+    train, val = _split_data(data, train_size, split=.8)
+    labels = train['labels']
+    masks = None
+
+    train_key, key = jr.split(key)
     estim.fit(
         train_key,
-        train_iter,
-        val_iter,
+        train,
+        val,
+        optimizer=optimiser,
+        n_iter=n_epochs_train
+    )
+
+    inv_key, key = jr.split(key)
+    z = estim.sample_base_dist(
+        inv_key,
+        train['theta'][..., None],
+        train['y'][..., None],
+        labels,
+        slices['theta'],
+        masks=masks
+    )
+    z = z['theta'].reshape((theta.shape[0], -1))
+
+    # check each dimension is normal
+    print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
+    ks_response = vmap(
+        lambda x: ks_norm_test(x, alpha=0.01),
+        in_axes=(1,)
+    )(z)
+    print(ks_response)
+    assert jnp.all(~ks_response['reject_null'])
+
+@pytest.mark.parametrize(
+    "dim,train_size,builder",
+    [
+        (1, 10_000, _create_transformer),
+        (10, 10_000, _create_transformer),
+    ],
+)
+def test_scnf_can_recover_base_distribution_from_posterior_estimate(
+    dim,
+    train_size,
+    builder
+    ):
+    key = jr.PRNGKey(0)
+    key, nnx_key = jr.split(key)
+    rngs = nnx.Rngs(nnx_key)
+    n_obs = 10
+    config = {
+        'latent_dim': 64,
+        'label_dim': 2,
+        'index_out_dim': 0,
+        'n_encoder': 1,
+        'n_decoder': 1,
+        'n_heads': 1,
+        'n_ff': 2,
+        'dropout': .1,
+        'activation': nnx.relu,
+    }
+
+    nn = builder(rngs, config, dim)
+
+    optimiser = optax.adam(3e-4)
+
+    model = StructuredCNF(nn)
+
+    estim = SFMPE(model)
+
+    # Create training data
+    sample_key, key = jr.split(key)
+    theta = jr.normal(sample_key, (train_size, dim))
+
+    sigma = 1e-1
+    noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
+    y = jnp.tile(theta, (1, n_obs)) + noise
+    data = {
+        'theta': { 'theta': theta[..., None] },
+        'y': { 'y': y[..., None] },
+    }
+    data, slices = flatten_structured(data)
+    train, val = _split_data(data['data'], train_size, .8)
+    train = { 'data': train, 'labels': data['labels'] }
+    val = { 'data': val, 'labels': data['labels'] }
+    masks = None
+
+    train_key, key = jr.split(key)
+
+    estim.fit(
+        train_key,
+        train,
+        val,
         n_iter=n_epochs_train,
         optimizer = optimiser,
-        n_early_stopping_patience=100,
+        batch_size = train_size // 10
     )
 
-    def inverse(theta, y):
-        def sample_pair(theta, y):
-            return estim.sample_posterior(
-                key,
-                y[None, ...],
-                theta_shape = (dim,),
-                n_samples=1,
-                theta_0=theta[None, ...],
-                direction='backward'
-            )
-
-        z = vmap(sample_pair)(theta, y)
-        return z[..., 0, :]
-
-    obs = y[0:1]
-    true_posterior = theta[0] + jr.normal(key, shape=(train_size, dim)) * sigma
-
-    z = inverse(
-        true_posterior,
-        jnp.broadcast_to(obs, (train_size,) + obs.shape[1:])
+    # check that posterior estimations for some contexts are close
+    test_y = train['data']['y'][0]
+    n_post = 1_000
+    theta_hat = estim.sample_posterior(
+        key,
+        test_y[None, ...],
+        data['labels'],
+        slices['theta'],
+        n_samples=n_post
     )
+    theta_truth = theta[0]
+    print(f'theta_truth: {theta_truth}')
+    print(f'mean theta_hat: {jnp.mean(theta_hat["theta"])}')
+    assert jnp.allclose(
+        jnp.mean(theta_hat['theta']),
+        theta_truth,
+        atol=1e-3
+    )
+
+    # check that reverse flow recovers the base distribution
+    inv_key, key = jr.split(key)
+    z = estim.sample_base_dist(
+        inv_key,
+        theta_hat['theta'],
+        jnp.broadcast_to(
+            test_y[None, ...],
+            (n_post, n_obs * dim, 1)
+        ),
+        data['labels'],
+        slices['theta'],
+        masks=masks
+    )
+    z = z['theta'].reshape((n_post, -1))
 
     # check each dimension is normal
     print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
@@ -258,11 +370,11 @@ def test_can_recover_base_distribution_fmpe(dim, train_size):
         (10, 10_000),
     ],
 )
-def test_cnf_can_estimate_gaussian_fmpe(dim, train_size):
+def test_cnf_can_recover_base_distribution_from_training_set(dim, train_size):
     key = jr.PRNGKey(0)
     n_obs = 10
 
-    nn = VanillaMLPVectorField(
+    nn = MLPVectorField(
         theta_dim=dim,
         context_dim=dim * n_obs,
         latent_dim=64,
@@ -272,7 +384,7 @@ def test_cnf_can_estimate_gaussian_fmpe(dim, train_size):
     )
     optimiser = optax.adam(3e-4)
 
-    model = VanillaCNF(transform=nn)
+    model = CNF(nn)
 
     estim = FMPE(model)
 
@@ -290,24 +402,95 @@ def test_cnf_can_estimate_gaussian_fmpe(dim, train_size):
         }
     }
 
-    train_key, itr_key, key = jr.split(key, 3)
-    train_iter, val_iter = as_batch_iterators(
-        itr_key,
-        data,
-        batch_size=train_size // 10,
-        split=.8,
-        shuffle=True
-    )
+    train, val = _split_data(data, train_size, .8)
+
+    train_key, key = jr.split(key)
     estim.fit(
         train_key,
-        train_iter,
-        val_iter,
-        n_iter=n_epochs_train,
-        optimizer = optimiser,
-        n_early_stopping_patience=100,
+        train,
+        val,
+        optimizer=optimiser,
+        n_iter=n_epochs_train
     )
 
-    # check that posterior estimations for some contexts are correct
+    inv_key, key = jr.split(key)
+    z = estim.sample_base_dist(
+        inv_key,
+        train['data']['theta'],
+        train['data']['y'],
+        (dim,)
+    )
+
+    # check each dimension is normal
+    print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
+    ks_response = vmap(
+        lambda x: ks_norm_test(x, alpha=0.01),
+        in_axes=(1,)
+    )(z)
+    print(ks_response)
+    assert jnp.all(~ks_response['reject_null'])
+
+@pytest.mark.parametrize(
+    "dim,train_size",
+    [
+        (1, 10_000),
+        (10, 10_000),
+    ],
+)
+def test_cnf_can_recover_base_distribution_from_posterior_estimate(
+    dim,
+    train_size,
+    ):
+    key = jr.PRNGKey(0)
+    key, nnx_key = jr.split(key)
+    rngs = nnx.Rngs(nnx_key)
+    n_obs = 10
+
+    nn = MLPVectorField(
+        theta_dim=dim,
+        context_dim=dim * n_obs,
+        latent_dim=64,
+        n_layers=2,
+        dropout=.1,
+        activation=nnx.relu,
+        rngs=rngs
+    )
+    optimiser = optax.adam(3e-4)
+
+    model = CNF(nn)
+
+    estim = FMPE(model)
+
+    optimiser = optax.adam(3e-4)
+
+    # Create training data
+    sample_key, key = jr.split(key)
+    theta = jr.normal(sample_key, (train_size, dim))
+
+    sigma = 1e-1
+    noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
+    y = jnp.tile(theta, (1, n_obs)) + noise
+    data = {
+        'data': {
+            'theta': theta,
+            'y': y
+        }
+    }
+
+    train, val = _split_data(data, train_size, .8)
+
+    train_key, key = jr.split(key)
+
+    estim.fit(
+        train_key,
+        train,
+        val,
+        n_iter=n_epochs_train,
+        optimizer = optimiser,
+        batch_size = train_size // 10
+    )
+
+    # check that posterior estimations for some contexts are close
     test_y = y[0]
     theta_hat = estim.sample_posterior(
         key,
@@ -316,26 +499,20 @@ def test_cnf_can_estimate_gaussian_fmpe(dim, train_size):
         n_samples=1_000,
     )
     theta_truth = theta[0]
-    assert jnp.allclose(jnp.mean(theta_hat), theta_truth, atol=1e-1)
+    print(f'theta_truth: {theta_truth}')
+    print(f'mean: {jnp.mean(theta_hat)}, std: {jnp.std(theta_hat)}')
+    assert jnp.allclose(jnp.mean(theta_hat), theta_truth, atol=1e-3)
 
-    # check that reverse flow recover the base distribution
-    def inverse(theta, y):
-        def sample_pair(theta, y):
-            return estim.sample_posterior(
-                key,
-                y[None, ...],
-                theta_shape = (dim,),
-                n_samples=1,
-                theta_0=theta[None, ...],
-                direction='backward'
-            )
-
-        z = vmap(sample_pair)(theta, y)
-        return z[..., 0, :]
-
-    z = inverse(
+    # check that reverse flow recovers the base distribution
+    inv_key, key = jr.split(key)
+    z = estim.sample_base_dist(
+        inv_key,
         theta_hat,
-        jnp.broadcast_to(test_y[None, ...], (theta_hat.shape[0], n_obs * dim))
+        jnp.broadcast_to(
+            test_y[None, ...],
+            (theta_hat.shape[0], n_obs * dim)
+        ),
+        (dim,)
     )
 
     # check each dimension is normal

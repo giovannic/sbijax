@@ -80,6 +80,7 @@ def fit_model_no_branch(
 
     return losses
 
+#TODO: Re-implement with while
 def fit_model(
         seed,
         model: nnx.Module,

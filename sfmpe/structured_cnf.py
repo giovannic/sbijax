@@ -1,29 +1,19 @@
 from jax import numpy as jnp, random, vmap
 from jax.experimental.ode import odeint
 from flax import nnx
+from .svf import StructuredVectorFieldModel
 
-class CNF(nnx.Module):
-    """Conditional continuous normalizing flow.
+class StructuredCNF(nnx.Module):
+    """
+    A structured CNF:
+    Provides an interface for sampling and producing vector fields
+    for models which require labels, indices and masks
 
-    Args:
-        n_dimension: the dimensionality of the modelled space
-        transform: a haiku module. The transform is a callable that has to
-            take as input arguments named 'theta', 'time', 'context' and
-            **kwargs. Theta, time and context are two-dimensional arrays
-            with the same batch dimensions.
     """
 
-    def __init__(self, transform: nnx.Module):
-        """Conditional continuous normalizing flow.
-
-        Args:
-            transform: an nnx module. The transform is a callable that has to
-                take as input arguments named 'theta', 'time', 'context' and
-                **kwargs. Theta, time and context are two-dimensional arrays
-                with the same batch dimensions.
-        """
+    def __init__(self, vf_model: StructuredVectorFieldModel):
         super().__init__()
-        self._network = transform
+        self.vf_model = vf_model
 
     def sample(
         self,
@@ -47,7 +37,8 @@ class CNF(nnx.Module):
                 (sample_size,) + theta_shape
             )
         else:
-            assert theta_0.shape == (sample_size,) + theta_shape, f'Expected theta_0 to have shape {(sample_size,) + theta_shape} but got {theta_0.shape}'
+            assert theta_0.shape == (sample_size,) + theta_shape, \
+                    f'Expected theta_0 to have shape {(sample_size,) + theta_shape} but got {theta_0.shape}'
 
 
         if direction == 'forward':
@@ -115,7 +106,7 @@ class CNF(nnx.Module):
         Keyword Args:
             keyword arguments that are passed to the neural network
         """
-        return self._network( #type: ignore
+        return self.vf_model(
             theta=theta,
             theta_label=theta_label,
             theta_index=theta_index,

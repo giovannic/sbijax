@@ -1,9 +1,9 @@
 from flax import nnx
 from .encoder import EncoderBlock, DecoderBlock
 from .embedding import Embedding
-from ..transform import Transform
+from ...svf import StructuredVectorFieldModel
 
-class Transformer(Transform):
+class Transformer(StructuredVectorFieldModel):
     """Transformer with encoder-decoder architecture
     which encodes context and decodes a vector field
     for flow matching.

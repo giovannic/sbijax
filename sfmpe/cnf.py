@@ -1,15 +1,12 @@
 from jax import numpy as jnp, random, vmap
 from jax.experimental.ode import odeint
 from flax import nnx
-from .vanilla_mlp import VectorFieldModel
+from .nn.mlp import VectorFieldModel
 
-class VanillaCNF(nnx.Module):
-    """Conditional continuous normalizing flow."""
+class CNF(nnx.Module):
 
-    def __init__(self, transform: VectorFieldModel):
-        """Conditional continuous normalizing flow."""
-        super().__init__()
-        self._network = transform
+    def __init__(self, vfm: VectorFieldModel):
+        self.vfm = vfm
 
     def sample(
         self,
@@ -26,7 +23,8 @@ class VanillaCNF(nnx.Module):
                 (sample_size,) + theta_shape
             )
         else:
-            assert theta_0.shape == (sample_size,) + theta_shape, f'Expected theta_0 to have shape {(sample_size,) + theta_shape} but got {theta_0.shape}'
+            assert theta_0.shape == (sample_size,) + theta_shape, \
+                    f'Expected theta_0 to have shape {(sample_size,) + theta_shape} but got {theta_0.shape}'
 
 
         if direction == 'forward':
@@ -80,7 +78,7 @@ class VanillaCNF(nnx.Module):
         Keyword Args:
             keyword arguments that are passed to the neural network
         """
-        return self._network(
+        return self.vfm(
             theta=theta,
             time=time,
             context=context
