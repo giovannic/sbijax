@@ -11,7 +11,6 @@ from flax import nnx
 
 Array = jnp.ndarray
 
-
 def _theta_t_gauss(theta_0, times, theta, sigma_min):
     return times * theta  + jnp.square(1.0 - times) * theta_0
 
@@ -127,9 +126,6 @@ class FMPE(NE):
             n_iter,
             batch_size
         )
-
-
-
 
     def sample_posterior( #type: ignore
         self,
