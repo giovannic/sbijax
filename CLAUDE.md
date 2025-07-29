@@ -1,25 +1,22 @@
 # CLAUDE.md
 
-## Development Commands
+This is a project for Flow Matching for Posterior Estimation, written using JAX.
+
+# Development Commands
 
 - `python -m pytest test/` - Run test suite
 - `pyright` - Type checking
 
-## Core Architecture
+The virtualenv is in the `env` directory
 
-### Main Components
-
-- **`sfmpe/fmpe.py`** - Core flow matching posterior estimation implementation
-- **`sfmpe/train.py`** - Training utilities and fit_model function
-- **`sfmpe/nn/`** - Neural network architectures:
-  - `make_continuous_flow.py` - Continuous normalizing flows
-  - `mlp.py` - Multi-layer perceptrons
-  - `transformer/` - Transformer-based architectures with attention mechanisms
-- **`sfmpe/util/`** - Utilities for data handling, early stopping, and type definitions
-- **`sfmpe/_ne_base.py`** and **`sfmpe/_sbi_base.py`** - Base classes for neural estimation and simulation-based inference
-
-### Testing
+## Testing
 
 Tests use pytest and are located in `test/`. The `conftest.py` defines common fixtures for prior/simulator functions using TensorFlow Probability distributions.
 
-Please look at my global preferences for how we should work @~/.claude/CLAUDE.md
+## Experimentation
+
+I will ask you to make debugging code to log outputs or make plots. Experiments are throwaway code, do not save code to disk, just run the code and have the outputs saved to disk.
+
+## Coding style
+
+ * Please add type annotations to your function signatures. You can use jax types from `jaxtyping`.

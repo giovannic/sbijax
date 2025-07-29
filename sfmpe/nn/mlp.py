@@ -26,14 +26,15 @@ class MLPVectorField(VectorFieldModel):
 
         self.in_linear = nnx.Linear(
             1 + theta_dim + context_dim,
-            latent_dim, rngs=rngs
+            latent_dim,
+            rngs=rngs
         )
         self.mlp = MLP(
             latent_dim,
             n_layers,
             dropout,
             activation,
-            rngs
+            rngs=rngs
         )
         self.out_linear = nnx.Linear(latent_dim, theta_dim, rngs=rngs)
 
@@ -42,3 +43,4 @@ class MLPVectorField(VectorFieldModel):
         x = self.in_linear(x)
         x = self.mlp(x)
         return self.out_linear(x)
+

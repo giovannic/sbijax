@@ -59,12 +59,12 @@ def _cfm_loss(
 
 class FMPE:
 
-    def __init__(self, model: CNF):
+    def __init__(self, model: CNF, rngs=nnx.Rngs(0)):
         self.model = model
+        self.rngs = rngs
 
     def fit(
         self,
-        rng_key: Array,
         train: Array,
         val: Array,
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
@@ -79,7 +79,7 @@ class FMPE:
 
         return fit_model_no_branch(
             self.model,
-            rng_key,
+            self.rngs.permutations(),
             _cfm_loss,
             train,
             val,
@@ -90,7 +90,6 @@ class FMPE:
 
     def sample_posterior(
         self,
-        rng_key,
         context,
         theta_shape,
         n_samples=1_000,
@@ -107,7 +106,6 @@ class FMPE:
             ):
             model = nnx.merge(graphdef, state)
             res = model.sample(
-                rngs=nnx.Rngs(rng_key),
                 context=context,
                 theta_shape=theta_shape,
                 sample_size=n_samples,
@@ -123,14 +121,12 @@ class FMPE:
 
     def sample_base_dist(
         self,
-        rng_key: Array,
         theta: Array,
         context: Array,
         theta_shape: Tuple
         ):
         def sample_pair(theta, y):
             return self.sample_posterior(
-                rng_key,
                 y[None, ...],
                 theta_shape = theta_shape,
                 n_samples=1,
