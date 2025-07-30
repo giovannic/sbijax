@@ -70,27 +70,22 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
 
     # Create training data
     sample_key, key = jr.split(key)
-    theta = jr.normal(sample_key, (train_size, 1, dim))
+    theta = jr.normal(sample_key, (train_size, dim))
+    n_obs = 1
 
     sigma = 1e-1
-    noise = jr.normal(sample_key, theta.shape) * sigma
-    y = theta + noise
+    noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
+    y = jnp.tile(theta, (1, n_obs)) + noise
     data = {
-        'theta': { 'theta': theta },
-        'y': { 'y': y },
-    }
-    train_data, slices = flatten_structured(data)
-    labels = train_data['labels']
-    masks = None #train_data['masks']
-
-    data = {
-        'theta': { 'theta': theta },
-        'y': {'y': y },
+        'theta': { 'theta': theta[..., None] },
+        'y': { 'y': y[..., None] },
     }
 
     data, slices = flatten_structured(data)
-    train, val = _split_data(data, train_size, split=.8)
-    labels = train['labels']
+    train, val = _split_data(data['data'], train_size, split=.8)
+    train = { 'data': train, 'labels': data['labels'] }
+    val = { 'data': val, 'labels': data['labels'] }
+    labels = data['labels']
     masks = None
 
     train_key, key = jr.split(key)
@@ -106,7 +101,7 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
     # Create calibration data and generate z_samples
     key_theta, key_x, key = jr.split(key, 3)
     theta_cal = jr.normal(key_theta, (train_size, dim))
-    x_cal = theta_cal + jr.normal(key_x, theta_cal.shape) * sigma
+    x_cal = jnp.tile(theta_cal, (1, n_obs)) + jr.normal(key_x, (train_size, dim * n_obs)) * sigma
     
     # Generate z_samples using the inverse function
     z_samples = estim.sample_base_dist(
@@ -141,26 +136,29 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
     # Evaluate C2ST-NF using posterior samples
     ev_key, key = jr.split(key)
     theta_truth = jr.normal(ev_key, (dim,))
-    observation = theta_truth + jr.normal(ev_key, (dim,)) * sigma
+    observation = jnp.tile(theta_truth, (n_obs,)) + jr.normal(ev_key, (dim * n_obs,)) * sigma
     
     # Sample from posterior for a specific observation
     posterior_samples = estim.sample_posterior(
-        observation[None,...],
-        context=observation[None,...],
-        labels=labels,
-        theta_slices=slices['theta'],
+        key,
+        observation[None, ..., None],
+        labels,
+        slices['theta'],
         n_samples=100  
     )
     
     # Convert posterior samples to z samples using the base distribution sampling
     z_posterior_samples = estim.sample_base_dist(
         key,
-        posterior_samples[..., None],
-        observation[None, None, ...].repeat(100, axis=0),
+        posterior_samples['theta'],
+        jnp.broadcast_to(
+            observation[None, ..., None],
+            (100, dim * n_obs, 1)
+        ),
         labels,
         slices['theta'],
         masks=masks
-    )['theta'].reshape((posterior_samples.shape[0], -1))
+    )['theta'].reshape((100, -1))
     
     n_val = 100
     null_stats, main_stat, p_value = evaluate_c2st_nf(

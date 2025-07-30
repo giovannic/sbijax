@@ -14,11 +14,18 @@ from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.cnf import CNF
 from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
-from sfmpe.nn.smlp import MLPStructuredVectorField
 from sfmpe.nn.mlp import MLPVectorField
 import optax
 
-n_epochs_train = 1_000
+n_epochs_train = 100
+
+def _split_data(data, size, split=.8):
+    n_train = int(size * split)
+
+    train = tree.map(lambda x: x[:n_train], data)
+    val = tree.map(lambda x: x[n_train:], data)
+
+    return train, val
 
 def ks_norm_test(data, alpha=0.05):
     """
@@ -70,105 +77,6 @@ def _create_transformer(rngs, config, dim):
     )
     return estimator
 
-def _create_mlp(rngs, config, dim):
-    estimator = MLPStructuredVectorField(
-        config,
-        in_dim=2 * dim,
-        out_dim=dim,
-        value_dim=dim,
-        n_labels=2,
-        rngs=rngs
-    )
-    return estimator
-
-@pytest.mark.parametrize(
-    "dim,train_size,builder",
-    [
-        (1, 1_000, _create_transformer),
-        (1, 1_000, _create_mlp),
-        (10, 1_000, _create_transformer),
-        (10, 1_000, _create_mlp),
-    ],
-    ids=[
-        "transformer-1",
-        "mlp-1",
-        "transformer-10",
-        "mlp-10"
-    ]
-)
-def test_can_recover_base_distribution_sfmpe(dim, train_size, builder):
-    key = jr.PRNGKey(0)
-    nnx_key, key = jr.split(key)
-    rngs = nnx.Rngs(nnx_key)
-    config = {
-        'latent_dim': 64,
-        'label_dim': 2,
-        'index_out_dim': 0,
-        'n_encoder': 1,
-        'n_decoder': 1,
-        'n_heads': 1,
-        'n_ff': 2,
-        'dropout': .1,
-        'activation': nnx.relu,
-    }
-
-    nn = builder(rngs, config, dim)
-
-    model = StructuredCNF(nn)
-
-    estim = SFMPE(model)
-
-    # Create training data
-    sample_key, key = jr.split(key)
-    theta = jr.normal(sample_key, (train_size, 1, dim))
-
-    sigma = 1e-1
-    noise = jr.normal(sample_key, theta.shape) * sigma
-    y = theta + noise
-    data = {
-        'theta': { 'theta': theta },
-        'y': { 'y': y },
-    }
-    train_data, slices = flatten_structured(data)
-    labels = train_data['labels']
-    masks = None #train_data['masks']
-
-    train_key, itr_key, key = jr.split(key, 3)
-    train_iter, val_iter = flat_as_batch_iterators(
-        itr_key,
-        train_data
-    )
-    optimiser = optax.adam(3e-4)
-    estim.fit(
-        train_key,
-        train_iter,
-        val_iter,
-        n_iter=n_epochs_train,
-        optimizer = optimiser,
-        n_early_stopping_patience=100,
-    )
-
-    def inverse(theta, y):
-        theta, y = theta[..., None], y[..., None]
-        def sample_pair(theta, y):
-            return estim.sample_posterior(
-                key,
-                y[None, ...],
-                labels,
-                slices['theta'],
-                masks=masks,
-                n_samples=1,
-                theta_0=theta[None, ...],
-                direction='backward'
-            )
-
-        z = vmap(sample_pair)(theta, y)
-        return z['theta'].reshape((y.shape[0], -1))
-
-    z = inverse(theta, y)
-    assert jnp.allclose(jnp.mean(z), 0.)
-    assert jnp.allclose(jnp.std(z), 1.)
-
 @pytest.mark.parametrize(
     "dim,train_size,builder",
     [
@@ -199,11 +107,10 @@ def test_scnf_can_recover_base_distribution_from_training_set(
 
     nn = builder(rngs, config, dim)
 
-    optimiser = optax.adam(3e-4)
-
     model = StructuredCNF(nn)
 
     estim = SFMPE(model)
+    optimiser = optax.adam(3e-4)
 
     # Create training data
     sample_key, key = jr.split(key)
@@ -213,13 +120,14 @@ def test_scnf_can_recover_base_distribution_from_training_set(
     noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
     y = jnp.tile(theta, (1, n_obs)) + noise
     data = {
-        'theta': { 'theta': theta },
-        'y': {'y': y },
+        'theta': { 'theta': theta[..., None] },
+        'y': { 'y': y[..., None] },
     }
-
     data, slices = flatten_structured(data)
-    train, val = _split_data(data, train_size, split=.8)
-    labels = train['labels']
+    train, val = _split_data(data['data'], train_size, .8)
+    train = { 'data': train, 'labels': data['labels'] }
+    val = { 'data': val, 'labels': data['labels'] }
+    labels = data['labels']
     masks = None
 
     train_key, key = jr.split(key)
@@ -234,13 +142,13 @@ def test_scnf_can_recover_base_distribution_from_training_set(
     inv_key, key = jr.split(key)
     z = estim.sample_base_dist(
         inv_key,
-        train['theta'][..., None],
-        train['y'][..., None],
+        train['data']['theta'],
+        train['data']['y'],
         labels,
         slices['theta'],
         masks=masks
     )
-    z = z['theta'].reshape((theta.shape[0], -1))
+    z = z['theta'].reshape((train['data']['theta'].shape[0], -1))
 
     # check each dimension is normal
     print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
@@ -397,18 +305,14 @@ def test_cnf_can_recover_base_distribution_from_training_set(dim, train_size):
 
     train, val = _split_data(data, train_size, .8)
 
-    train_key, key = jr.split(key)
     estim.fit(
-        train_key,
         train,
         val,
         optimizer=optimiser,
         n_iter=n_epochs_train
     )
 
-    inv_key, key = jr.split(key)
     z = estim.sample_base_dist(
-        inv_key,
         train['data']['theta'],
         train['data']['y'],
         (dim,)

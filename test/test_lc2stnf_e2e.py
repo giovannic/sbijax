@@ -19,7 +19,7 @@ from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
 import optax
 
-n_epochs_train = 1_000
+n_epochs_train = 100
 
 def _split_data(data, size, split=.8):
     n_train = int(size * split)
@@ -72,27 +72,22 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
 
     # Create training data
     sample_key, key = jr.split(key)
-    theta = jr.normal(sample_key, (train_size, 1, dim))
+    theta = jr.normal(sample_key, (train_size, dim))
+    n_obs = 1
 
     sigma = 1e-1
-    noise = jr.normal(sample_key, theta.shape) * sigma
-    y = theta + noise
+    noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
+    y = jnp.tile(theta, (1, n_obs)) + noise
     data = {
-        'theta': { 'theta': theta },
-        'y': { 'y': y },
-    }
-    train_data, slices = flatten_structured(data)
-    labels = train_data['labels']
-    masks = None #train_data['masks']
-
-    data = {
-        'theta': { 'theta': theta },
-        'y': {'y': y },
+        'theta': { 'theta': theta[..., None] },
+        'y': { 'y': y[..., None] },
     }
 
     data, slices = flatten_structured(data)
-    train, val = _split_data(data, train_size, split=.8)
-    labels = train['labels']
+    train, val = _split_data(data['data'], train_size, split=.8)
+    train = { 'data': train, 'labels': data['labels'] }
+    val = { 'data': val, 'labels': data['labels'] }
+    labels = data['labels']
     masks = None
 
     train_key, key = jr.split(key)
@@ -108,7 +103,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
     # Create calibration data
     key_theta, key_x, key = jr.split(key, 3)
     theta_cal = jr.normal(key_theta, (train_size, dim))
-    x_cal = theta_cal + jr.normal(key_x, theta_cal.shape) * sigma
+    x_cal = jnp.tile(theta_cal, (1, n_obs)) + jr.normal(key_x, (train_size, dim * n_obs)) * sigma
     calibration_data = (theta_cal, x_cal)
     
     # Generate z_samples using the inverse function
@@ -126,7 +121,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
     activation = nnx.relu
     latent_dim = 64
     main = BinaryMLPClassifier(
-        dim=dim * 2,
+        dim=dim + dim * n_obs,
         latent_dim=latent_dim,
         n_layers=n_layers,
         activation=activation,
@@ -144,7 +139,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
 
     # Initialize null classifiers
     null_classifier = MultiBinaryMLPClassifier(
-        dim=dim * 2,
+        dim=dim + dim * n_obs,
         latent_dim=latent_dim,
         n_layers=n_layers,
         activation=activation,
@@ -162,7 +157,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
 
     # Evaluate LC2ST-NF
     ev_key, key = jr.split(key)
-    observation = jr.normal(ev_key, (dim,))
+    observation = jr.normal(ev_key, (dim * n_obs,))
     n_cal = 100
     null_stats, main_stat, p_value = evaluate_l_c2st_nf(
         ev_key,
