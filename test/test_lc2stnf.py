@@ -10,14 +10,14 @@ from sfmpe.lc2stnf import (
 )
 
 @pytest.mark.parametrize(
-    "dim,n_layers,activation,batch_size",
+    "dim,n_layers,activation,batch_size,latent_dim",
     [
-        (8, 1, nnx.relu, None),      # unbatched input
-        (8, 1, nnx.relu, 4),         # small batch
-        (16, 2, nnx.tanh, 8),        # larger model and batch
+        (8, 1, nnx.relu, None, 16),      # unbatched input
+        (8, 1, nnx.relu, 4, 16),         # small batch
+        (16, 2, nnx.tanh, 8, 16),        # larger model and batch
     ],
 )
-def test_binary_mlp_shape(dim, n_layers, activation, batch_size):
+def test_binary_mlp_shape(dim, n_layers, activation, batch_size, latent_dim):
     """
     Test that BinaryMLPClassifier __call__ accepts both unbatched and batched inputs
     and returns an array of shape matching the input batch dimensions.
@@ -28,6 +28,7 @@ def test_binary_mlp_shape(dim, n_layers, activation, batch_size):
         dim=dim * 2,
         n_layers=n_layers,
         activation=activation,
+        latent_dim=latent_dim,
         rngs=nnx.Rngs(key),
     )
 
@@ -55,13 +56,13 @@ def test_binary_mlp_shape(dim, n_layers, activation, batch_size):
     )
 
 @pytest.mark.parametrize(
-    "dim,d_size,batch_size",
+    "dim,d_size,batch_size,latent_dim",
     [
-        (8, 100, 10),
-        (16, 200, 20)
+        (8, 100, 10, 16),
+        (16, 200, 20, 16)
     ],
 )
-def test_train_main_classifier_updates_params(dim, d_size, batch_size):
+def test_train_main_classifier_updates_params(dim, d_size, batch_size, latent_dim):
     """
     Test that train_l_c2st_nf_main_classifier runs for 1 epoch and updates classifier parameters.
     """
@@ -72,6 +73,7 @@ def test_train_main_classifier_updates_params(dim, d_size, batch_size):
         dim=dim * 2,
         n_layers=2,
         activation=nnx.relu,
+        latent_dim=latent_dim,
         rngs=nnx.Rngs(key),
     )
     # Generate calibration data
@@ -105,13 +107,13 @@ def test_train_main_classifier_updates_params(dim, d_size, batch_size):
     assert params_changed, "Expected classifier parameters to update after training"
 
 @pytest.mark.parametrize(
-    "dim,d_size,batch_size,num_classifiers",
+    "dim,d_size,batch_size,num_classifiers,latent_dim",
     [
-        (8, 100, 10, 3),  # 3 null classifiers
-        (16, 200, 10, 5)  # 5 null classifiers
+        (8, 100, 10, 3, 16),  # 3 null classifiers
+        (16, 200, 10, 5, 16)  # 5 null classifiers
     ],
 )
-def test_precompute_null_distribution(dim, d_size, batch_size, num_classifiers):
+def test_precompute_null_distribution(dim, d_size, batch_size, num_classifiers, latent_dim):
     """
     Test that precompute_null_distribution_nf_classifiers trains multiple null classifiers
     with fresh RNGs and results differ.
@@ -125,6 +127,7 @@ def test_precompute_null_distribution(dim, d_size, batch_size, num_classifiers):
         n_layers=2,
         activation=nnx.relu,
         n=num_classifiers,
+        latent_dim=latent_dim,
         rngs=nnx.Rngs(0)
     )
 
@@ -196,13 +199,13 @@ def test_precompute_null_distribution(dim, d_size, batch_size, num_classifiers):
     assert not identical, "Expected at least two null classifiers to have different parameters"
 
 @pytest.mark.parametrize(
-    "dim,Nv",
+    "dim,Nv,latent_dim",
     [
-        (8, 10),
-        (16, 20),
+        (8, 10, 16),
+        (16, 20, 16),
     ],
 )
-def test_evaluate_l_c2st_nf_output(dim, Nv):
+def test_evaluate_l_c2st_nf_output(dim, Nv, latent_dim):
     """
     Test evaluate_l_c2st_nf returns proper-shaped, positive statistics for untrained classifiers.
     """
@@ -216,6 +219,7 @@ def test_evaluate_l_c2st_nf_output(dim, Nv):
         dim=dim * 2,
         n_layers=2,
         activation=nnx.relu,
+        latent_dim=latent_dim,
         rngs=nnx.Rngs(key_main),
     )
 
@@ -227,6 +231,7 @@ def test_evaluate_l_c2st_nf_output(dim, Nv):
         n_layers=2,
         activation=nnx.relu,
         n=num_null,
+        latent_dim=latent_dim,
         rngs=rngs,
     )
     # Evaluate
@@ -248,13 +253,13 @@ def test_evaluate_l_c2st_nf_output(dim, Nv):
         assert arr >= 0, "Expected non-negative values"
 
 @pytest.mark.parametrize(
-    "dim,n",
+    "dim,n,latent_dim",
     [
-        (8, 3),
-        (16, 5),
+        (8, 3, 16),
+        (16, 5, 16),
     ],
 )
-def test_multi_classifier_shapes(dim, n):
+def test_multi_classifier_shapes(dim, n, latent_dim):
     """
     Test that the multi classifier initialises parameters with the correct shapes
     and when called outputs probabilities with the correct shape.
@@ -265,6 +270,7 @@ def test_multi_classifier_shapes(dim, n):
         n_layers=2,
         activation=nnx.relu,
         n=n,
+        latent_dim=latent_dim,
         rngs=nnx.Rngs(0)
     )
 
