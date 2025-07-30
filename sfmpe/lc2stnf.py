@@ -45,15 +45,14 @@ class BinaryMLPClassifier(nnx.Module):
         self.in_layer = nnx.Linear(dim, latent_dim, rngs=rngs)
         self.output = nnx.Linear(latent_dim, 1, rngs=rngs)
 
-    def __call__(self, z, x):
+    def __call__(self, u):
         @nnx.split_rngs(splits=self.n_layers)
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
         def forward(x, model):
             x = model(x)
             return x
 
-        x = jnp.concatenate([z, x], axis=-1)
-        x = self.in_layer(x)
+        x = self.in_layer(u)
         x = forward(x, self.layers)
         x = self.output(x)[..., 0]
         return nnx.sigmoid(x)
@@ -84,10 +83,10 @@ class MultiBinaryMLPClassifier(nnx.Module):
         self.classifiers = create_classifier(rngs)
         self.n = n
 
-    def __call__(self, z, x):
+    def __call__(self, u):
         @nnx.vmap
         def call_classifier(cls):
-            return cls(z, x)
+            return cls(u)
 
         return call_classifier(self.classifiers)
 
@@ -97,7 +96,7 @@ def train_l_c2st_nf_main_classifier(
         rng_key: jnp.ndarray,
         classifier: BinaryMLPClassifier,
         calibration_data: Tuple[jnp.ndarray, jnp.ndarray], # D_cal = (Theta_cal, X_cal)
-        inverse_transform: Callable,
+        z_samples: jnp.ndarray,
         num_epochs: int = 100,
         batch_size: int = 100
     ):
@@ -107,7 +106,7 @@ def train_l_c2st_nf_main_classifier(
         rng_key: JAX PRNG key for reproducibility.
         classifier: Binary classifier
         calibration_data: Tuple of (Theta_n, X_n) sampled from p(theta, x).
-        inverse_transform: Callable that applies the inverse NF transformation .
+        z_samples: Pre-computed z samples from the inverse NF transformation.
         num_epochs: Number of epochs to train the classifier.
     """
     theta_cal, x_cal = calibration_data
@@ -122,10 +121,9 @@ def train_l_c2st_nf_main_classifier(
     print(f'z base std: {jnp.std(z_base)}')
 
     # Class C=1: (Z_q_n, X_n) where Z_q_n = T_phi_inv(Theta_n, X_n), X_n from D_cal
-    # This involves applying the inverse NF transformation to the true (theta, x) pairs.
-    z_sampled = inverse_transform(theta_cal, x_cal)
-    print(f'z mean: {jnp.mean(z_sampled)}')
-    print(f'z std: {jnp.std(z_sampled)}')
+    # Use the pre-computed z_samples
+    print(f'z mean: {jnp.mean(z_samples)}')
+    print(f'z std: {jnp.std(z_samples)}')
     import matplotlib.pyplot as plt
     import seaborn as sns
     
@@ -137,36 +135,36 @@ def train_l_c2st_nf_main_classifier(
     plt.savefig('z_base.png')
     plt.close()
     
-    # Create scatter plot with marginal histograms for z_sampled
+    # Create scatter plot with marginal histograms for z_samples
     fig2 = plt.figure(figsize=(8, 8))
-    g2 = sns.jointplot(x=jnp.mean(x_cal, axis=1), y=z_sampled[:, 1], kind='scatter',
+    g2 = sns.jointplot(x=jnp.mean(x_cal, axis=1), y=z_samples[:, 1], kind='scatter',
                        marginal_kws={'bins': 30})
-    g2.fig.suptitle('z_sampled distribution')
+    g2.fig.suptitle('z_samples distribution')
     plt.savefig('z_sampled.png')
     plt.close()
 
     # Combine data and labels for training
-    z = jnp.concatenate([z_base, z_sampled], axis=0)
+    z = jnp.concatenate([z_base, z_samples], axis=0)
     x = jnp.concatenate([x_cal, x_cal], axis=0)
     labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0) # 0 for C=0, 1 for C=1
+
+    # Create u = concatenate([z, x]) for the refactored classifier
+    u = jnp.concatenate([z, x], axis=-1)
 
     fit_classifier(
         rng_key,
         classifier, 
-        x,
-        z,
+        u,
         labels,
         num_epochs=num_epochs,
         batch_size=batch_size
     )
-    d_score = classifier(
-        z_sampled,
-        x_cal
-    )
-    d_score_base = classifier(
-        z_base,
-        x_cal
-    )
+    
+    # Evaluate classifier performance
+    u_samples = jnp.concatenate([z_samples, x_cal], axis=-1)
+    u_base = jnp.concatenate([z_base, x_cal], axis=-1)
+    d_score = classifier(u_samples)
+    d_score_base = classifier(u_base)
     print('d score mean: ', jnp.mean(d_score))
     print('d score base mean: ', jnp.mean(d_score_base))
 
@@ -203,6 +201,9 @@ def precompute_null_distribution_nf_classifiers(
         jnp.tile(x_cal, (2, 1))[None, ...],
         (n_classifiers, N_cal * 2, x_dim)
     ) # X_n from D_cal
+    
+    # Create u = concatenate([z, x]) for each classifier
+    u_per_classifier = jnp.concatenate([z_per_classifier, x_per_classifier], axis=-1)
 
     labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)
     labels_per_classifier = jnp.broadcast_to(
@@ -214,15 +215,14 @@ def precompute_null_distribution_nf_classifiers(
     graphdef, params = nnx.split(classifiers)
 
     @nnx.vmap
-    def fit_multi_classifier(rng_key, params, x, z, labels):
+    def fit_multi_classifier(rng_key, params, u, labels):
         # add singleton dimension for multi-classifier forward pass
         params = tree.map(lambda x: x[None, ...], params)
         classifier = nnx.merge(graphdef, params)
         losses = fit_classifier(
             rng_key,
             classifier,
-            x,
-            z,
+            u,
             labels,
             num_epochs=num_epochs,
             batch_size=batch_size
@@ -238,8 +238,7 @@ def precompute_null_distribution_nf_classifiers(
     losses, params = fit_multi_classifier(
         jr.split(rng_key, n_classifiers),
         params,
-        x_per_classifier,
-        z_per_classifier,
+        u_per_classifier,
         labels_per_classifier,
     )
     nnx.update(classifiers, params)
@@ -247,7 +246,7 @@ def precompute_null_distribution_nf_classifiers(
 
 def _ce_loss(model: Classifier, _: jnp.ndarray, batch: PyTree) -> jnp.ndarray:
     """Calculates binary cross-entropy loss for the classifier."""
-    preds = model(batch['data']['z'], batch['data']['x'])
+    preds = model(batch['data']['u'])
     labels = batch['data']['y']
     preds = jnp.clip(preds, 1e-7, 1 - 1e-7) # Clip to avoid log(0)
     loss = -jnp.mean(labels * jnp.log(preds) + (1 - labels) * jnp.log(1 - preds))
@@ -256,17 +255,16 @@ def _ce_loss(model: Classifier, _: jnp.ndarray, batch: PyTree) -> jnp.ndarray:
 def fit_classifier(
         seed: jnp.ndarray,
         classifier: Classifier, 
-        x: jnp.ndarray,
-        z: jnp.ndarray,
+        u: jnp.ndarray,
         labels: jnp.ndarray,
         num_epochs=100,
         batch_size=100,
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
     ):
 
-    data = {"data": {"x": x, "z": z, "y": labels}}
+    data = {"data": {"u": u, "y": labels}}
     split = .8
-    n_train = int(x.shape[0] * split)
+    n_train = int(u.shape[0] * split)
     train = tree.map(lambda x: x[:n_train], data)
     val = tree.map(lambda x: x[n_train:], data)
 
@@ -322,12 +320,15 @@ def evaluate_l_c2st_nf(
         (Nv, xo.shape[-1])
     )
 
-    d_null = null_classifier(z_eval, xo_expanded)
+    # Create u = concatenate([z, x]) for evaluation
+    u_eval = jnp.concatenate([z_eval, xo_expanded], axis=-1)
+
+    d_null = null_classifier(u_eval)
     null_test_statistics = jnp.mean((d_null - 0.5)**2, axis=0)
 
     # Compute Test Statistics
     # t̂MSE0(xo) = (1/Nv) * sum((d(Z_n, xo) - 1/2)^2)
-    d_main = main_classifier(z_eval, xo_expanded)
+    d_main = main_classifier(u_eval)
     t_mse0_val = jnp.mean((d_main - 0.5)**2)
 
     # Compute p-value

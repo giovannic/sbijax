@@ -41,8 +41,9 @@ def test_binary_mlp_shape(dim, n_layers, activation, batch_size, latent_dim):
     z = jr.normal(key_z, shape)
     x = jr.normal(key_x, shape)
 
-    # Forward pass
-    out = model(z, x)
+    # Forward pass with u = concatenate([z, x])
+    u = jnp.concatenate([z, x], axis=-1)
+    out = model(u)
 
     # Assertions
     assert isinstance(out, jnp.ndarray), "Output must be a JAX array"
@@ -82,8 +83,8 @@ def test_train_main_classifier_updates_params(dim, d_size, batch_size, latent_di
     x_cal = jr.normal(key_x, (d_size, dim))
     calibration_data = (theta_cal, x_cal)
 
-    # Inverse transform for testing
-    inverse_transform = lambda theta, _: theta
+    # Z samples for testing (replacing inverse transform)
+    z_samples = theta_cal
 
     # Snapshot initial parameters
     initial_params = nnx.state(classifier)
@@ -93,7 +94,7 @@ def test_train_main_classifier_updates_params(dim, d_size, batch_size, latent_di
         rng_key=key,
         classifier=classifier,
         calibration_data=calibration_data,
-        inverse_transform=inverse_transform,
+        z_samples=z_samples,
         num_epochs=1,
         batch_size=batch_size
     )
@@ -283,8 +284,9 @@ def test_multi_classifier_shapes(dim, n, latent_dim):
     )
 
     # Create input data
-    x = jnp.zeros((100, dim))
     z = jnp.zeros((100, dim))
+    x = jnp.zeros((100, dim))
+    u = jnp.concatenate([z, x], axis=-1)
 
-    prob = cls(z, x)
+    prob = cls(u)
     assert prob.shape == (n, 100)

@@ -8,12 +8,10 @@ from sfmpe.cnf import CNF
 from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
-from sfmpe.lc2stnf import (
+from sfmpe.c2stnf import (
     BinaryMLPClassifier,
-    MultiBinaryMLPClassifier,
-    train_l_c2st_nf_main_classifier,
-    precompute_null_distribution_nf_classifiers,
-    evaluate_l_c2st_nf
+    train_c2st_nf_main_classifier,
+    evaluate_c2st_nf
 )
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
@@ -42,12 +40,12 @@ def create_transformer(rngs, config, dim):
     return estimator, optimiser
 
 @pytest.mark.parametrize(
-    "dim,train_size,num_classifiers,builder",
+    "dim,train_size,N_null,builder",
     [
-        (1, 1_000, 100, create_transformer),
+        (1, 1_000, 10, create_transformer),
     ]
 )
-def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, builder):
+def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
     key = jr.PRNGKey(0)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
@@ -105,11 +103,10 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
         n_iter=n_epochs_train
     )
 
-    # Create calibration data
+    # Create calibration data and generate z_samples
     key_theta, key_x, key = jr.split(key, 3)
     theta_cal = jr.normal(key_theta, (train_size, dim))
     x_cal = theta_cal + jr.normal(key_x, theta_cal.shape) * sigma
-    calibration_data = (theta_cal, x_cal)
     
     # Generate z_samples using the inverse function
     z_samples = estim.sample_base_dist(
@@ -121,12 +118,12 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
         masks=masks
     )['theta'].reshape((theta_cal.shape[0], -1))
 
-    # Train main classifier
+    # Train main classifier (z-only, no x)
     n_layers = 1
     activation = nnx.relu
     latent_dim = 64
     main = BinaryMLPClassifier(
-        dim=dim * 2,
+        dim=dim,  # Only z dimension (no x)
         latent_dim=latent_dim,
         n_layers=n_layers,
         activation=activation,
@@ -134,55 +131,59 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
     )
 
     train_key, key = jr.split(key)
-    train_l_c2st_nf_main_classifier(
+    train_c2st_nf_main_classifier(
         train_key,
         main,
-        calibration_data,
         z_samples,
         n_epochs
     )
 
-    # Initialize null classifiers
-    null_classifier = MultiBinaryMLPClassifier(
-        dim=dim * 2,
-        latent_dim=latent_dim,
-        n_layers=n_layers,
-        activation=activation,
-        n=num_classifiers,
-        rngs=rngs,
-    )
-
-    # Precompute null distribution classifiers
-    precompute_null_distribution_nf_classifiers(
-        rng_key=key,
-        calibration_data=calibration_data,
-        classifiers=null_classifier,
-        num_epochs=100,
-    )
-
-    # Evaluate LC2ST-NF
+    # Evaluate C2ST-NF using posterior samples
     ev_key, key = jr.split(key)
-    observation = jr.normal(ev_key, (dim,))
-    n_cal = 100
-    null_stats, main_stat, p_value = evaluate_l_c2st_nf(
-        ev_key,
-        observation,
-        main,
-        null_classifier,
-        latent_dim=dim,
-        Nv=n_cal
+    theta_truth = jr.normal(ev_key, (dim,))
+    observation = theta_truth + jr.normal(ev_key, (dim,)) * sigma
+    
+    # Sample from posterior for a specific observation
+    posterior_samples = estim.sample_posterior(
+        observation[None,...],
+        context=observation[None,...],
+        labels=labels,
+        theta_slices=slices['theta'],
+        n_samples=100  
     )
-    print(null_stats, main_stat, p_value)
+    
+    # Convert posterior samples to z samples using the base distribution sampling
+    z_posterior_samples = estim.sample_base_dist(
+        key,
+        posterior_samples[..., None],
+        observation[None, None, ...].repeat(100, axis=0),
+        labels,
+        slices['theta'],
+        masks=masks
+    )['theta'].reshape((posterior_samples.shape[0], -1))
+    
+    n_val = 100
+    null_stats, main_stat, p_value = evaluate_c2st_nf(
+        ev_key,
+        z_posterior_samples,
+        main,
+        latent_dim=dim,
+        Nv=n_val,
+        N_null=N_null
+    )
+    print(f'null_stats: {null_stats}')
+    print(f'main_stat: {main_stat}')
+    print(f'p_value: {p_value}')
     assert main_stat < jnp.quantile(null_stats, 0.95)
     assert p_value > 0.05
 
 @pytest.mark.parametrize(
-    "dim,train_size,cal_size,num_classifiers",
+    "dim,train_size,cal_size,N_null",
     [
-        (1, 10_000, 1_000, 100),
+        (1, 10_000, 1_000, 10),
     ],
 )
-def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_classifiers):
+def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, N_null):
     key = jr.PRNGKey(0)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
@@ -231,12 +232,11 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         batch_size=batch_size
     )
 
-    # Create calibration data
+    # Create calibration data and generate z_samples
     key_theta, key_x, key = jr.split(key, 3)
     theta_cal = jr.normal(key_theta, (cal_size, dim))
     x_cal = jnp.tile(theta_cal, (1, n_obs)) + \
             jr.normal(key_x, (cal_size, dim * n_obs)) * sigma
-    calibration_data = (theta_cal, x_cal)
     
     # Generate z_samples using the inverse function
     z_samples = estim.sample_base_dist(
@@ -245,12 +245,12 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         theta_shape = (dim,)
     )
 
-    # Train main classifier
+    # Train main classifier (z-only, no x)
     n_layers = 1
     activation = nnx.relu
     latent_dim = 16
     main = BinaryMLPClassifier(
-        dim=dim + dim * n_obs,
+        dim=dim,  # Only z dimension (no x)
         latent_dim = latent_dim,
         n_layers=n_layers,
         activation=activation,
@@ -258,56 +258,49 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
     )
 
     train_key, key = jr.split(key)
-    train_l_c2st_nf_main_classifier(
+    train_c2st_nf_main_classifier(
         train_key,
         main,
-        calibration_data,
         z_samples,
         n_epochs
     )
 
-    # Initialize null classifiers
-    null_classifier = MultiBinaryMLPClassifier(
-        dim=dim + dim * n_obs,
-        latent_dim=latent_dim,
-        n_layers=n_layers,
-        activation=activation,
-        n=num_classifiers,
-        rngs=rngs,
-    )
-
-    # Precompute null distribution classifiers
-    precompute_null_distribution_nf_classifiers(
-        rng_key=key,
-        calibration_data=calibration_data,
-        classifiers=null_classifier,
-        num_epochs=100,
-    )
-
-    # Evaluate LC2ST-NF
+    # Evaluate C2ST-NF using posterior samples
     ev_key, ev_noise_key, key = jr.split(key, 3)
     theta_truth = jr.normal(ev_key, (dim,))
     obs_noise = jr.normal(ev_noise_key, (dim * n_obs,)) * sigma
     observation = jnp.tile(theta_truth, (n_obs,)) + obs_noise
-    posterior = estim.sample_posterior(
+    
+    # Sample from posterior  
+    posterior_samples = estim.sample_posterior(
         observation[None,...],
-        theta_shape = (dim,),
+        theta_shape=(dim,),
         n_samples=100
     )
     print(f'truth: {theta_truth}')
     print(f'observation: {observation}')
-    print(f'posterior mean: {jnp.mean(posterior)}')
-    print(f'posterior std: {jnp.std(posterior)}')
-    n_cal = 100
-    null_stats, main_stat, p_value = evaluate_l_c2st_nf(
-        ev_key,
-        observation,
-        main,
-        null_classifier,
-        latent_dim=dim,
-        Nv=n_cal
+    print(f'posterior mean: {jnp.mean(posterior_samples)}')
+    print(f'posterior std: {jnp.std(posterior_samples)}')
+    
+    # Convert posterior samples to z samples
+    z_posterior_samples = estim.sample_base_dist(
+        posterior_samples,
+        observation[None, ...].repeat(100, axis=0),
+        theta_shape=(dim,)
     )
-    print(null_stats, main_stat, p_value)
+    
+    n_val = 100
+    null_stats, main_stat, p_value = evaluate_c2st_nf(
+        ev_key,
+        z_posterior_samples,
+        main,
+        latent_dim=dim,
+        Nv=n_val,
+        N_null=N_null
+    )
+    print(f'null_stats: {null_stats}')
+    print(f'main_stat: {main_stat}')
+    print(f'p_value: {p_value}')
     print(jnp.quantile(null_stats, jnp.array([0.25, .5, 0.95])))
     assert main_stat < jnp.quantile(null_stats, 0.95)
     assert p_value > 0.05
