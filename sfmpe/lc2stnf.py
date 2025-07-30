@@ -1,7 +1,7 @@
 from typing import Callable, Tuple
 from pathlib import Path
 from jaxtyping import PyTree
-from jax import random as jr, numpy as jnp, tree, vmap
+from jax import random as jr, numpy as jnp, tree
 from flax import nnx
 import optax
 from .train import fit_model_no_branch
@@ -116,20 +116,38 @@ def train_l_c2st_nf_main_classifier(
 
     # Construct Classification Training Set
     # Class C=0: (Z_n, X_n) where Z_n ~ N(0, Im), X_n from D_cal
-    rng_key, z_c0_key = jr.split(rng_key)
-    z_c0_samples = jr.normal(z_c0_key, shape=(N_cal, m))
-    x_c0_samples = x_cal # Use original X_n from D_cal
+    rng_key, z_key = jr.split(rng_key)
+    z_base = jr.normal(z_key, shape=(N_cal, m))
+    print(f'z base mean: {jnp.mean(z_base)}')
+    print(f'z base std: {jnp.std(z_base)}')
 
     # Class C=1: (Z_q_n, X_n) where Z_q_n = T_phi_inv(Theta_n, X_n), X_n from D_cal
     # This involves applying the inverse NF transformation to the true (theta, x) pairs.
-    z_q_c1_samples = inverse_transform(theta_cal, x_cal)
-    print(f'z mean: {jnp.mean(z_q_c1_samples)}')
-    print(f'z std: {jnp.std(z_q_c1_samples)}')
-    x_c1_samples = x_cal # Use original X_n from D_cal
+    z_sampled = inverse_transform(theta_cal, x_cal)
+    print(f'z mean: {jnp.mean(z_sampled)}')
+    print(f'z std: {jnp.std(z_sampled)}')
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Create scatter plot with marginal histograms for z_base
+    fig1 = plt.figure(figsize=(8, 8))
+    g1 = sns.jointplot(x=jnp.mean(x_cal, axis=1), y=z_base[:, 1], kind='scatter', 
+                       marginal_kws={'bins': 30})
+    g1.fig.suptitle('z_base distribution')
+    plt.savefig('z_base.png')
+    plt.close()
+    
+    # Create scatter plot with marginal histograms for z_sampled
+    fig2 = plt.figure(figsize=(8, 8))
+    g2 = sns.jointplot(x=jnp.mean(x_cal, axis=1), y=z_sampled[:, 1], kind='scatter',
+                       marginal_kws={'bins': 30})
+    g2.fig.suptitle('z_sampled distribution')
+    plt.savefig('z_sampled.png')
+    plt.close()
 
     # Combine data and labels for training
-    z = jnp.concatenate([z_c0_samples, z_q_c1_samples], axis=0)
-    x = jnp.concatenate([x_c0_samples, x_c1_samples], axis=0)
+    z = jnp.concatenate([z_base, z_sampled], axis=0)
+    x = jnp.concatenate([x_cal, x_cal], axis=0)
     labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0) # 0 for C=0, 1 for C=1
 
     fit_classifier(
@@ -141,6 +159,16 @@ def train_l_c2st_nf_main_classifier(
         num_epochs=num_epochs,
         batch_size=batch_size
     )
+    d_score = classifier(
+        z_sampled,
+        x_cal
+    )
+    d_score_base = classifier(
+        z_base,
+        x_cal
+    )
+    print('d score mean: ', jnp.mean(d_score))
+    print('d score base mean: ', jnp.mean(d_score_base))
 
 def precompute_null_distribution_nf_classifiers(
 		rng_key,
@@ -182,6 +210,7 @@ def precompute_null_distribution_nf_classifiers(
         (n_classifiers, N_cal * 2)
     )
 
+    #TODO: why do I have to do this?
     graphdef, params = nnx.split(classifiers)
 
     @nnx.vmap

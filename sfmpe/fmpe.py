@@ -18,15 +18,13 @@ def theta_t_linear(theta_0, times, theta, sigma_min):
     return theta_0 * sigma + theta * times
 
 def ut_linear(theta_t, theta, times, sigma_min):
-    num = theta - (1.0 - sigma_min) * theta_t
-    denom = 1.0 - (1.0 - sigma_min) * times
-    return num / denom
+    return theta - (1.0 - sigma_min) * theta_t
 
 def _cfm_loss(
     model,
     rng_key,
     batch,
-    sigma_min=1e-5,
+    sigma_min = 1e-5,
 ):
     theta = batch["data"]["theta"]
     n = theta.shape[0]
