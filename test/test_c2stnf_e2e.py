@@ -10,7 +10,9 @@ from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
 from sfmpe.c2stnf import (
     BinaryMLPClassifier,
+    MultiBinaryMLPClassifier,
     train_c2st_nf_main_classifier,
+    precompute_c2st_nf_null_classifiers,
     evaluate_c2st_nf
 )
 from sfmpe.nn.transformer.transformer import Transformer
@@ -40,12 +42,12 @@ def create_transformer(rngs, config, dim):
     return estimator, optimiser
 
 @pytest.mark.parametrize(
-    "dim,train_size,N_null,builder",
+    "dim,train_size,num_classifiers,builder",
     [
         (1, 1_000, 10, create_transformer),
     ]
 )
-def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
+def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, builder):
     key = jr.PRNGKey(0)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
@@ -71,7 +73,7 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
     # Create training data
     sample_key, key = jr.split(key)
     theta = jr.normal(sample_key, (train_size, dim))
-    n_obs = 1
+    n_obs = 10
 
     sigma = 1e-1
     noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
@@ -116,7 +118,7 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
     # Train main classifier (z-only, no x)
     n_layers = 1
     activation = nnx.relu
-    latent_dim = 64
+    latent_dim = 16
     main = BinaryMLPClassifier(
         dim=dim,  # Only z dimension (no x)
         latent_dim=latent_dim,
@@ -131,6 +133,26 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
         main,
         z_samples,
         n_epochs
+    )
+
+    # Initialize null classifiers
+    null_classifier = MultiBinaryMLPClassifier(
+        dim=dim,  # Only z dimension (no x)
+        latent_dim=latent_dim,
+        n_layers=n_layers,
+        activation=activation,
+        n=num_classifiers,
+        rngs=rngs,
+    )
+
+    # Precompute null distribution classifiers
+    null_key, key = jr.split(key)
+    precompute_c2st_nf_null_classifiers(
+        rng_key=null_key,
+        classifiers=null_classifier,
+        latent_dim=dim,
+        N_cal=train_size,
+        num_epochs=n_epochs,
     )
 
     # Evaluate C2ST-NF using posterior samples
@@ -165,9 +187,9 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
         ev_key,
         z_posterior_samples,
         main,
+        null_classifier,
         latent_dim=dim,
         Nv=n_val,
-        N_null=N_null
     )
     print(f'null_stats: {null_stats}')
     print(f'main_stat: {main_stat}')
@@ -176,12 +198,12 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, N_null, builder):
     assert p_value > 0.05
 
 @pytest.mark.parametrize(
-    "dim,train_size,cal_size,N_null",
+    "dim,train_size,cal_size,num_classifiers",
     [
         (1, 10_000, 1_000, 10),
     ],
 )
-def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, N_null):
+def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_classifiers):
     key = jr.PRNGKey(0)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
@@ -263,6 +285,26 @@ def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, N_null):
         n_epochs
     )
 
+    # Initialize null classifiers
+    null_classifier = MultiBinaryMLPClassifier(
+        dim=dim,  # Only z dimension (no x)
+        latent_dim=latent_dim,
+        n_layers=n_layers,
+        activation=activation,
+        n=num_classifiers,
+        rngs=rngs,
+    )
+
+    # Precompute null distribution classifiers
+    null_key, key = jr.split(key)
+    precompute_c2st_nf_null_classifiers(
+        rng_key=null_key,
+        classifiers=null_classifier,
+        latent_dim=dim,
+        N_cal=cal_size,
+        num_epochs=n_epochs,
+    )
+
     # Evaluate C2ST-NF using posterior samples
     ev_key, ev_noise_key, key = jr.split(key, 3)
     theta_truth = jr.normal(ev_key, (dim,))
@@ -292,9 +334,9 @@ def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, N_null):
         ev_key,
         z_posterior_samples,
         main,
+        null_classifier,
         latent_dim=dim,
         Nv=n_val,
-        N_null=N_null
     )
     print(f'null_stats: {null_stats}')
     print(f'main_stat: {main_stat}')
