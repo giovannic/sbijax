@@ -1,9 +1,9 @@
 from sfmpe.util.dataloader import (
     flatten_structured,
-    flat_as_batch_iterators,
     pad_multidim_event,
     combine_data
 )
+from sfmpe.utils import split_data
 import optax
 
 from jax import numpy as jnp, random as jr, jit, vmap, tree
@@ -21,8 +21,6 @@ def train_bottom_up(
     n_epochs,
     y_observed,
     independence,
-    n_early_stopping_patience=10,
-    n_early_stopping_delta=1e-3,
     optimiser=optax.adam(0.0003),
     ):
 
@@ -40,8 +38,7 @@ def train_bottom_up(
                 },
                 independence=independence
             )
-            theta_samples_full = estim.sample_structured_posterior(
-                theta_key,
+            theta_samples_full = estim.sample_posterior(
                 flat_y_obs['data']['y'],
                 flat_data['labels'], #type: ignore
                 data_slices['theta'], #type: ignore
@@ -90,22 +87,22 @@ def train_bottom_up(
         else:
             train_data = combine_data(train_data, z_flat)
 
-        itr_key, key = jr.split(key)
-        train_iter, val_iter = flat_as_batch_iterators(
-            itr_key,
-            train_data
+        # Split data for training
+        split_key, key = jr.split(key)
+        total_samples = train_data['data']['theta'].shape[0]
+        train_split, val_split = split_data(
+            train_data, 
+            total_samples, 
+            split=0.8, 
+            shuffle_rng=split_key
         )
 
-        fit_key, key = jr.split(key)
-
         estim.fit(
-            fit_key,
-            train_iter,
-            val_iter,
+            train_split,
+            val_split,
+            optimizer=optimiser,
             n_iter=n_epochs,
-            n_early_stopping_patience=n_early_stopping_patience,
-            n_early_stopping_delta=n_early_stopping_delta,
-            optimizer=optimiser
+            batch_size=100
         )
 
         # simulate from p(z_vec|theta, y_vec)
@@ -135,13 +132,10 @@ def train_bottom_up(
             independence=independence
         )
 
-        sample_key, key = jr.split(key)
-
         @jit
         @vmap
-        def sample_for_context(key, context):
-            post = estim.sample_structured_posterior(
-                key,
+        def sample_for_context(context):
+            post = estim.sample_posterior(
                 jnp.expand_dims(context, 0),
                 flat_z_sim['labels'],
                 z_sim_slices['theta'],
@@ -150,10 +144,7 @@ def train_bottom_up(
             )
             return tree.map(lambda leaf: leaf[0], post)
 
-        z_vec = sample_for_context(
-            jr.split(sample_key, n_simulations),
-            flat_z_sim['data']['y']
-        )
+        z_vec = sample_for_context(flat_z_sim['data']['y'])
 
         # fit p(theta,z_vec|y_vec)
         data = {
@@ -180,20 +171,23 @@ def train_bottom_up(
         )
 
         train_data = combine_data(train_data, flat_data)
-        train_key, itr_key, key = jr.split(key, 3)
-        train_iter, val_iter = flat_as_batch_iterators(
-            itr_key,
-            train_data
+        
+        # Split data for training
+        split_key, key = jr.split(key)
+        total_samples = train_data['data']['theta'].shape[0]
+        train_split, val_split = split_data(
+            train_data, 
+            total_samples, 
+            split=0.8, 
+            shuffle_rng=split_key
         )
 
         estim.fit(
-            train_key,
-            train_iter,
-            val_iter,
+            train_split,
+            val_split,
+            optimizer=optimiser,
             n_iter=n_epochs,
-            n_early_stopping_patience=n_early_stopping_patience,
-            n_early_stopping_delta=n_early_stopping_delta,
-            optimizer=optimiser
+            batch_size=100
         )
 
     # TODO: refactor into structuring code or estimator
@@ -220,8 +214,7 @@ def get_posterior(
         independence=independence
     )
 
-    posterior = estim.sample_structured_posterior( 
-        key,
+    posterior = estim.sample_posterior( 
         obs_flat['data']['y'],
         labels,
         slices,
