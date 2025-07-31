@@ -9,6 +9,7 @@ from jax import (
 
 import flax.nnx as nnx
 from sfmpe.util.dataloader import flatten_structured
+from sfmpe.utils import split_data
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.cnf import CNF
@@ -19,13 +20,6 @@ import optax
 
 n_epochs_train = 100
 
-def _split_data(data, size, split=.8):
-    n_train = int(size * split)
-
-    train = tree.map(lambda x: x[:n_train], data)
-    val = tree.map(lambda x: x[n_train:], data)
-
-    return train, val
 
 def ks_norm_test(data, alpha=0.05):
     """
@@ -107,9 +101,9 @@ def test_scnf_can_recover_base_distribution_from_training_set(
 
     nn = builder(rngs, config, dim)
 
-    model = StructuredCNF(nn)
+    model = StructuredCNF(nn, rngs=rngs)
 
-    estim = SFMPE(model)
+    estim = SFMPE(model, rngs=rngs)
     optimiser = optax.adam(3e-4)
 
     # Create training data
@@ -124,7 +118,8 @@ def test_scnf_can_recover_base_distribution_from_training_set(
         'y': { 'y': y[..., None] },
     }
     data, slices = flatten_structured(data)
-    train, val = _split_data(data['data'], train_size, .8)
+    split_key, key = jr.split(key)
+    train, val = split_data(data['data'], train_size, .8, shuffle_rng=split_key)
     train = { 'data': train, 'labels': data['labels'] }
     val = { 'data': val, 'labels': data['labels'] }
     labels = data['labels']
@@ -132,7 +127,6 @@ def test_scnf_can_recover_base_distribution_from_training_set(
 
     train_key, key = jr.split(key)
     estim.fit(
-        train_key,
         train,
         val,
         optimizer=optimiser,
@@ -191,9 +185,9 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
 
     optimiser = optax.adam(3e-4)
 
-    model = StructuredCNF(nn)
+    model = StructuredCNF(nn, rngs=rngs)
 
-    estim = SFMPE(model)
+    estim = SFMPE(model, rngs=rngs)
 
     # Create training data
     sample_key, key = jr.split(key)
@@ -207,7 +201,8 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
         'y': { 'y': y[..., None] },
     }
     data, slices = flatten_structured(data)
-    train, val = _split_data(data['data'], train_size, .8)
+    split_key, key = jr.split(key)
+    train, val = split_data(data['data'], train_size, .8, shuffle_rng=split_key)
     train = { 'data': train, 'labels': data['labels'] }
     val = { 'data': val, 'labels': data['labels'] }
     masks = None
@@ -215,7 +210,6 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
     train_key, key = jr.split(key)
 
     estim.fit(
-        train_key,
         train,
         val,
         n_iter=n_epochs_train,
@@ -227,7 +221,6 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
     test_y = train['data']['y'][0]
     n_post = 1_000
     theta_hat = estim.sample_posterior(
-        key,
         test_y[None, ...],
         data['labels'],
         slices['theta'],
@@ -303,7 +296,8 @@ def test_cnf_can_recover_base_distribution_from_training_set(dim, train_size):
         }
     }
 
-    train, val = _split_data(data, train_size, .8)
+    split_key, key = jr.split(key)
+    train, val = split_data(data, train_size, .8, shuffle_rng=split_key)
 
     estim.fit(
         train,
@@ -374,7 +368,8 @@ def test_cnf_can_recover_base_distribution_from_posterior_estimate(
         }
     }
 
-    train, val = _split_data(data, train_size, .8)
+    split_key, key = jr.split(key)
+    train, val = split_data(data, train_size, .8, shuffle_rng=split_key)
 
     estim.fit(
         train,

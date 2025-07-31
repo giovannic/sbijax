@@ -1,22 +1,12 @@
-from typing import Callable, Tuple
-from pathlib import Path
-from jaxtyping import PyTree
+from typing import Tuple
 from jax import random as jr, numpy as jnp, tree
 from flax import nnx
-import optax
-from .train import fit_model_no_branch
-
-import numpy as np
-from matplotlib import pyplot as plt
 
 # Import shared classifier components from lc2stnf
 from .lc2stnf import (
-    FFLayer,
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier,
-    _ce_loss,
     fit_classifier,
-    lc2st_quant_plot
 )
 
 def train_c2st_nf_main_classifier(
@@ -118,48 +108,29 @@ def precompute_c2st_nf_null_classifiers(
 
     # Construct classification training set under the Null
     # Both classes (C=0 and C=1) now draw their Z samples from N(0, I_m)
+    # Shape: (batch_dim, n_classifiers, z_dim)
     z_per_classifier = jr.normal(
         z_key,
-        shape=(n_classifiers, N_cal * 2, latent_dim)
+        shape=(N_cal * 2, n_classifiers, latent_dim)
     )
     
     labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)
+    # Broadcast labels to match the new input format: (batch_dim, n_classifiers)
     labels_per_classifier = jnp.broadcast_to(
-        labels[None, ...],
-        (n_classifiers, N_cal * 2)
+        labels[:, None],
+        (N_cal * 2, n_classifiers)
     )
 
-    # TODO: why do I have to do this?
-    graphdef, params = nnx.split(classifiers)
-
-    @nnx.vmap
-    def fit_multi_classifier(rng_key, params, z, labels):
-        # add singleton dimension for multi-classifier forward pass
-        params = tree.map(lambda x: x[None, ...], params)
-        classifier = nnx.merge(graphdef, params)
-        losses = fit_classifier(
-            rng_key,
-            classifier,
-            z,  # z-only input (no x)
-            labels,
-            num_epochs=num_epochs,
-            batch_size=batch_size
-        )
-        # remove singleton dimension
-        params = nnx.state(classifier)
-        params = tree.map(
-            lambda leaf: leaf[0],
-            params
-        )
-        return losses, params
-
-    losses, params = fit_multi_classifier(
-        jr.split(rng_key, n_classifiers),
-        params,
-        z_per_classifier,
-        labels_per_classifier,
+    # Train all classifiers together using the 3D input format
+    losses = fit_classifier(
+        rng_key,
+        classifiers,
+        z_per_classifier,  # 3D input: (batch_dim, n_classifiers, z_dim)
+        labels_per_classifier,  # 2D labels: (batch_dim, n_classifiers)
+        num_epochs=num_epochs,
+        batch_size=batch_size
     )
-    nnx.update(classifiers, params)
+    
     return losses
 
 def evaluate_c2st_nf(
@@ -185,19 +156,21 @@ def evaluate_c2st_nf(
         p_value: The p-value for the consistency test.
     """
     
-    # Generate evaluation samples from N(0, I)
+    # Generate different evaluation samples from N(0, I) for each null classifier
+    # Shape: (batch_dim, n_classifiers, z_dim)
     rng_key, z_eval_key = jr.split(rng_key)
-    z_eval = jr.normal(z_eval_key, shape=(Nv, latent_dim))
+    z_eval = jr.normal(z_eval_key, shape=(Nv, null_classifier.n, latent_dim))
 
     # Compute test statistic on z_posterior_samples using main classifier
     # t̂MSE(z_posterior) = (1/N_posterior) * sum((d_main(Z_posterior_n) - 1/2)^2)
     d_posterior = main_classifier(z_posterior_samples)
     t_mse_val = jnp.mean((d_posterior - 0.5)**2)
 
-    # Compute null test statistics using null classifiers on z_eval
-    # t̂null_h = (1/Nv) * sum((d_null_h(Z_eval_n) - 1/2)^2)
+    # Compute null test statistics using null classifiers on different z_eval per classifier
+    # t̂null_h = (1/Nv) * sum((d_null_h(Z_eval_h_n) - 1/2)^2)
+    # d_null will have shape (Nv, n_classifiers)
     d_null = null_classifier(z_eval)
-    null_test_statistics = jnp.mean((d_null - 0.5)**2, axis=1)
+    null_test_statistics = jnp.mean((d_null - 0.5)**2, axis=0)
 
     # Compute p-value
     # p̂ = (1/N_null) * sum(I(t̂null_h >= t̂MSE))

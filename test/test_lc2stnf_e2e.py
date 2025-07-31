@@ -2,6 +2,7 @@ import pytest
 from jax import numpy as jnp, random as jr, tree
 
 from sfmpe.util.dataloader import flatten_structured
+from sfmpe.utils import split_data
 import flax.nnx as nnx
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.cnf import CNF
@@ -21,13 +22,6 @@ import optax
 
 n_epochs_train = 100
 
-def _split_data(data, size, split=.8):
-    n_train = int(size * split)
-
-    train = tree.map(lambda x: x[:n_train], data)
-    val = tree.map(lambda x: x[n_train:], data)
-
-    return train, val
 
 def create_transformer(rngs, config, dim):
     estimator = Transformer(
@@ -66,9 +60,9 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
 
     nn, optimiser = builder(rngs, config, dim)
 
-    model = StructuredCNF(nn)
+    model = StructuredCNF(nn, rngs=rngs)
 
-    estim = SFMPE(model)
+    estim = SFMPE(model, rngs=rngs)
 
     # Create training data
     sample_key, key = jr.split(key)
@@ -84,7 +78,8 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
     }
 
     data, slices = flatten_structured(data)
-    train, val = _split_data(data['data'], train_size, split=.8)
+    split_key, key = jr.split(key)
+    train, val = split_data(data['data'], train_size, split=.8, shuffle_rng=split_key)
     train = { 'data': train, 'labels': data['labels'] }
     val = { 'data': val, 'labels': data['labels'] }
     labels = data['labels']
@@ -93,7 +88,6 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
     train_key, key = jr.split(key)
 
     estim.fit(
-        train_key,
         train,
         val,
         optimizer=optimiser,

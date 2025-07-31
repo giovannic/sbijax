@@ -11,13 +11,13 @@ class StructuredCNF(nnx.Module):
 
     """
 
-    def __init__(self, vf_model: StructuredVectorFieldModel):
+    def __init__(self, vf_model: StructuredVectorFieldModel, rngs=nnx.Rngs(0)):
         super().__init__()
         self.vf_model = vf_model
+        self.rngs = rngs
 
     def sample(
         self,
-        rngs,
         context,
         context_label,
         context_index,
@@ -33,7 +33,7 @@ class StructuredCNF(nnx.Module):
         ):
         if theta_0 is None:
             theta_0 = random.normal(
-                rngs.base_dist(),
+                self.rngs.base_dist(),
                 (sample_size,) + theta_shape
             )
         else:

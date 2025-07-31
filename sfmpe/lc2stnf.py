@@ -5,6 +5,7 @@ from jax import random as jr, numpy as jnp, tree
 from flax import nnx
 import optax
 from .train import fit_model_no_branch
+from .utils import split_data
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -84,11 +85,16 @@ class MultiBinaryMLPClassifier(nnx.Module):
         self.n = n
 
     def __call__(self, u):
-        @nnx.vmap
-        def call_classifier(cls):
-            return cls(u)
-
-        return call_classifier(self.classifiers)
+        assert u.ndim == 3, f"MultiBinaryMLPClassifier expects 3D input, got {u.ndim}D with shape {u.shape}"
+        assert u.shape[1] == self.n, f"Second dimension must match number of classifiers ({self.n}), got shape {u.shape}"
+        
+        # Input shape is (batch_dim, n_classifiers, z_dim)
+        # We want each classifier to process all batch samples for its corresponding slice
+        @nnx.vmap(in_axes=(0, 1), out_axes=1)
+        def call_classifier_on_slice(cls, u_slice):
+            return cls(u_slice)
+        
+        return call_classifier_on_slice(self.classifiers, u)
 
 Classifier = BinaryMLPClassifier | MultiBinaryMLPClassifier
 
@@ -263,11 +269,10 @@ def fit_classifier(
     ):
 
     data = {"data": {"u": u, "y": labels}}
-    split = .8
-    n_train = int(u.shape[0] * split)
-    train = tree.map(lambda x: x[:n_train], data)
-    val = tree.map(lambda x: x[n_train:], data)
-
+    rng_key, shuffle_key = jr.split(seed)
+    train, val = split_data(data, u.shape[0], split=0.8, shuffle_rng=shuffle_key)
+    
+    n_train = int(u.shape[0] * 0.8)
     assert n_train % batch_size == 0, f"Batch size ({batch_size}) must divide n_train ({n_train})"
 
     return fit_model_no_branch(

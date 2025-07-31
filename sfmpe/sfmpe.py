@@ -120,12 +120,12 @@ def _cfm_loss(
 
 class SFMPE:
 
-    def __init__(self, vector_field_model: StructuredCNF):
+    def __init__(self, vector_field_model: StructuredCNF, rngs=nnx.Rngs(0)):
         self.model = vector_field_model
+        self.rngs = rngs
 
     def fit(
         self,
-        rng_key: Array,
         train: PyTree,
         val: PyTree,
         optimizer: optax.GradientTransformation = optax.adam(0.0003),
@@ -136,7 +136,7 @@ class SFMPE:
 
         losses = fit_model_no_branch(
             self.model,
-            rng_key,
+            self.rngs.permutations(),
             _cfm_loss,
             train,
             val,
@@ -149,7 +149,6 @@ class SFMPE:
 
     def sample_posterior(
         self,
-        rng_key: Array,
         context: Array,
         labels: Array,
         theta_slices: PyTree, #TODO: stricter typing
@@ -183,7 +182,6 @@ class SFMPE:
             ):
             model = nnx.merge(graphdef, state)
             res = model.sample(
-                rngs=nnx.Rngs(rng_key),
                 context=context,
                 context_label=labels['y'],
                 context_index=context_index,
@@ -212,7 +210,6 @@ class SFMPE:
 
     def sample_base_dist(
         self,
-        rng_key: Array,
         theta: Array,
         context: Array,
         labels: Array,
@@ -222,7 +219,6 @@ class SFMPE:
     ) -> PyTree:
         def sample_pair(theta, y):
             return self.sample_posterior(
-                rng_key,
                 y[None, ...],
                 labels,
                 theta_slices,

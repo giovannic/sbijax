@@ -215,11 +215,53 @@ def test_multi_classifier_z_only_shapes(dim, n, latent_dim):
         )
     )
 
-    # Create z-only input data
-    z = jnp.zeros((100, dim))
+    # Create 3D z-only input data: (batch_size, n_classifiers, dim)
+    z = jnp.zeros((100, n, dim))
 
     prob = cls(z)
-    assert prob.shape == (n, 100)
+    assert prob.shape == (100, n)
+
+@pytest.mark.parametrize(
+    "dim,n,Nv,latent_dim",
+    [
+        (8, 3, 10, 16),
+        (16, 5, 20, 16),
+    ],
+)
+def test_multi_classifier_3d_input_shape(dim, n, Nv, latent_dim):
+    """
+    Test that MultiBinaryMLPClassifier handles 3D input correctly.
+    When input shape is (Nv, n_classifiers, latent_dim), output should be 
+    (Nv, n_classifiers).
+    """
+    # Initialize classifier
+    cls = MultiBinaryMLPClassifier(
+        dim=dim,
+        n_layers=2,
+        activation=nnx.relu,
+        n=n,
+        latent_dim=latent_dim,
+        rngs=nnx.Rngs(0)
+    )
+    
+    # Create 3D input: (batch_dim, n_classifiers, z_dim)
+    key = jr.PRNGKey(42)
+    z_eval_3d = jr.normal(key, shape=(Nv, n, dim))
+    
+    # Forward pass
+    prob = cls(z_eval_3d)
+    
+    # Verify output shape is (Nv, n_classifiers)
+    expected_shape = (Nv, n)
+    assert prob.shape == expected_shape, (
+        f"Expected output shape {expected_shape}, got {prob.shape}. "
+        f"Input shape was {z_eval_3d.shape}"
+    )
+    
+    # Verify output values are probabilities (between 0 and 1)
+    assert jnp.all(prob >= 0) and jnp.all(prob <= 1), (
+        "Output should be probabilities between 0 and 1"
+    )
 
 @pytest.mark.parametrize(
     "dim,Nv,num_null,latent_dim",
