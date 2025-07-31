@@ -101,7 +101,6 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, 
     
     # Generate z_samples using the inverse function
     z_samples = estim.sample_base_dist(
-        key,
         theta_cal[..., None],
         x_cal[..., None],
         labels,
@@ -164,7 +163,6 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, 
     
     # Convert posterior samples to z samples using the base distribution sampling
     z_posterior_samples = estim.sample_base_dist(
-        key,
         posterior_samples['theta'],
         jnp.broadcast_to(
             observation[None, ..., None],
@@ -175,14 +173,12 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, 
         masks=masks
     )['theta'].reshape((100, -1))
     
-    n_val = 100
     null_stats, main_stat, p_value = evaluate_c2st_nf(
         ev_key,
         z_posterior_samples,
         main,
         null_classifier,
         latent_dim=dim,
-        Nv=n_val,
     )
     print(f'null_stats: {null_stats}')
     print(f'main_stat: {main_stat}')
@@ -322,14 +318,12 @@ def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_clas
         theta_shape=(dim,)
     )
     
-    n_val = 100
     null_stats, main_stat, p_value = evaluate_c2st_nf(
         ev_key,
         z_posterior_samples,
         main,
         null_classifier,
         latent_dim=dim,
-        Nv=n_val,
     )
     print(f'null_stats: {null_stats}')
     print(f'main_stat: {main_stat}')

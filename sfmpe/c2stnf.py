@@ -139,7 +139,6 @@ def evaluate_c2st_nf(
     main_classifier: BinaryMLPClassifier,
     null_classifier: MultiBinaryMLPClassifier,
     latent_dim: int,
-    Nv: int  # Number of validation samples
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     C2ST-NF, evaluating test statistics and p-values using z samples from estimated posterior.
@@ -155,6 +154,7 @@ def evaluate_c2st_nf(
         t_mse_val: The calculated MSE test statistic for z_posterior_samples.
         p_value: The p-value for the consistency test.
     """
+    Nv = z_posterior_samples.shape[0]
     
     # Generate different evaluation samples from N(0, I) for each null classifier
     # Shape: (batch_dim, n_classifiers, z_dim)

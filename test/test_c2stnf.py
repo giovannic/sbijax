@@ -298,7 +298,7 @@ def test_evaluate_c2st_nf_output(dim, Nv, num_null, latent_dim):
     )
     
     # Generate z samples from estimated posterior
-    z_posterior_samples = jr.normal(key, (100, dim))
+    z_posterior_samples = jr.normal(key, (Nv, dim))
     
     # Evaluate
     null_stats, t_stat, p_val = evaluate_c2st_nf(
@@ -307,7 +307,6 @@ def test_evaluate_c2st_nf_output(dim, Nv, num_null, latent_dim):
         main_classifier=main_clf,
         null_classifier=null_clf,
         latent_dim=dim,
-        Nv=Nv,
     )
 
     # Assertions
