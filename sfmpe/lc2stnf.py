@@ -269,8 +269,7 @@ def fit_classifier(
     ):
 
     data = {"data": {"u": u, "y": labels}}
-    rng_key, shuffle_key = jr.split(seed)
-    train, val = split_data(data, u.shape[0], split=0.8, shuffle_rng=shuffle_key)
+    train, val = split_data(data, u.shape[0], split=0.8, shuffle_rng=seed)
     
     n_train = int(u.shape[0] * 0.8)
     assert n_train % batch_size == 0, f"Batch size ({batch_size}) must divide n_train ({n_train})"
