@@ -1,24 +1,28 @@
 """Round-based training for FMPE models."""
 
-from typing import Callable
+from typing import Callable, Optional
+import logging
+import time
 from jax import numpy as jnp, random as jr, tree
+from jaxtyping import Array
 import optax
 from .fmpe import FMPE
 from .utils import split_data
-
+from .bijections import FittableBijection, Bijection
 
 def train_fmpe_rounds(
-    key: jnp.ndarray,
+    key: Array,
     estim: FMPE,
     prior_fn: Callable,
     simulator_fn: Callable, 
-    y_observed: jnp.ndarray,
+    y_observed: Array,
     theta_shape: tuple,
     n_rounds: int,
     n_simulations: int,
     n_epochs: int,
     optimizer: optax.GradientTransformation = optax.adam(3e-4),
-    batch_size: int = 100
+    batch_size: int = 100,
+    bijection: Optional[Bijection] = None,
 ) -> FMPE:
     """Train FMPE model using round-based approach.
     
@@ -53,10 +57,11 @@ def train_fmpe_rounds(
         Trained FMPE estimator
     """
     
+    logger = logging.getLogger(__name__)
     all_data = None
     
     for round_idx in range(n_rounds):
-        print(f"Round {round_idx + 1}/{n_rounds}")
+        logger.info(f"Starting FMPE round {round_idx + 1}/{n_rounds}")
         
         # Generate theta samples for this round
         if round_idx == 0:
@@ -65,7 +70,6 @@ def train_fmpe_rounds(
             theta_samples = prior_fn(prior_key, n_simulations)
         else:
             # Subsequent rounds: sample from posterior given observed data
-            post_key, key = jr.split(key)
             theta_samples = estim.sample_posterior(
                 y_observed[None, ...],
                 theta_shape=theta_shape,
@@ -73,8 +77,11 @@ def train_fmpe_rounds(
             )
         
         # Generate observations using simulator
+        logger.info(f"Generating {n_simulations} observations for round {round_idx + 1}")
+        start_time = time.time()
         sim_key, key = jr.split(key)
         y_samples = simulator_fn(sim_key, theta_samples)
+        logger.info(f"Round {round_idx + 1} observation generation completed in {time.time() - start_time:.2f} seconds")
         
         # Create data structure for this round
         round_data = {
@@ -93,25 +100,42 @@ def train_fmpe_rounds(
                 all_data,
                 round_data
             )
-        
+
+        if isinstance(bijection, FittableBijection):
+            logger.info(f"Fitting bijection for round {round_idx + 1}")
+            bijection.fit(all_data)
+
         # Split data for training
         split_key, key = jr.split(key)
         total_samples = all_data['data']['theta'].shape[0]
-        train_data, val_data = split_data(
-            all_data, 
-            total_samples, 
-            split=0.8, 
-            shuffle_rng=split_key
-        )
+
+        if bijection is not None:
+            train_data, val_data = split_data(
+                bijection(all_data),
+                total_samples, 
+                split=0.8, 
+                shuffle_rng=split_key
+            )
+        else:
+            train_data, val_data = split_data(
+                all_data,
+                total_samples, 
+                split=0.8, 
+                shuffle_rng=split_key
+            )
         
         # Train model on accumulated data
-        print(f"Training on {total_samples} samples")
-        estim.fit(
+        logger.info(f"Training FMPE round {round_idx + 1} on {total_samples} samples")
+        start_time = time.time()
+        losses = estim.fit(
             train_data,
             val_data,
             n_iter=n_epochs,
             optimizer=optimizer,
             batch_size=batch_size
         )
+        final_train_loss = losses[0][-1]  # Last training loss
+        final_val_loss = losses[1][-1]    # Last validation loss
+        logger.info(f"FMPE round {round_idx + 1} training completed in {time.time() - start_time:.2f}s - Final train loss: {final_train_loss:.4f}, val loss: {final_val_loss:.4f}")
     
     return estim

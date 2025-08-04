@@ -1,6 +1,5 @@
 from typing import Tuple
-from jax import random as jr, numpy as jnp, tree
-from flax import nnx
+from jax import random as jr, numpy as jnp
 
 # Import shared classifier components from lc2stnf
 from .lc2stnf import (
@@ -31,38 +30,33 @@ def train_c2st_nf_main_classifier(
     # Class C=0: Z_n where Z_n ~ N(0, Im)
     rng_key, z_key = jr.split(rng_key)
     z_base = jr.normal(z_key, shape=(N_cal, m))
-    print(f'z base mean: {jnp.mean(z_base)}')
-    print(f'z base std: {jnp.std(z_base)}')
+    print(f'z base mean: {jnp.mean(z_base, axis=0)}')
+    print(f'z base std: {jnp.std(z_base, axis=0)}')
 
     # Class C=1: Z_q_n from the estimated posterior
-    print(f'z samples mean: {jnp.mean(z_samples)}')
-    print(f'z samples std: {jnp.std(z_samples)}')
+    print(f'z samples mean: {jnp.mean(z_samples, axis=0)}')
+    print(f'z samples std: {jnp.std(z_samples, axis=0)}')
     
     import matplotlib.pyplot as plt
     import seaborn as sns
+    import pandas as pd
     
-    # Create scatter plot with marginal histograms for z_base
-    fig1 = plt.figure(figsize=(8, 8))
-    if m > 1:
-        g1 = sns.jointplot(x=z_base[:, 0], y=z_base[:, 1], 
-                          kind='scatter', marginal_kws={'bins': 30})
-    else:
-        g1 = sns.jointplot(x=z_base[:, 0], y=z_base[:, 0], 
-                          kind='scatter', marginal_kws={'bins': 30})
-    g1.fig.suptitle('z_base distribution')
-    plt.savefig('z_base.png')
+    # Create pairplot for z_base
+    z_base_df = pd.DataFrame(z_base, columns=[f'z_{i}' for i in range(m)])
+    g1 = sns.PairGrid(z_base_df, diag_sharey=False)
+    g1.map_lower(sns.scatterplot, alpha=0.6)
+    g1.map_diag(sns.histplot, bins=30)
+    g1.fig.suptitle('z_base distribution (Standard Normal)', y=1.02)
+    plt.savefig('z_base.png', bbox_inches='tight', dpi=150)
     plt.close()
     
-    # Create scatter plot with marginal histograms for z_samples
-    fig2 = plt.figure(figsize=(8, 8))
-    if m > 1:
-        g2 = sns.jointplot(x=z_samples[:, 0], y=z_samples[:, 1], 
-                          kind='scatter', marginal_kws={'bins': 30})
-    else:
-        g2 = sns.jointplot(x=z_samples[:, 0], y=z_samples[:, 0], 
-                          kind='scatter', marginal_kws={'bins': 30})
-    g2.fig.suptitle('z_samples distribution')
-    plt.savefig('z_sampled.png')
+    # Create pairplot for z_samples
+    z_samples_df = pd.DataFrame(z_samples, columns=[f'z_{i}' for i in range(m)])
+    g2 = sns.PairGrid(z_samples_df, diag_sharey=False)
+    g2.map_lower(sns.scatterplot, alpha=0.6)
+    g2.map_diag(sns.histplot, bins=30)
+    g2.fig.suptitle('z_samples distribution (Estimated Posterior)', y=1.02)
+    plt.savefig('z_sampled.png', bbox_inches='tight', dpi=150)
     plt.close()
 
     # Combine data and labels for training (z only, no x)

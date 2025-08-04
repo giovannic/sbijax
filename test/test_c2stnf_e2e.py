@@ -1,5 +1,5 @@
 import pytest
-from jax import numpy as jnp, random as jr, tree
+from jax import numpy as jnp, random as jr
 
 from sfmpe.util.dataloader import flatten_structured
 from sfmpe.utils import split_data
@@ -87,12 +87,14 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, 
 
     train_key, key = jr.split(key)
 
-    estim.fit(
+    losses = estim.fit(
         train,
         val,
         optimizer=optimiser,
         n_iter=n_epochs_train
     )
+    print(f'Training losses: {losses[0][-1]}')
+    print(f'Validation losses: {losses[1][-1]}')
 
     # Create calibration data and generate z_samples
     key_theta, key_x, key = jr.split(key, 3)
@@ -189,7 +191,8 @@ def test_c2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, 
 @pytest.mark.parametrize(
     "dim,train_size,cal_size,num_classifiers",
     [
-        (1, 10_000, 1_000, 10),
+        (1, 1_000, 1_000, 10),
+        (10, 1_000, 1_000, 10),
     ],
 )
 def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_classifiers):
@@ -228,18 +231,23 @@ def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_clas
     }
 
     batch_size = train_size // 10
-    n_train = int(train_size * 0.8)
+    train, val = split_data(
+        data,
+        train_size,
+        .8,
+        shuffle_rng=key
+    )
 
-    train = tree.map(lambda x: x[:n_train], data)
-    val = tree.map(lambda x: x[n_train:], data)
-
-    estim.fit(
+    losses = estim.fit(
         train,
         val,
         n_iter=n_epochs_train,
         optimizer = optimiser,
         batch_size=batch_size
     )
+
+    print(f'Training losses: {losses[0][-1]}')
+    print(f'Validation losses: {losses[1][-1]}')
 
     # Create calibration data and generate z_samples
     key_theta, key_x, key = jr.split(key, 3)
@@ -324,6 +332,171 @@ def test_c2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_clas
         main,
         null_classifier,
         latent_dim=dim,
+    )
+    print(f'null_stats: {null_stats}')
+    print(f'main_stat: {main_stat}')
+    print(f'p_value: {p_value}')
+    print(jnp.quantile(null_stats, jnp.array([0.25, .5, 0.95])))
+    assert main_stat < jnp.quantile(null_stats, 0.95)
+    assert p_value > 0.05
+
+@pytest.mark.parametrize(
+    "dim,train_size,cal_size,num_classifiers",
+    [
+        (1, 10_000, 1_000, 10),
+    ],
+)
+def test_c2stnf_on_learned_hierarchical_distribution_fmpe(dim, train_size, cal_size, num_classifiers):
+    key = jr.PRNGKey(0)
+    nnx_key, key = jr.split(key)
+    rngs = nnx.Rngs(nnx_key)
+    n_epochs = 100
+    n_phi = 2
+    n_obs = 5 
+
+    nn = MLPVectorField(
+        theta_dim=dim + dim * n_phi,
+        context_dim=dim * n_phi * n_obs,
+        latent_dim=64,
+        n_layers=2,
+        dropout=.1,
+        activation=nnx.relu
+    )
+    optimiser = optax.adam(3e-4)
+
+    model = CNF(nn)
+
+    estim = FMPE(model)
+
+    # Create training data
+    sample_key, key = jr.split(key)
+    mu = jr.normal(sample_key, (train_size, dim))
+    phi_sd = 1e-1
+    phi_noise = jr.normal(sample_key, (train_size, dim * n_phi)) * phi_sd
+    phi = mu.repeat(n_phi, axis=1) + phi_noise
+
+    y_sd = 1e-2
+    noise = jr.normal(sample_key, (train_size, dim * n_phi * n_obs)) * y_sd
+    y = jnp.tile(phi, (1, n_obs)) + noise
+    data = {
+        'data': {
+            'theta': jnp.concatenate([mu, phi], axis=1),
+            'y': y
+        }
+    }
+
+    batch_size = train_size // 10
+    train, val = split_data(
+        data,
+        train_size,
+        .8,
+        shuffle_rng=key
+    )
+
+    losses = estim.fit(
+        train,
+        val,
+        n_iter=n_epochs_train,
+        optimizer = optimiser,
+        batch_size=batch_size
+    )
+
+    print(f'Training losses: {losses[0][-1]}')
+    print(f'Validation losses: {losses[1][-1]}')
+
+    # Create calibration data and generate z_samples
+    key_theta, key_x, key = jr.split(key, 3)
+    mu_cal = jr.normal(key_theta, (cal_size, dim))
+    phi_cal = mu_cal.repeat(n_phi, axis=1) + \
+              jr.normal(key_x, (cal_size, dim * n_phi)) * phi_sd
+    x_cal = jnp.tile(phi_cal, (1, n_obs)) + \
+            jr.normal(key_x, (cal_size, dim * n_phi * n_obs)) * y_sd
+    theta_cal = jnp.concatenate([mu_cal, phi_cal], axis=1)
+    
+    # Generate z_samples using the inverse function
+    z_samples = estim.sample_base_dist(
+        theta_cal,
+        x_cal,
+        theta_shape = (dim + dim * n_phi,)
+    )
+
+    # Train main classifier
+    n_layers = 1
+    activation = nnx.relu
+    latent_dim = 16
+    main = BinaryMLPClassifier(
+        dim=dim + dim * n_phi,
+        latent_dim = latent_dim,
+        n_layers=n_layers,
+        activation=activation,
+        rngs=rngs,
+    )
+
+    train_key, key = jr.split(key)
+    train_c2st_nf_main_classifier(
+        train_key,
+        main,
+        z_samples,
+        n_epochs
+    )
+
+    # Initialize null classifiers
+    null_classifier = MultiBinaryMLPClassifier(
+        dim=dim + dim * n_phi,
+        latent_dim=latent_dim,
+        n_layers=n_layers,
+        activation=activation,
+        n=num_classifiers,
+        rngs=rngs,
+    )
+
+    # Precompute null distribution classifiers
+    null_key, key = jr.split(key)
+    precompute_c2st_nf_null_classifiers(
+        rng_key=null_key,
+        classifiers=null_classifier,
+        latent_dim=dim + dim * n_phi,
+        N_cal=cal_size,
+        num_epochs=n_epochs,
+    )
+
+    # Evaluate C2ST-NF using posterior samples
+    mu_key, phi_noise_key, obs_noise_key, key = jr.split(key, 4)
+    mu_truth = jr.normal(mu_key, (dim,))
+    phi_truth = mu_truth.repeat(n_phi) + \
+               jr.normal(phi_noise_key, (dim * n_phi,)) * phi_sd
+    observation = phi_truth.repeat(n_obs) + \
+            jr.normal(obs_noise_key, (dim * n_phi * n_obs,)) * y_sd
+    theta_truth = jnp.concatenate([mu_truth, phi_truth], axis=0)
+    
+    # Sample from posterior  
+    posterior_samples = estim.sample_posterior(
+        observation[None,...],
+        theta_shape=(dim + dim * n_phi,),
+        n_samples=100
+    )
+    print(f'truth: {theta_truth}')
+    print(f'observation: {observation}')
+    print(f'posterior mean: {jnp.mean(posterior_samples, axis=0)}')
+    print(f'posterior std: {jnp.std(posterior_samples, axis=0)}')
+    print(f'posterior: {posterior_samples[:10]}')
+    
+    # Convert posterior samples to z samples
+    z_posterior_samples = estim.sample_base_dist(
+        posterior_samples,
+        observation[None, ...].repeat(100, axis=0),
+        theta_shape=(dim + dim * n_phi,)
+    )
+    print('z_post_mean', jnp.mean(z_posterior_samples, axis=0))
+    print('z_post_std', jnp.std(z_posterior_samples, axis=0))
+    
+    ev_key, key = jr.split(key)
+    null_stats, main_stat, p_value = evaluate_c2st_nf(
+        ev_key,
+        z_posterior_samples,
+        main,
+        null_classifier,
+        latent_dim=dim + dim * n_phi,
     )
     print(f'null_stats: {null_stats}')
     print(f'main_stat: {main_stat}')

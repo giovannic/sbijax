@@ -1,4 +1,6 @@
 import argparse
+import logging
+import time
 from pathlib import Path
 from typing import Tuple, Callable
 from jaxtyping import PyTree
@@ -8,7 +10,7 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 
 from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
-from sfmpe.bottom_up import train_bottom_up, get_posterior
+from sfmpe.bottom_up import train_bottom_up
 from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.cnf import CNF
 from sfmpe.nn.transformer.transformer import Transformer
@@ -26,13 +28,15 @@ from flax import nnx
 import optax
 
 def run(n_rounds=2, n_epochs=1000):
+    logger = logging.getLogger(__name__)
+    logger.info(f"Starting hierarchical Gaussian experiment with n_rounds={n_rounds}, n_epochs={n_epochs}")
     n_simulations = 1_000
-    n_post_samples = 10
-    var_theta = 1. #TODO: change to 10
-    var_mu = 1. #TODO: change to 10
-    var_obs = 1.
-    n_obs = 10 #TODO: scale up
-    n_theta = 5
+    n_post_samples = 1_000
+    var_mu = 1.
+    var_theta = 1e-1
+    var_obs = 1e-2
+    n_theta = 2
+    n_obs = 5
 
     independence = {
         'local': ['theta', 'obs'], # Shouldn't this be commented out?
@@ -67,19 +71,19 @@ def run(n_rounds=2, n_epochs=1000):
             'obs': obs
         }
 
-    key = jr.PRNGKey(0)
+    key = jr.PRNGKey(42)
 
     theta_key, y_key, key = jr.split(key, 3)
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
     y_observed = simulator_fn(y_key, theta_truth)
 
-    rngs = nnx.Rngs(0)
+    rngs = nnx.Rngs(key)
     config = {
         'latent_dim': 64,
         'label_dim': 8,
         'index_out_dim': 0,
         'n_encoder': 1,
-        'n_decoder': 2,
+        'n_decoder': 1,
         'n_heads': 2,
         'n_ff': 2,
         'dropout': .1,
@@ -99,6 +103,8 @@ def run(n_rounds=2, n_epochs=1000):
     estim = SFMPE(model, rngs=rngs)
 
     train_key, key = jr.split(key)
+    logger.info("Starting SFMPE bottom-up training")
+    start_time = time.time()
     labels, slices, masks = train_bottom_up(
         train_key,
         estim,
@@ -114,29 +120,28 @@ def run(n_rounds=2, n_epochs=1000):
         independence,
         optimiser=optax.adam(3e-4)
     )
+    logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
-    post_key, key = jr.split(key)
-    posterior = get_posterior(
-        post_key,
-        estim,
-        labels,
+    logger.info("Sampling SFMPE posterior")
+    start_time = time.time()
+    posterior = estim.sample_posterior(
+        _flatten(y_observed)[..., None],
+        labels, #type:ignore
         slices,
-        masks,
-        n_post_samples,
-        theta_truth,
-        y_observed,
-        independence
+        masks=masks,
+        n_samples=n_post_samples
     )
+    logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
-    print('internal FMPE')
+    logger.info('Starting internal FMPE training')
 
     # Create proxy functions for FMPE training
     def fmpe_prior_fn(key, n_samples):
         """Prior function compatible with FMPE interface"""
         theta_samples = prior_fn(n_theta).sample((n_samples,), seed=key)
         # Flatten: combine mu and theta
-        mu_flat = theta_samples['mu'].reshape((n_samples, 1))
-        theta_flat = theta_samples['theta'].reshape((n_samples, n_theta))
+        mu_flat = theta_samples['mu'].reshape((n_samples, 1)) #type:ignore
+        theta_flat = theta_samples['theta'].reshape((n_samples, n_theta)) #type:ignore 
         return jnp.concatenate([mu_flat, theta_flat], axis=1)
     
     def fmpe_simulator_fn(key, theta_flat):
@@ -168,6 +173,8 @@ def run(n_rounds=2, n_epochs=1000):
     
     # Train using round-based approach
     train_key, key = jr.split(key)
+    logger.info("Starting FMPE round-based training")
+    start_time = time.time()
     fmpe_estim = train_fmpe_rounds(
         train_key,
         fmpe_estim,
@@ -182,13 +189,20 @@ def run(n_rounds=2, n_epochs=1000):
         batch_size=100
     )
 
+    logger.info(f"FMPE round-based training completed in {time.time() - start_time:.2f} seconds")
+
     # Sample from posterior
-    post_key, key = jr.split(key)
+    logger.info("Sampling FMPE posterior")
+    start_time = time.time()
     fmpe_posterior_samples = fmpe_estim.sample_posterior(
         fmpe_y_observed[None, ...],
         theta_shape=(1 + n_theta,),
         n_samples=n_post_samples
     )
+
+    print(f'truth: {fmpe_y_observed}')
+    print(f'posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
+    logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
     fmpe_theta_hat = jnp.mean(
         fmpe_posterior_samples[..., :1],
@@ -204,7 +218,9 @@ def run(n_rounds=2, n_epochs=1000):
     z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
 
     cal_key, key = jr.split(key)
-    n_cal = 10_000
+    n_cal = 1_000
+    logger.info(f"Creating calibration dataset with {n_cal} samples")
+    start_time = time.time()
     d = create_calibration_dataset(
         cal_key,
         prior_fn,
@@ -212,17 +228,17 @@ def run(n_rounds=2, n_epochs=1000):
         n_theta,
         n_cal,
     )
+    logger.info(f"Calibration dataset creation completed in {time.time() - start_time:.2f} seconds")
 
-    print('d shapes', tree.map(lambda x: x.shape, d))
+    logger.info(f'Calibration dataset shapes: {tree.map(lambda x: x.shape, d)}')
 
     def inverse(theta, x):
-        print(theta.shape, x.shape)
         # Use SFMPE's sample_base_dist method like in the test
         # theta and x should be flat arrays with singleton dimension added
         z_samples = estim.sample_base_dist(
             theta[..., None],  # Add singleton dimension for theta
             x[..., None],      # Add singleton dimension for context
-            labels,
+            labels, #type:ignore
             slices,
             masks=masks
         )
@@ -233,7 +249,6 @@ def run(n_rounds=2, n_epochs=1000):
             z_samples['theta'].reshape((theta.shape[0], -1))
         ], axis=1)
         return z
-
 
     def inverse_fmpe(theta, x):
         """Inverse function for FMPE model"""
@@ -250,6 +265,8 @@ def run(n_rounds=2, n_epochs=1000):
     # Preprocess posterior samples for SFMPE
     sfmpe_posterior_flat = _flatten(posterior)
     
+    logger.info("Starting C2ST-NF analysis for SFMPE")
+    start_time = time.time()
     analyse_c2stnf(
         analyse_key,
         d,
@@ -260,6 +277,10 @@ def run(n_rounds=2, n_epochs=1000):
         n_cal,
         out_dir/'sfmpe'
     )
+    logger.info(f"SFMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
+    
+    logger.info("Starting C2ST-NF analysis for FMPE")
+    start_time = time.time()
     analyse_c2stnf(
         analyse_key,
         d,
@@ -270,15 +291,16 @@ def run(n_rounds=2, n_epochs=1000):
         n_cal,
         out_dir/'fmpe'
     )
+    logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
 
-    print("SFMPE results:")
-    print(f"theta_truth: {theta_truth}")
-    print(f"theta_hat: {theta_hat}")
-    print(f"z_hat: {z_hat}")
+    logger.info("SFMPE results:")
+    logger.info(f"theta_truth: {theta_truth}")
+    logger.info(f"theta_hat: {theta_hat}")
+    logger.info(f"z_hat: {z_hat}")
     
-    print("FMPE results:")
-    print(f"fmpe_theta_hat: {fmpe_theta_hat}")
-    print(f"fmpe_z_hat: {fmpe_z_hat}")
+    logger.info("FMPE results:")
+    logger.info(f"fmpe_theta_hat: {fmpe_theta_hat}")
+    logger.info(f"fmpe_z_hat: {fmpe_z_hat}")
 
 def analyse_c2stnf(
     key: jnp.ndarray,
@@ -319,7 +341,7 @@ def analyse_c2stnf(
         activation=activation,
         rngs=nnx.Rngs(main_key),
     )
-    print(f'Training main classifier with {n_epochs} epochs')
+    logger.info(f'Training main classifier with {n_epochs} epochs')
     train_c2st_nf_main_classifier(
         main_key,
         main,
@@ -335,7 +357,7 @@ def analyse_c2stnf(
         n=n_null,
         rngs=nnx.Rngs(null_key)
     )
-    print(f'Training {n_null} null classifiers with {n_epochs} epochs')
+    logger.info(f'Training {n_null} null classifiers with {n_epochs} epochs')
     precompute_c2st_nf_null_classifiers(
         null_key,
         null_cls,
@@ -347,8 +369,14 @@ def analyse_c2stnf(
     # Generate posterior samples at observation using provided posterior samples
     z_posterior = inverse(
         posterior_samples,
-        jnp.repeat(observation[None, :], posterior_samples.shape[0], axis=0)
+        jnp.repeat(
+            observation[None, :],
+            posterior_samples.shape[0],
+            axis=0
+        )
     )
+    logger.info(f'z_posterior mean: {jnp.mean(z_posterior, axis=0)}')
+    logger.info(f'z_posterior std: {jnp.std(z_posterior, axis=0)}')
     
     ev_key, key = jr.split(key)
     null_stats, main_stat, p_value = evaluate_c2st_nf(
@@ -358,6 +386,10 @@ def analyse_c2stnf(
         null_cls,
         latent_dim=latent_dim
     )
+
+    logger.info(f'null_stats: {null_stats}')
+    logger.info(f'main_stat: {main_stat}')
+    logger.info(f'p-value: {p_value}')
 
     # Create output directory and make quant plot
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -393,10 +425,9 @@ def create_calibration_dataset(
     n: int
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     prior_key, sim_key = jr.split(key)
-    #TODO: update to flatten sfmpe version
     prior = prior_fn(n_theta).sample((n,), seed=prior_key)
-    x = _flatten(prior)
     y = simulator_fn(sim_key, prior)
+    x = _flatten(prior)
     y = _flatten(y)
     return x, y
 
@@ -407,5 +438,12 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    print(f"Running with n_rounds={args.n_rounds}, n_epochs={args.n_epochs}")
+    # Setup logging for main execution
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"Running with n_rounds={args.n_rounds}, n_epochs={args.n_epochs}")
     run(n_rounds=args.n_rounds, n_epochs=args.n_epochs)

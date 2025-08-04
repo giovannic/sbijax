@@ -4,7 +4,6 @@ from jax import (
     random as jr,
     vmap,
     scipy as js,
-    tree
 )
 
 import flax.nnx as nnx
@@ -206,8 +205,6 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
     train = { 'data': train, 'labels': data['labels'] }
     val = { 'data': val, 'labels': data['labels'] }
     masks = None
-
-    train_key, key = jr.split(key)
 
     estim.fit(
         train,

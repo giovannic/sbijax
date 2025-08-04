@@ -5,6 +5,8 @@ from sfmpe.util.dataloader import (
 )
 from sfmpe.utils import split_data
 import optax
+import logging
+import time
 
 from jax import numpy as jnp, random as jr, jit, vmap, tree
 
@@ -23,11 +25,13 @@ def train_bottom_up(
     independence,
     optimiser=optax.adam(0.0003),
     ):
-
+    logger = logging.getLogger(__name__)
+    
     data = {}
     flat_data, data_slices = ({'labels': None, 'masks': None}, {})
     train_data = None
     for i in range(n_rounds):
+        logger.info(f"Starting bottom-up training round {i+1}/{n_rounds}")
         # Fit p(z|theta, y)
         theta_key, obs_key, key = jr.split(key, 3)
         if i > 0:
@@ -97,15 +101,22 @@ def train_bottom_up(
             shuffle_rng=split_key
         )
 
-        estim.fit(
+        logger.info(f"Training p(z|theta,y) for round {i+1} with {total_samples} samples")
+        start_time = time.time()
+        losses = estim.fit(
             train_split,
             val_split,
             optimizer=optimiser,
             n_iter=n_epochs,
             batch_size=100
         )
+        final_train_loss = losses[0][-1]  # Last training loss
+        final_val_loss = losses[1][-1]    # Last validation loss
+        logger.info(f"Round {i+1} p(z|theta,y) training completed in {time.time() - start_time:.2f}s - Final train loss: {final_train_loss:.4f}, val loss: {final_val_loss:.4f}")
 
         # simulate from p(z_vec|theta, y_vec)
+        logger.info(f"Sampling from p(z_vec|theta, y_vec) for round {i+1}")
+        start_time = time.time()
         z_sim = z_data.copy()
         sim_key, key = jr.split(key)
 
@@ -145,8 +156,10 @@ def train_bottom_up(
             return tree.map(lambda leaf: leaf[0], post)
 
         z_vec = sample_for_context(flat_z_sim['data']['y'])
+        logger.info(f"Round {i+1} posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
         # fit p(theta,z_vec|y_vec)
+        logger.info(f"Preparing data for p(theta,z_vec|y_vec) training in round {i+1}")
         data = {
             'theta': {
                 l: z_vec[l] #type: ignore
@@ -182,13 +195,18 @@ def train_bottom_up(
             shuffle_rng=split_key
         )
 
-        estim.fit(
+        logger.info(f"Training p(theta,z_vec|y_vec) for round {i+1} with {total_samples} samples")
+        start_time = time.time()
+        losses = estim.fit(
             train_split,
             val_split,
             optimizer=optimiser,
             n_iter=n_epochs,
             batch_size=100
         )
+        final_train_loss = losses[0][-1]  # Last training loss
+        final_val_loss = losses[1][-1]    # Last validation loss
+        logger.info(f"Round {i+1} p(theta,z_vec|y_vec) training completed in {time.time() - start_time:.2f}s - Final train loss: {final_train_loss:.4f}, val loss: {final_val_loss:.4f}")
 
     # TODO: refactor into structuring code or estimator
     return (
@@ -196,30 +214,3 @@ def train_bottom_up(
         data_slices['theta'],
         flat_data['masks']
     )
-
-
-def get_posterior(
-    key,
-    estim,
-    labels,
-    slices,
-    masks,
-    n_samples,
-    theta_truth,
-    y_observed,
-    independence
-    ):
-    obs_flat, _ = flatten_structured(
-        { 'theta': theta_truth, 'y': y_observed },
-        independence=independence
-    )
-
-    posterior = estim.sample_posterior( 
-        obs_flat['data']['y'],
-        labels,
-        slices,
-        masks=masks,
-        n_samples=n_samples
-    )
-
-    return posterior
