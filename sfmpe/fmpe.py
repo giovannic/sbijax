@@ -32,7 +32,7 @@ def _cfm_loss(
     t_key, rng_key = jr.split(rng_key)
     times = jr.uniform(t_key, shape=(n, 1))
     theta_key, rng_key = jr.split(rng_key)
-    theta_0 = jr.normal(theta_key, shape=theta.shape)
+    theta_0 = jr.normal(theta_key, theta.shape)
 
     theta_t = theta_t_linear(
         theta_0,

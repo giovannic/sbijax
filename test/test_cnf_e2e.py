@@ -269,7 +269,7 @@ def test_cnf_can_recover_base_distribution_from_training_set(dim, train_size):
         lambda x: ks_norm_test(x, alpha=0.01),
         in_axes=(1,)
     )(z)
-    print(f'Critical value: {ks_response["critical_value"]}, p_value: {ks_response["p_value"]}')
+    print(f'Critical value: {ks_response["critical_value"]}, statistic: {ks_response["statistic"]}')
     assert jnp.all(~ks_response['reject_null'])
 
     if dim > 1:
@@ -287,16 +287,114 @@ def test_cnf_can_recover_base_distribution_from_training_set(dim, train_size):
         )
 
 
+# Helper function to create correlation matrices
+def _create_corr_matrix(dim: int, strength: float = 0.6) -> jnp.ndarray:
+    """Create correlation matrix with specified off-diagonal strength."""
+    return jnp.full((dim, dim), strength) + jnp.eye(dim) * (1 - strength)
+
 @pytest.mark.parametrize(
-    "dim,train_size",
+    "dim,train_size,theta_cov",
     [
-        (1, 10_000),
-        (3, 10_000),
+        # No theta correlation (baseline)
+        (2, 10_000, jnp.eye(2)),
+        (2, 10_000, _create_corr_matrix(2, 0.6)),
+        (3, 10_000, jnp.eye(3)),
+        (3, 10_000, _create_corr_matrix(3, 0.6)),
+    ],
+)
+def test_cnf_can_recover_base_distribution_from_correlated_training_set(
+    dim, train_size, theta_cov
+):
+    key = jr.PRNGKey(0)
+    n_obs = 10
+
+    nn = MLPVectorField(
+        theta_dim=dim,
+        context_dim=dim * n_obs,
+        latent_dim=64,
+        n_layers=2,
+        dropout=.1,
+        activation=nnx.relu
+    )
+    optimiser = optax.adam(3e-4)
+
+    model = CNF(nn)
+    estim = FMPE(model)
+
+    # Create training data using provided theta covariance matrix
+    sample_key, key = jr.split(key)
+    theta_key, y_key = jr.split(sample_key)
+    
+    # Sample theta from multivariate normal with specified covariance
+    theta = jr.multivariate_normal(
+        theta_key, 
+        mean=jnp.zeros(dim), 
+        cov=theta_cov, 
+        shape=(train_size,)
+    )
+    
+    # Generate y with independent normal noise
+    sigma = 1e-1
+    noise = jr.normal(y_key, (train_size, dim * n_obs)) * sigma
+    y = jnp.tile(theta, (1, n_obs)) + noise
+
+    data = {
+        'data': {
+            'theta': theta,
+            'y': y
+        }
+    }
+
+    split_key, key = jr.split(key)
+    train, val = split_data(data, train_size, .8, shuffle_rng=split_key)
+
+    estim.fit(
+        train,
+        val,
+        optimizer=optimiser,
+        n_iter=n_epochs_train
+    )
+
+    z = estim.sample_base_dist(
+        train['data']['theta'],
+        train['data']['y'],
+        (dim,)
+    )
+
+    # Check each dimension is normal
+    print(f'mean: {jnp.mean(z, axis=0)}, std: {jnp.std(z, axis=0)}')
+    ks_response = vmap(
+        lambda x: ks_norm_test(x, alpha=0.01),
+        in_axes=(1,)
+    )(z)
+    print(f'Critical value: {ks_response["critical_value"]}, statistic: {ks_response["statistic"]}')
+    assert jnp.all(~ks_response['reject_null'])
+
+    # Compute correlation matrix - dimensions should be independent
+    corr_matrix = jnp.corrcoef(z, rowvar=False)
+    
+    # Off-diagonal elements should be close to zero (independence)
+    off_diagonal = corr_matrix[jnp.triu_indices(dim, k=1)]
+    max_correlation = jnp.max(jnp.abs(off_diagonal))
+    
+    assert max_correlation < 0.1, (
+        f"Dimensions are not independent. "
+        f"Maximum correlation: {max_correlation}, "
+        f"Correlation matrix: {corr_matrix}"
+    )
+
+@pytest.mark.parametrize(
+    "dim,train_size,cov",
+    [
+        (1, 10_000, None),
+        (3, 10_000, jnp.eye(3)),
+        (3, 10_000, _create_corr_matrix(3, 0.6)),
     ],
 )
 def test_cnf_can_recover_base_distribution_from_posterior_estimate(
     dim,
     train_size,
+    cov
     ):
     key = jr.PRNGKey(0)
     key, nnx_key = jr.split(key)
@@ -322,7 +420,15 @@ def test_cnf_can_recover_base_distribution_from_posterior_estimate(
 
     # Create training data
     sample_key, key = jr.split(key)
-    theta = jr.normal(sample_key, (train_size, dim))
+    if cov is None:
+        theta = jr.normal(sample_key, (train_size, dim))
+    else:
+        theta = jr.multivariate_normal(
+            sample_key, 
+            mean=jnp.zeros(dim), 
+            cov=cov, 
+            shape=(train_size,)
+        )
 
     sigma = 1e-1
     noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
@@ -352,11 +458,6 @@ def test_cnf_can_recover_base_distribution_from_posterior_estimate(
         theta_shape = (dim,),
         n_samples=1_000,
     )
-    theta_truth = theta[0]
-    print(f'theta_truth: {theta_truth}')
-    print(f'mean: {jnp.mean(theta_hat)}, std: {jnp.std(theta_hat)}')
-    # assert jnp.allclose(jnp.mean(theta_hat), theta_truth, atol=1e-3)
-    # TODO: compute true posterior https://github.com/sbi-benchmark/sbibm/blob/main/sbibm/tasks/gaussian_linear/task.py
 
     # check that reverse flow recovers the base distribution
     z = estim.sample_base_dist(
