@@ -377,6 +377,7 @@ def analyse_c2stnf(
     )
     logger.info(f'z_posterior mean: {jnp.mean(z_posterior, axis=0)}')
     logger.info(f'z_posterior std: {jnp.std(z_posterior, axis=0)}')
+    logger.info(f'z_posterior corrcoef: {jnp.corrcoef(z_posterior, rowvar=False)}')
     
     ev_key, key = jr.split(key)
     null_stats, main_stat, p_value = evaluate_c2st_nf(

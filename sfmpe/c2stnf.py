@@ -1,7 +1,6 @@
 from typing import Tuple
 from jax import random as jr, numpy as jnp
 
-# Import shared classifier components from lc2stnf
 from .lc2stnf import (
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier,
@@ -11,7 +10,7 @@ from .lc2stnf import (
 def train_c2st_nf_main_classifier(
         rng_key: jnp.ndarray,
         classifier: BinaryMLPClassifier,
-        z_samples: jnp.ndarray,  # Z samples from the estimated posterior
+        z_samples: jnp.ndarray,
         num_epochs: int = 100,
         batch_size: int = 100
     ):

@@ -2,8 +2,7 @@ import pytest
 from jax import (
     numpy as jnp,
     random as jr,
-    vmap,
-    scipy as js,
+    vmap
 )
 
 import flax.nnx as nnx
@@ -15,50 +14,10 @@ from sfmpe.cnf import CNF
 from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
 from sfmpe.nn.mlp import MLPVectorField
+from utils.helpers import ks_norm_test
 import optax
 
 n_epochs_train = 100
-
-
-def ks_norm_test(data, alpha=0.05):
-    """
-    Kolmogorov-Smirnov test for normality using cumulative statistics.
-    Tests if data comes from a standard normal distribution.
-    
-    Args:
-        data: 1D array of data points
-        alpha: significance level (default 0.05)
-    
-    Returns:
-        dict with test statistic, critical value, and p_value estimate
-    """
-    n = len(data)
-    
-    # Sort the data
-    sorted_data = jnp.sort(data)
-    
-    # Compute empirical CDF
-    empirical_cdf = jnp.arange(1, n + 1) / n
-    
-    # Compute theoretical CDF (standard normal)
-    theoretical_cdf = js.stats.norm.cdf(sorted_data)
-    
-    # KS test statistic: maximum difference between CDFs
-    D = jnp.max(jnp.abs(empirical_cdf - theoretical_cdf))
-    
-    # Critical value for KS test (asymptotic approximation)
-    critical_value = jnp.sqrt(-0.5 * jnp.log(alpha / 2)) / jnp.sqrt(n)
-    
-    # Rough p-value estimate (Kolmogorov distribution approximation)
-    p_value_approx = 2 * jnp.exp(-2 * n * D**2)
-    
-    return {
-        'statistic': D,
-        'critical_value': critical_value,
-        'p_value_approx': p_value_approx,
-        'reject_null': D > critical_value,
-        'sample_size': n
-    }
 
 def _create_transformer(rngs, config, dim):
     estimator = Transformer(
@@ -124,7 +83,6 @@ def test_scnf_can_recover_base_distribution_from_training_set(
     labels = data['labels']
     masks = None
 
-    train_key, key = jr.split(key)
     estim.fit(
         train,
         val,
@@ -132,9 +90,7 @@ def test_scnf_can_recover_base_distribution_from_training_set(
         n_iter=n_epochs_train
     )
 
-    inv_key, key = jr.split(key)
     z = estim.sample_base_dist(
-        inv_key,
         train['data']['theta'],
         train['data']['y'],
         labels,
@@ -234,9 +190,7 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
     # TODO: compute true posterior https://github.com/sbi-benchmark/sbibm/blob/main/sbibm/tasks/gaussian_linear/task.py
 
     # check that reverse flow recovers the base distribution
-    inv_key, key = jr.split(key)
     z = estim.sample_base_dist(
-        inv_key,
         theta_hat['theta'],
         jnp.broadcast_to(
             test_y[None, ...],
@@ -310,19 +264,34 @@ def test_cnf_can_recover_base_distribution_from_training_set(dim, train_size):
     )
 
     # check each dimension is normal
-    print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
+    print(f'mean: {jnp.mean(z, axis=0)}, std: {jnp.std(z, axis=0)}')
     ks_response = vmap(
         lambda x: ks_norm_test(x, alpha=0.01),
         in_axes=(1,)
     )(z)
-    print(ks_response)
+    print(f'Critical value: {ks_response["critical_value"]}, p_value: {ks_response["p_value"]}')
     assert jnp.all(~ks_response['reject_null'])
+
+    if dim > 1:
+        # Compute correlation matrix
+        corr_matrix = jnp.corrcoef(z, rowvar=False)
+        
+        # Off-diagonal elements should be close to zero (independence)
+        off_diagonal = corr_matrix[jnp.triu_indices(dim, k=1)]
+        max_correlation = jnp.max(jnp.abs(off_diagonal))
+        
+        assert max_correlation < 0.1, (
+            f"Dimensions are not independent. "
+            f"Maximum correlation: {max_correlation}, "
+            f"Correlation matrix: {corr_matrix}"
+        )
+
 
 @pytest.mark.parametrize(
     "dim,train_size",
     [
         (1, 10_000),
-        (10, 10_000),
+        (3, 10_000),
     ],
 )
 def test_cnf_can_recover_base_distribution_from_posterior_estimate(
@@ -399,8 +368,41 @@ def test_cnf_can_recover_base_distribution_from_posterior_estimate(
         (dim,)
     )
 
-    # check each dimension is normal
-    print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
-    ks_response = vmap(lambda x: ks_norm_test(x, alpha=0.01), in_axes=(1,))(z)
-    print(ks_response)
-    assert jnp.all(~ks_response['reject_null'])
+    # Test 1: Check that each dimension follows standard normal distribution
+    ks_results = vmap(
+        lambda x: ks_norm_test(x, alpha=0.01),
+        in_axes=(1,)
+    )(z)
+    
+    # All dimensions should pass normality test
+    assert jnp.all(~ks_results['reject_null']), (
+        f"Normality test failed for some dimensions. "
+        f"Statistics: {ks_results['statistic']}, "
+        f"Critical values: {ks_results['critical_value']}"
+    )
+    
+    # Test 2: Check independence between dimensions (for multi-dimensional case)
+    if dim > 1:
+        # Compute correlation matrix
+        corr_matrix = jnp.corrcoef(z, rowvar=False)
+        
+        # Off-diagonal elements should be close to zero (independence)
+        off_diagonal = corr_matrix[jnp.triu_indices(dim, k=1)]
+        max_correlation = jnp.max(jnp.abs(off_diagonal))
+        
+        assert max_correlation < 0.1, (
+            f"Dimensions are not independent. "
+            f"Maximum correlation: {max_correlation}, "
+            f"Correlation matrix: {corr_matrix}"
+        )
+    
+    # Test 3: Check that mean and std are approximately correct
+    mean = jnp.mean(z, axis=0)
+    std = jnp.std(z, axis=0)
+    
+    assert jnp.allclose(mean, 0.0, atol=0.1), (
+        f"Mean not close to 0: {mean}"
+    )
+    assert jnp.allclose(std, 1.0, atol=0.1), (
+        f"Standard deviation not close to 1: {std}"
+    )

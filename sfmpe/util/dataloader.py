@@ -230,12 +230,30 @@ def build_self_attention_mask(
     independence: dict
 ):
     """
-    Builds masks for local and cross-local independence
+    Builds masks for cross, local and cross-local independence
     """
     total_size = sum(prod(s['event_shape']) for s in block_slices.values())
 
     # Build default mask NxN = 1
     mask_np = np.ones((total_size, total_size), dtype=np.int8)
+
+    # cross independence => zero out entire sub-block
+    for (blockA, blockB) in independence.get("cross", []):
+        if blockA not in block_slices or blockB not in block_slices:
+            continue
+        offA, sizeA, shapeA = (
+            block_slices[blockA]["offset"],
+            prod(block_slices[blockA]["event_shape"]),
+            block_slices[blockA]["event_shape"]
+        )
+        offB, sizeB, shapeB = (
+            block_slices[blockB]["offset"],
+            prod(block_slices[blockB]["event_shape"]),
+            block_slices[blockB]["event_shape"]
+        )
+
+        # zero out sub-block
+        mask_np[offA:offA+sizeA, offB:offB+sizeB] = 0
 
     # local independence => zero out self-block
     for key in independence.get("local", []):
@@ -301,7 +319,22 @@ def build_cross_attention_mask(
     mask_np = np.ones((Q, K), dtype=np.int8)
 
     # We'll ignore "local" because that's about within-block self attention,
-    # not cross. We only apply cross_local.
+    # not cross. We only apply cross and cross_local.
+
+    # cross
+    for (blockA, blockB) in independence.get("cross", []):
+        # Check if blockA is in query and blockB is in key
+        if blockA in query_slices and blockB in key_slices:
+            q_off, q_size, q_shape = (query_slices[blockA]["offset"],
+                                      prod(query_slices[blockA]["event_shape"]),
+                                      query_slices[blockA]["event_shape"])
+            k_off, k_size, k_shape = (key_slices[blockB]["offset"],
+                                      prod(key_slices[blockB]["event_shape"]),
+                                      key_slices[blockB]["event_shape"])
+            # Zero out sub-block
+            mask_np[q_off:q_off+q_size, k_off:k_off+k_size] = 0
+    
+    # cross_local => zero out entire sub-block
     cross_specs = independence.get("cross_local", [])
     for (blockA, blockB, idx_map) in cross_specs:
         # Check if blockA is in query and blockB is in key
