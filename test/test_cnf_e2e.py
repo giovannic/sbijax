@@ -533,8 +533,8 @@ def test_cnf_mixture_of_posteriors_recovers_base_distribution(
     nn = MLPVectorField(
         theta_dim=dim,
         context_dim=dim * n_obs,
-        latent_dim=64,
-        n_layers=2,
+        latent_dim=16,
+        n_layers=1,
         dropout=.1,
         activation=nnx.relu,
         rngs=rngs
@@ -605,13 +605,109 @@ def test_cnf_mixture_of_posteriors_recovers_base_distribution(
         )
         return z
 
+    def compute_z(single_theta, single_test_y):
+        # Project posterior samples to base distribution
+        z = estim.sample_base_dist(
+            single_theta[None, :],
+            single_test_y[None, :],
+            (dim,)
+        )
+        return z
+
+    # Vectorized function to sample posterior for each context (returning theta_hat)
+    def sample_posterior_for_context(single_test_y, context_key):
+        # Generate theta_0 from normal distribution with unique RNG key
+        theta_0 = jr.normal(context_key, (n_samples_per_context, dim))
+        
+        # Sample posterior for this context
+        theta_hat = estim.sample_posterior(
+            single_test_y[None, :],  # Add batch dimension
+            theta_shape=(dim,),
+            n_samples=n_samples_per_context,
+            theta_0=theta_0
+        )
+        return theta_hat
+
+    # Use vmap to sample posteriors for all contexts
+    all_theta_hat = vmap(sample_posterior_for_context, in_axes=(0, 0))(test_y, context_keys)  # Shape: (n_contexts, n_samples_per_context, dim)
+    
+    # Reshape theta_hat to combine all contexts
+    theta_hat_combined = all_theta_hat.reshape(n_contexts * n_samples_per_context, dim)  # Shape: (n_contexts * n_samples_per_context, dim)
+
+    # Create pairplots for theta_hat and theta
+    # import matplotlib.pyplot as plt
+    # import seaborn as sns
+    # import pandas as pd
+    
+    # # Create pairplot for theta_hat
+    # theta_hat_df = pd.DataFrame(theta_hat_combined, columns=[f'theta_{i}' for i in range(dim)])
+    # g1 = sns.PairGrid(theta_hat_df, diag_sharey=False)
+    # g1.map_lower(sns.scatterplot, alpha=0.6)
+    # g1.map_diag(sns.histplot, bins=30)
+    # g1.fig.suptitle('theta_hat distribution (Posterior Samples)', y=1.02)
+    # plt.savefig('theta_hat.png', bbox_inches='tight', dpi=150)
+    # plt.close()
+    
+    # # Create pairplot for theta
+    # theta_df = pd.DataFrame(theta[:test_y.shape[0]], columns=[f'theta_{i}' for i in range(dim)])
+    # g2 = sns.PairGrid(theta_df, diag_sharey=False)
+    # g2.map_lower(sns.scatterplot, alpha=0.6)
+    # g2.map_diag(sns.histplot, bins=30)
+    # g2.fig.suptitle('theta distribution (Ground Truth)', y=1.02)
+    # plt.savefig('theta.png', bbox_inches='tight', dpi=150)
+    # plt.close()
+
     # Use vmap to compute z values for all contexts at once
     all_z = vmap(sample_and_compute_z, in_axes=(0, 0))(test_y, context_keys)  # Shape: (n_contexts, n_samples_per_context, dim)
+
 
     # Reshape to concatenate all z samples into mixture
     z_mixture = all_z.reshape(n_contexts * n_samples_per_context, dim)  # Shape: (n_contexts * n_samples_per_context, dim)
 
-    print(f"Mixture: mean={jnp.mean(z_mixture, axis=0)}, "
+    all_z_direct = vmap(compute_z, in_axes=(0, 0))(theta[:test_y.shape[0]], test_y)  # Shape: (n_contexts, n_samples_per_context, dim)
+    z_direct_mixture = all_z_direct.reshape(n_contexts * n_samples_per_context, dim)  # Shape: (n_contexts * n_samples_per_context, dim)
+    mixture_corr_matrix = jnp.corrcoef(z_direct_mixture, rowvar=False)
+    mixture_off_diagonal = mixture_corr_matrix[jnp.triu_indices(dim, k=1)]
+    mixture_max_correlation = jnp.max(jnp.abs(mixture_off_diagonal))
+    print(f"Direct Mixture correlation matrix:\n{mixture_corr_matrix}")
+    print(f"Direct Mixture max correlation: {mixture_max_correlation}")
+
+    all_z_batch = vmap(compute_z, in_axes=(0, 0))(theta_hat_combined, test_y)  # Shape: (n_contexts, n_samples_per_context, dim)
+    z_direct_mixture = all_z_batch.reshape(n_contexts * n_samples_per_context, dim)  # Shape: (n_contexts * n_samples_per_context, dim)
+    mixture_corr_matrix = jnp.corrcoef(z_direct_mixture, rowvar=False)
+    mixture_off_diagonal = mixture_corr_matrix[jnp.triu_indices(dim, k=1)]
+    mixture_max_correlation = jnp.max(jnp.abs(mixture_off_diagonal))
+    print(f"Batch Mixture correlation matrix:\n{mixture_corr_matrix}")
+    print(f"Batch Mixture max correlation: {mixture_max_correlation}")
+
+    # Statistical comparison between theta_hat and theta
+    print("\n=== Comparison between theta_hat (combined) and theta ===")
+    
+    # Compute statistics for both distributions
+    theta_hat_mean = jnp.mean(theta_hat_combined, axis=0)
+    theta_hat_std = jnp.std(theta_hat_combined, axis=0)
+    theta_mean = jnp.mean(theta, axis=0)
+    theta_std = jnp.std(theta, axis=0)
+    
+    print(f"theta_hat mean: {theta_hat_mean}")
+    print(f"theta mean: {theta_mean}")
+    print(f"theta_hat std: {theta_hat_std}")
+    print(f"theta std: {theta_std}")
+    
+    # Compute correlation matrices
+    if dim > 1:
+        theta_hat_corr = jnp.corrcoef(theta_hat_combined, rowvar=False)
+        theta_corr = jnp.corrcoef(theta, rowvar=False)
+        
+        print(f"theta_hat correlation matrix:\n{theta_hat_corr}")
+        print(f"theta correlation matrix:\n{theta_corr}")
+        
+        # Compare correlation matrices
+        corr_diff = jnp.abs(theta_hat_corr - theta_corr)
+        max_corr_diff = jnp.max(corr_diff)
+        print(f"Max difference in correlation matrices: {max_corr_diff}")
+
+    print(f"\nMixture: mean={jnp.mean(z_mixture, axis=0)}, "
           f"std={jnp.std(z_mixture, axis=0)}")
 
     # Test mixture normality

@@ -33,7 +33,7 @@ def train_lc2st_classifiers(
     """
     x_cal, theta_cal, theta_q = d_cal
     N_cal = x_cal.shape[0]
-    
+
     # Train main classifier
     # Class C=0: (x, theta) from joint distribution p(theta, x)
     # Class C=1: (x, theta_q) from posterior q(theta|x) p(x)
@@ -41,7 +41,7 @@ def train_lc2st_classifiers(
     u_posterior = jnp.concatenate([x_cal, theta_q], axis=-1)
     u_main = jnp.concatenate([u_joint, u_posterior], axis=0)
     labels_main = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)
-    
+
     rng_key, main_key = jr.split(rng_key)
     fit_classifier(
         main_key,
@@ -51,18 +51,18 @@ def train_lc2st_classifiers(
         num_epochs=num_epochs,
         batch_size=batch_size
     )
-    
+
     # Train null classifiers with permuted labels
     n_null = null_classifier.n
     rng_key, null_key = jr.split(rng_key)
-    
+
     # Create 3D input for null classifiers: (batch_size, n_classifiers, feature_dim)
     u_null_base = jnp.concatenate([u_joint, u_posterior], axis=0)  # (2*N_cal, feature_dim)
     u_null = jnp.broadcast_to(
         u_null_base[None, :, :], 
         (n_null, 2*N_cal, u_null_base.shape[-1])
     ).transpose(1, 0, 2)  # (2*N_cal, n_classifiers, feature_dim)
-    
+
     # Generate different permuted labels for each null classifier
     base_labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)
     null_keys = jr.split(null_key, n_null)
@@ -71,7 +71,10 @@ def train_lc2st_classifiers(
         return jr.permutation(key, base_labels)
     
     # Create permuted labels for each classifier
-    permuted_labels = jnp.stack([permute_labels(key) for key in null_keys], axis=1)  # (2*N_cal, n_classifiers)
+    permuted_labels = jnp.stack([
+        permute_labels(key)
+        for key in null_keys
+    ], axis=1)  # (2*N_cal, n_classifiers)
     
     fit_classifier(
         null_key,

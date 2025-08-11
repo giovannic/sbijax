@@ -384,14 +384,17 @@ def test_lc2st_on_learned_hierarchical_distribution_fmpe(dim, train_size, cal_si
     theta_cal = jnp.concatenate([mu_cal, phi_cal], axis=1)
     
     # Generate posterior samples theta_q using the trained estimator (batched with vmap)
-    def sample_single_posterior(x):
+    def sample_single_posterior(x, key):
+        theta_0 = jr.normal(key, (dim + dim * n_phi,))
         return estim.sample_posterior(
             x[None, ...],
             theta_shape = (dim + dim * n_phi,),
-            n_samples=1
+            n_samples=1,
+            theta_0 = theta_0
         ).reshape((dim + dim * n_phi,))
     
-    theta_q = vmap(sample_single_posterior)(x_cal)
+    keys = jr.split(key, cal_size)
+    theta_q = vmap(sample_single_posterior)(x_cal, keys)
 
     # Create calibration dataset (x, theta, theta_q)
     d_cal = (x_cal, theta_cal, theta_q)
