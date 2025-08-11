@@ -507,3 +507,177 @@ def test_cnf_can_recover_base_distribution_from_posterior_estimate(
     assert jnp.allclose(std, 1.0, atol=0.1), (
         f"Standard deviation not close to 1: {std}"
     )
+
+@pytest.mark.parametrize(
+    "dim,train_size,cov",
+    [
+        (2, 10_000, jnp.eye(2)),
+        (2, 10_000, _create_corr_matrix(2, 0.6)),
+    ],
+)
+def test_cnf_mixture_of_posteriors_recovers_base_distribution(
+    dim, train_size, cov
+):
+    """
+    Sanity check: Test that a mixture of posteriors projected to base distribution 
+    remains normally distributed. This validates the assumption that if individual
+    posteriors map to normal base distributions, their mixture should also be normal.
+    """
+    key = jr.PRNGKey(0)
+    key, nnx_key = jr.split(key)
+    rngs = nnx.Rngs(nnx_key)
+    n_obs = 10
+    n_contexts = 100  # Number of different observations to test
+    n_samples_per_context = 10 # Samples per posterior
+
+    nn = MLPVectorField(
+        theta_dim=dim,
+        context_dim=dim * n_obs,
+        latent_dim=64,
+        n_layers=2,
+        dropout=.1,
+        activation=nnx.relu,
+        rngs=rngs
+    )
+    optimiser = optax.adam(3e-4)
+
+    model = CNF(nn)
+    estim = FMPE(model)
+
+    # Create training data
+    sample_key, key = jr.split(key)
+    theta = jr.multivariate_normal(
+        sample_key, 
+        mean=jnp.zeros(dim), 
+        cov=cov, 
+        shape=(train_size,)
+    )
+
+    sigma = 1e-1
+    noise = jr.normal(sample_key, (train_size, dim * n_obs)) * sigma
+    y = jnp.tile(theta, (1, n_obs)) + noise
+    data = {
+        'data': {
+            'theta': theta,
+            'y': y
+        }
+    }
+
+    split_key, key = jr.split(key)
+    train, val = split_data(data, train_size, .8, shuffle_rng=split_key)
+
+    estim.fit(
+        train,
+        val,
+        n_iter=n_epochs_train,
+        optimizer=optimiser,
+        batch_size=train_size // 10
+    )
+
+    # Select n_contexts different observations for testing
+    test_indices = jnp.arange(n_contexts)
+    test_y = y[test_indices]  # Shape: (n_contexts, dim * n_obs)
+
+    all_z = []
+    individual_z_stats = []
+
+    for i in range(n_contexts):
+        # Sample posterior for this context
+        theta_hat = estim.sample_posterior(
+            test_y[i:i+1],  # Single context
+            theta_shape=(dim,),
+            n_samples=n_samples_per_context,
+        )
+
+        # Project posterior samples to base distribution
+        z = estim.sample_base_dist(
+            theta_hat,
+            jnp.broadcast_to(
+                test_y[i:i+1],
+                (theta_hat.shape[0], n_obs * dim)
+            ),
+            (dim,)
+        )
+
+        all_z.append(z)
+
+        # Test individual posterior normality
+        ks_results = vmap(
+            lambda x: ks_norm_test(x, alpha=0.01),
+            in_axes=(1,)
+        )(z)
+
+        print(f"Context {i}: mean={jnp.mean(z, axis=0)}, "
+              f"std={jnp.std(z, axis=0)}, "
+              f"normality_passed={jnp.all(~ks_results['reject_null'])}")
+
+        corr_matrix = jnp.corrcoef(z, rowvar=False)
+        off_diagonal = corr_matrix[jnp.triu_indices(dim, k=1)]
+        max_correlation = jnp.max(jnp.abs(off_diagonal))
+
+        print(f"Mixture correlation matrix: {corr_matrix}")
+        print(f"Mixture max correlation: {max_correlation}")
+
+        individual_z_stats.append({
+            'mean': jnp.mean(z, axis=0),
+            'std': jnp.std(z, axis=0),
+            'max_correlation': max_correlation
+        })
+        
+
+    # Concatenate all z samples into mixture
+    z_mixture = jnp.concatenate(all_z, axis=0)  # Shape: (n_contexts * n_samples_per_context, dim)
+
+    print(f"Mixture: mean={jnp.mean(z_mixture, axis=0)}, "
+          f"std={jnp.std(z_mixture, axis=0)}")
+
+    # Test mixture normality
+    mixture_ks_results = vmap(
+        lambda x: ks_norm_test(x, alpha=0.01),
+        in_axes=(1,)
+    )(z_mixture)
+
+    print(f"Mixture normality passed: {jnp.all(~mixture_ks_results['reject_null'])}")
+
+    # Test mixture independence (for multi-dimensional case)
+    mixture_corr_matrix = jnp.corrcoef(z_mixture, rowvar=False)
+    mixture_off_diagonal = mixture_corr_matrix[jnp.triu_indices(dim, k=1)]
+    mixture_max_correlation = jnp.max(jnp.abs(mixture_off_diagonal))
+    
+    print(f"Mixture correlation matrix: {mixture_corr_matrix}")
+    print(f"Mixture max correlation: {mixture_max_correlation}")
+
+    # Test mixture mean and std
+    mixture_mean = jnp.mean(z_mixture, axis=0)
+    mixture_std = jnp.std(z_mixture, axis=0)
+
+    print(f"Mixture mean: {mixture_mean}")
+    print(f"Mixture std: {mixture_std}")
+
+    for i in range(n_contexts):
+        # Individual posteriors should be normal
+        ks_results = individual_z_stats[i]['ks_results']
+        max_correlation = individual_z_stats[i]['max_correlation']
+        assert max_correlation < 0.1, (
+            f"Context {i} failed independence test. "
+            f"Max correlation: {max_correlation}"
+        )
+        assert jnp.allclose(individual_z_stats[i]['mean'], 0.0, atol=0.1), (
+            f"Context {i} mean not close to 0: {individual_z_stats[i]['mean']}"
+        )
+        assert jnp.allclose(individual_z_stats[i]['std'], 1.0, atol=0.1), (
+            f"Context {i} standard deviation not close to 1: {individual_z_stats[i]['std']}"
+        )
+
+    assert mixture_max_correlation < 0.1, (
+        f"Mixture dimensions are not independent. "
+        f"Maximum correlation: {mixture_max_correlation}, "
+        f"Correlation matrix: {mixture_corr_matrix}"
+    )
+
+    assert jnp.allclose(mixture_mean, 0.0, atol=0.1), (
+        f"Mixture mean not close to 0: {mixture_mean}"
+    )
+    assert jnp.allclose(mixture_std, 1.0, atol=0.1), (
+        f"Mixture standard deviation not close to 1: {mixture_std}"
+    )
