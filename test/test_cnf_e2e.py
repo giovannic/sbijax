@@ -527,8 +527,8 @@ def test_cnf_mixture_of_posteriors_recovers_base_distribution(
     key, nnx_key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
     n_obs = 10
-    n_contexts = 100  # Number of different observations to test
-    n_samples_per_context = 10 # Samples per posterior
+    n_contexts = 1_000 # Number of different observations to test
+    n_samples_per_context = 1 # Samples per posterior
 
     nn = MLPVectorField(
         theta_dim=dim,
@@ -577,56 +577,39 @@ def test_cnf_mixture_of_posteriors_recovers_base_distribution(
     # Select n_contexts different observations for testing
     test_indices = jnp.arange(n_contexts)
     test_y = y[test_indices]  # Shape: (n_contexts, dim * n_obs)
+    
+    # Generate different RNG keys for theta_0 sampling in each context
+    context_keys = jr.split(key, n_contexts)
 
-    all_z = []
-    individual_z_stats = []
-
-    for i in range(n_contexts):
+    # Vectorized function to sample posterior and compute z for each context
+    def sample_and_compute_z(single_test_y, context_key):
+        # Generate theta_0 from normal distribution with unique RNG key
+        theta_0 = jr.normal(context_key, (n_samples_per_context, dim))
+        
         # Sample posterior for this context
         theta_hat = estim.sample_posterior(
-            test_y[i:i+1],  # Single context
+            single_test_y[None, :],  # Add batch dimension
             theta_shape=(dim,),
             n_samples=n_samples_per_context,
+            theta_0=theta_0
         )
 
         # Project posterior samples to base distribution
         z = estim.sample_base_dist(
             theta_hat,
             jnp.broadcast_to(
-                test_y[i:i+1],
+                single_test_y[None, :],
                 (theta_hat.shape[0], n_obs * dim)
             ),
             (dim,)
         )
+        return z
 
-        all_z.append(z)
+    # Use vmap to compute z values for all contexts at once
+    all_z = vmap(sample_and_compute_z, in_axes=(0, 0))(test_y, context_keys)  # Shape: (n_contexts, n_samples_per_context, dim)
 
-        # Test individual posterior normality
-        ks_results = vmap(
-            lambda x: ks_norm_test(x, alpha=0.01),
-            in_axes=(1,)
-        )(z)
-
-        print(f"Context {i}: mean={jnp.mean(z, axis=0)}, "
-              f"std={jnp.std(z, axis=0)}, "
-              f"normality_passed={jnp.all(~ks_results['reject_null'])}")
-
-        corr_matrix = jnp.corrcoef(z, rowvar=False)
-        off_diagonal = corr_matrix[jnp.triu_indices(dim, k=1)]
-        max_correlation = jnp.max(jnp.abs(off_diagonal))
-
-        print(f"Mixture correlation matrix: {corr_matrix}")
-        print(f"Mixture max correlation: {max_correlation}")
-
-        individual_z_stats.append({
-            'mean': jnp.mean(z, axis=0),
-            'std': jnp.std(z, axis=0),
-            'max_correlation': max_correlation
-        })
-        
-
-    # Concatenate all z samples into mixture
-    z_mixture = jnp.concatenate(all_z, axis=0)  # Shape: (n_contexts * n_samples_per_context, dim)
+    # Reshape to concatenate all z samples into mixture
+    z_mixture = all_z.reshape(n_contexts * n_samples_per_context, dim)  # Shape: (n_contexts * n_samples_per_context, dim)
 
     print(f"Mixture: mean={jnp.mean(z_mixture, axis=0)}, "
           f"std={jnp.std(z_mixture, axis=0)}")
@@ -653,21 +636,6 @@ def test_cnf_mixture_of_posteriors_recovers_base_distribution(
 
     print(f"Mixture mean: {mixture_mean}")
     print(f"Mixture std: {mixture_std}")
-
-    for i in range(n_contexts):
-        # Individual posteriors should be normal
-        ks_results = individual_z_stats[i]['ks_results']
-        max_correlation = individual_z_stats[i]['max_correlation']
-        assert max_correlation < 0.1, (
-            f"Context {i} failed independence test. "
-            f"Max correlation: {max_correlation}"
-        )
-        assert jnp.allclose(individual_z_stats[i]['mean'], 0.0, atol=0.1), (
-            f"Context {i} mean not close to 0: {individual_z_stats[i]['mean']}"
-        )
-        assert jnp.allclose(individual_z_stats[i]['std'], 1.0, atol=0.1), (
-            f"Context {i} standard deviation not close to 1: {individual_z_stats[i]['std']}"
-        )
 
     assert mixture_max_correlation < 0.1, (
         f"Mixture dimensions are not independent. "

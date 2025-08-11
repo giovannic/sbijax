@@ -55,7 +55,7 @@ def _cfm_loss(
 
     return jnp.mean(jnp.square(vs - us))
 
-class FMPE:
+class FMPE(nnx.Module):
 
     def __init__(self, model: CNF, rngs=nnx.Rngs(0)):
         self.model = model
