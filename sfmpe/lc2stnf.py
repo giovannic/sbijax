@@ -201,11 +201,11 @@ def precompute_null_distribution_nf_classifiers(
     # Both classes (C=0 and C=1) now draw their latent samples (Z) from N(0, Im)
     z_per_classifier = jr.normal(
         z_key,
-        shape=(n_classifiers, N_cal * 2, m)
+        shape=(N_cal * 2, n_classifiers, m)
     )
     x_per_classifier = jnp.broadcast_to(
-        jnp.tile(x_cal, (2, 1))[None, ...],
-        (n_classifiers, N_cal * 2, x_dim)
+        jnp.tile(x_cal, (2, 1))[:, None, ...],
+        (N_cal * 2, n_classifiers, x_dim)
     ) # X_n from D_cal
     
     # Create u = concatenate([z, x]) for each classifier
@@ -213,41 +213,19 @@ def precompute_null_distribution_nf_classifiers(
 
     labels = jnp.concatenate([jnp.zeros(N_cal), jnp.ones(N_cal)], axis=0)
     labels_per_classifier = jnp.broadcast_to(
-        labels[None, ...],
-        (n_classifiers, N_cal * 2)
+        labels[..., None],
+        (N_cal * 2, n_classifiers)
     )
 
-    #TODO: why do I have to do this?
-    graphdef, params = nnx.split(classifiers)
-
-    @nnx.vmap
-    def fit_multi_classifier(rng_key, params, u, labels):
-        # add singleton dimension for multi-classifier forward pass
-        params = tree.map(lambda x: x[None, ...], params)
-        classifier = nnx.merge(graphdef, params)
-        losses = fit_classifier(
-            rng_key,
-            classifier,
-            u,
-            labels,
-            num_epochs=num_epochs,
-            batch_size=batch_size
-        )
-        # remove singleton dimension
-        params = nnx.state(classifier)
-        params = tree.map(
-            lambda leaf: leaf[0],
-            params
-        )
-        return losses, params
-
-    losses, params = fit_multi_classifier(
-        jr.split(rng_key, n_classifiers),
-        params,
+    losses = fit_classifier(
+        rng_key,
+        classifiers,
         u_per_classifier,
         labels_per_classifier,
+        num_epochs=num_epochs,
+        batch_size=batch_size
     )
-    nnx.update(classifiers, params)
+
     return losses
 
 def _ce_loss(model: Classifier, _: jnp.ndarray, batch: PyTree) -> jnp.ndarray:
@@ -314,14 +292,14 @@ def evaluate_l_c2st_nf(
     rng_key, z_eval_key = jr.split(rng_key)
     z_eval = jr.normal(
         z_eval_key,
-        shape=(Nv, latent_dim)
+        shape=(Nv, null_classifier.n, latent_dim)
     )
     
-    # xo needs to be broadcast to (Nv, d)
-    xo_expanded = xo[None, ...]
+    # xo needs to be broadcast to (Nv, n_classifier d)
+    xo_expanded = xo[None, None, ...]
     xo_expanded = jnp.broadcast_to(
         xo_expanded,
-        (Nv, xo.shape[-1])
+        (Nv, null_classifier.n, xo.shape[-1])
     )
 
     # Create u = concatenate([z, x]) for evaluation

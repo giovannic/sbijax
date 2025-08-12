@@ -4,8 +4,10 @@ from jax import (
     random as jr,
     vmap
 )
-
 import flax.nnx as nnx
+import optax
+from tensorflow_probability.substrates.jax import distributions as tfd
+
 from sfmpe.util.dataloader import flatten_structured
 from sfmpe.utils import split_data
 from sfmpe.nn.transformer.transformer import Transformer
@@ -15,7 +17,7 @@ from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
 from sfmpe.nn.mlp import MLPVectorField
 from utils.helpers import ks_norm_test
-import optax
+from sfmpe.metrics.mmd import mmd_test
 
 n_epochs_train = 100
 
@@ -160,7 +162,6 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
     train, val = split_data(data['data'], train_size, .8, shuffle_rng=split_key)
     train = { 'data': train, 'labels': data['labels'] }
     val = { 'data': val, 'labels': data['labels'] }
-    masks = None
 
     estim.fit(
         train,
@@ -182,31 +183,23 @@ def test_scnf_can_recover_base_distribution_from_posterior_estimate(
     theta_truth = theta[0]
     print(f'theta_truth: {theta_truth}')
     print(f'mean theta_hat: {jnp.mean(theta_hat["theta"])}')
-    # assert jnp.allclose(
-        # jnp.mean(theta_hat['theta']),
-        # theta_truth,
-        # atol=1e-3
-    # )
-    # TODO: compute true posterior https://github.com/sbi-benchmark/sbibm/blob/main/sbibm/tasks/gaussian_linear/task.py
 
-    # check that reverse flow recovers the base distribution
-    z = estim.sample_base_dist(
-        theta_hat['theta'],
-        jnp.broadcast_to(
-            test_y[None, ...],
-            (n_post, n_obs * dim, 1)
-        ),
-        data['labels'],
-        slices['theta'],
-        masks=masks
+    obs_sigma = sigma * jnp.eye(dim)
+    ref_scale = jnp.linalg.inv(n_obs * obs_sigma)
+    ref_loc = ref_scale @ n_obs * obs_sigma @ test_y + theta_truth # If reusing, theta needs to be scaled by std
+    reference_posterior = tfd.Normal(
+        loc=ref_loc,
+        scale=ref_scale
     )
-    z = z['theta'].reshape((n_post, -1))
 
-    # check each dimension is normal
-    print(f'mean: {jnp.mean(z)}, std: {jnp.std(z)}')
-    ks_response = vmap(lambda x: ks_norm_test(x, alpha=0.01), in_axes=(1,))(z)
-    print(ks_response)
-    assert jnp.all(~ks_response['reject_null'])
+    test_key, key = jr.split(key)
+    mmd = mmd_test(
+        theta_hat['theta'],
+        reference_posterior,
+        test_key
+    )
+
+    assert mmd['reject_null']
 
 @pytest.mark.parametrize(
     "dim,train_size",
@@ -459,54 +452,26 @@ def test_cnf_can_recover_base_distribution_from_posterior_estimate(
         n_samples=1_000,
     )
 
-    # check that reverse flow recovers the base distribution
-    z = estim.sample_base_dist(
-        theta_hat,
-        jnp.broadcast_to(
-            test_y[None, ...],
-            (theta_hat.shape[0], n_obs * dim)
-        ),
-        (dim,)
+    theta_truth = theta[0]
+
+    sim_precision = sigma * jnp.eye(dim)
+    theta_cov = cov if cov is not None else 1.
+    ref_scale = jnp.linalg.inv(n_obs * sim_precision)
+    ref_loc = ref_scale @ (n_obs * (sim_precision @ test_y)) + theta_cov @ theta_truth
+    print(ref_loc.shape, ref_scale.shape)
+    reference_posterior = tfd.Normal(
+        loc=ref_loc,
+        scale=ref_scale
     )
 
-    # Test 1: Check that each dimension follows standard normal distribution
-    ks_results = vmap(
-        lambda x: ks_norm_test(x, alpha=0.01),
-        in_axes=(1,)
-    )(z)
-    
-    # All dimensions should pass normality test
-    assert jnp.all(~ks_results['reject_null']), (
-        f"Normality test failed for some dimensions. "
-        f"Statistics: {ks_results['statistic']}, "
-        f"Critical values: {ks_results['critical_value']}"
+    test_key, key = jr.split(key)
+    mmd = mmd_test(
+        theta_hat,
+        reference_posterior,
+        test_key
     )
-    
-    # Test 2: Check independence between dimensions (for multi-dimensional case)
-    if dim > 1:
-        # Compute correlation matrix
-        corr_matrix = jnp.corrcoef(z, rowvar=False)
-        
-        # Off-diagonal elements should be close to zero (independence)
-        off_diagonal = corr_matrix[jnp.triu_indices(dim, k=1)]
-        max_correlation = jnp.max(jnp.abs(off_diagonal))
-        
-        assert max_correlation < 0.1, (
-            f"Dimensions are not independent. "
-            f"Maximum correlation: {max_correlation}, "
-            f"Correlation matrix: {corr_matrix}"
-        )
-    
-    # Test 3: Check that mean and std are approximately correct
-    mean = jnp.mean(z, axis=0)
-    std = jnp.std(z, axis=0)
-    
-    assert jnp.allclose(mean, 0.0, atol=0.1), (
-        f"Mean not close to 0: {mean}"
-    )
-    assert jnp.allclose(std, 1.0, atol=0.1), (
-        f"Standard deviation not close to 1: {std}"
-    )
+
+    assert mmd['reject_null']
 
 @pytest.mark.parametrize(
     "dim,train_size,cov",

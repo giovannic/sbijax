@@ -151,19 +151,24 @@ def mmd_test(
         - 'p_value': Computed p-value from permutation test
     """
     n_reference_samples = empirical_samples.shape[0]
-    
+
     # Sample from reference distribution
     sample_key, perm_key = jr.split(rng_key)
-    reference_samples = reference_distribution.sample(
-        n_reference_samples, seed=sample_key
+    reference_samples: Array = reference_distribution.sample( # type: ignore
+        n_reference_samples,
+        seed=sample_key
     )
-    
+
     # Compute MMD statistic
     mmd_stat = _mmd_statistic(empirical_samples, reference_samples, bandwidth)
-    
+
     # Perform permutation test
     null_stats = _permutation_test(
-        empirical_samples, reference_samples, n_permutations, bandwidth, perm_key
+        empirical_samples,
+        reference_samples,
+        n_permutations,
+        bandwidth,
+        perm_key
     )
     
     # Compute p-value

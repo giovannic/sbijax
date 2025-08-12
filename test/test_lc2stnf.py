@@ -284,9 +284,9 @@ def test_multi_classifier_shapes(dim, n, latent_dim):
     )
 
     # Create input data
-    z = jnp.zeros((100, dim))
-    x = jnp.zeros((100, dim))
+    z = jnp.zeros((100, n, dim))
+    x = jnp.zeros((100, n, dim))
     u = jnp.concatenate([z, x], axis=-1)
 
     prob = cls(u)
-    assert prob.shape == (n, 100)
+    assert prob.shape == (100, n)
