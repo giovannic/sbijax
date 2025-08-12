@@ -1,9 +1,12 @@
+import json
 import argparse
 import logging
 import time
 from pathlib import Path
 from typing import Tuple, Callable
 from jaxtyping import PyTree
+from flax import nnx
+import optax
 
 from jax import numpy as jnp, random as jr, tree
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -23,14 +26,11 @@ from sfmpe.c2stnf import (
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier
 )
+from sfmpe.lc2stnf import lc2st_quant_plot
 
-from flax import nnx
-import optax
-
-def run(n_rounds=2, n_epochs=1000):
+def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
     logger = logging.getLogger(__name__)
-    logger.info(f"Starting hierarchical Gaussian experiment with n_rounds={n_rounds}, n_epochs={n_epochs}")
-    n_simulations = 1_000
+    logger.info(f"Running with n_simulations={n_simulations}, n_rounds={n_rounds}, n_epochs={n_epochs}")
     n_post_samples = 1_000
     var_mu = 1.
     var_theta = 1e-1
@@ -39,8 +39,9 @@ def run(n_rounds=2, n_epochs=1000):
     n_obs = 5
 
     independence = {
-        'local': ['theta', 'obs'], # Shouldn't this be commented out?
-        'cross_local': [('theta', 'obs', (0, 0))],
+        'local': ['obs'],  # y observations independent of each other
+        'cross': [('mu', 'obs')],  # mu is independent of observations
+        'cross_local': [('theta', 'obs', (0, 0))]  # theta[i] connects to y[i]
     }
 
     # make prior distribution
@@ -118,7 +119,8 @@ def run(n_rounds=2, n_epochs=1000):
         n_epochs,
         y_observed,
         independence,
-        optimiser=optax.adam(3e-4)
+        optimiser=optax.adam(3e-4),
+        batch_size=100
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
@@ -204,19 +206,6 @@ def run(n_rounds=2, n_epochs=1000):
     print(f'posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
     logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
-    fmpe_theta_hat = jnp.mean(
-        fmpe_posterior_samples[..., :1],
-        keepdims=True,
-        axis=0
-    )
-    fmpe_z_hat = jnp.mean(
-        fmpe_posterior_samples[..., 1:],
-        keepdims=True,
-        axis=0
-    )
-    theta_hat = jnp.mean(posterior['mu'], keepdims=True, axis=0)
-    z_hat = jnp.mean(posterior['theta'], keepdims=True, axis=0)
-
     cal_key, key = jr.split(key)
     n_cal = 1_000
     logger.info(f"Creating calibration dataset with {n_cal} samples")
@@ -261,7 +250,8 @@ def run(n_rounds=2, n_epochs=1000):
 
     n_cal_epochs = 100
     analyse_key, key = jr.split(key)
-    out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'
+    out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'/f'{n_simulations}sims_{n_rounds}rounds_{n_epochs}epochs'
+
     # Preprocess posterior samples for SFMPE
     sfmpe_posterior_flat = _flatten(posterior)
     
@@ -292,15 +282,6 @@ def run(n_rounds=2, n_epochs=1000):
         out_dir/'fmpe'
     )
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
-
-    logger.info("SFMPE results:")
-    logger.info(f"theta_truth: {theta_truth}")
-    logger.info(f"theta_hat: {theta_hat}")
-    logger.info(f"z_hat: {z_hat}")
-    
-    logger.info("FMPE results:")
-    logger.info(f"fmpe_theta_hat: {fmpe_theta_hat}")
-    logger.info(f"fmpe_z_hat: {fmpe_z_hat}")
 
 def analyse_c2stnf(
     key: jnp.ndarray,
@@ -395,8 +376,6 @@ def analyse_c2stnf(
     # Create output directory and make quant plot
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    # Import the quant plot function from lc2stnf (still available there)
-    from sfmpe.lc2stnf import lc2st_quant_plot
     lc2st_quant_plot(
         T_data = main_stat,
         T_null = null_stats,
@@ -405,6 +384,16 @@ def analyse_c2stnf(
         conf_alpha = 0.05,
         out_path = out_dir / 'quant_plot.jpg'
     )
+
+    # Write out stats json with serialize
+    stats = {
+        'main_stat': float(main_stat),
+        'null_stats': null_stats.tolist(),
+        'p_value': float(p_value),
+        'reject': bool(p_value < 0.05)
+    }
+    with open(out_dir / 'stats.json', 'w') as f:
+        json.dump(stats, f)
 
 def _flatten(x: PyTree) -> jnp.ndarray:
     """
@@ -434,8 +423,9 @@ def create_calibration_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hierarchical Gaussian Flow Matching Example")
+    parser.add_argument("--n_simulations", type=int, default=1_000, help="Number of simulations per round")
     parser.add_argument("--n_rounds", type=int, default=2, help="Number of training rounds (default: 2)")
-    parser.add_argument("--n_epochs", type=int, default=1000, help="Number of epochs per round (default: 1000)")
+    parser.add_argument("--n_epochs", type=int, default=1_000, help="Number of epochs per round (default: 1000)")
     
     args = parser.parse_args()
     
@@ -447,4 +437,4 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
     logger.info(f"Running with n_rounds={args.n_rounds}, n_epochs={args.n_epochs}")
-    run(n_rounds=args.n_rounds, n_epochs=args.n_epochs)
+    run(n_simulations=args.n_simulations, n_rounds=args.n_rounds, n_epochs=args.n_epochs)

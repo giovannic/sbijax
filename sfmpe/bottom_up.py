@@ -24,6 +24,7 @@ def train_bottom_up(
     y_observed,
     independence,
     optimiser=optax.adam(0.0003),
+    batch_size=100
     ):
     logger = logging.getLogger(__name__)
     
@@ -108,7 +109,7 @@ def train_bottom_up(
             val_split,
             optimizer=optimiser,
             n_iter=n_epochs,
-            batch_size=100
+            batch_size=batch_size
         )
         final_train_loss = losses[0][-1]  # Last training loss
         final_val_loss = losses[1][-1]    # Last validation loss
@@ -202,7 +203,7 @@ def train_bottom_up(
             val_split,
             optimizer=optimiser,
             n_iter=n_epochs,
-            batch_size=100
+            batch_size=batch_size
         )
         final_train_loss = losses[0][-1]  # Last training loss
         final_val_loss = losses[1][-1]    # Last validation loss
