@@ -42,7 +42,7 @@ def create_transformer(rngs, config, dim):
     ]
 )
 def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers, builder):
-    key = jr.PRNGKey(0)
+    key = jr.PRNGKey(42)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
     n_epochs = 100
@@ -172,7 +172,7 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
     ],
 )
 def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_classifiers):
-    key = jr.PRNGKey(0)
+    key = jr.PRNGKey(42)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
     n_epochs = 100
