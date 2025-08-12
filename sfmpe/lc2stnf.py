@@ -1,7 +1,7 @@
 from typing import Callable, Tuple
 from pathlib import Path
 from jaxtyping import PyTree
-from jax import random as jr, numpy as jnp, tree
+from jax import random as jr, numpy as jnp
 from flax import nnx
 import optax
 from .train import fit_model_no_branch

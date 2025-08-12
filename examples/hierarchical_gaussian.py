@@ -19,10 +19,10 @@ from sfmpe.cnf import CNF
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.train_rounds import train_fmpe_rounds
-from sfmpe.c2stnf import (
-    train_c2st_nf_main_classifier,
-    precompute_c2st_nf_null_classifiers,
-    evaluate_c2st_nf,
+from sfmpe.lc2stnf import (
+    train_l_c2st_nf_main_classifier,
+    precompute_null_distribution_nf_classifiers,
+    evaluate_l_c2st_nf,
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier
 )
@@ -258,41 +258,41 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
     
     logger.info("Starting C2ST-NF analysis for SFMPE")
     start_time = time.time()
-    analyse_c2stnf(
+    analyse_lc2stnf(
         analyse_key,
         d,
         inverse,
         y_observed['obs'].reshape(-1),
         sfmpe_posterior_flat,
         n_cal_epochs,
-        n_cal,
-        out_dir/'sfmpe'
+        out_dir/'sfmpe',
+        n_cal
     )
     logger.info(f"SFMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
     logger.info("Starting C2ST-NF analysis for FMPE")
     start_time = time.time()
-    analyse_c2stnf(
+    analyse_lc2stnf(
         analyse_key,
         d,
         inverse_fmpe,
         y_observed['obs'].reshape(-1),
         fmpe_posterior_samples.reshape(fmpe_posterior_samples.shape[0], -1),
         n_cal_epochs,
-        n_cal,
-        out_dir/'fmpe'
+        out_dir/'fmpe',
+        n_cal
     )
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
 
-def analyse_c2stnf(
+def analyse_lc2stnf(
     key: jnp.ndarray,
     d: Tuple[jnp.ndarray, jnp.ndarray],
     inverse: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
     observation: jnp.ndarray,
     posterior_samples: jnp.ndarray,
     n_epochs: int,
-    n_cal: int,
-    out_dir: Path
+    out_dir: Path,
+    n_cal: int
     ):
     """
     Analyse C2ST-NF
@@ -311,28 +311,29 @@ def analyse_c2stnf(
     
     # Train main classifier
     main_key, null_key, key = jr.split(key, 3)
-    n_layers = 1
+    n_layers = 2
     n_null = 100
     activation = nnx.relu
     latent_dim = z_samples.shape[-1]
     
     main = BinaryMLPClassifier(
-        dim=latent_dim,
+        dim=latent_dim + observation.shape[-1],
         latent_dim=16,
         n_layers=n_layers,
         activation=activation,
         rngs=nnx.Rngs(main_key),
     )
     logger.info(f'Training main classifier with {n_epochs} epochs')
-    train_c2st_nf_main_classifier(
+    train_l_c2st_nf_main_classifier(
         main_key,
         main,
+        d,
         z_samples,
         n_epochs
     )
 
     null_cls = MultiBinaryMLPClassifier(
-        dim=latent_dim,
+        dim=latent_dim + observation.shape[-1],
         latent_dim=16,
         n_layers=n_layers,
         activation=activation,
@@ -340,11 +341,10 @@ def analyse_c2stnf(
         rngs=nnx.Rngs(null_key)
     )
     logger.info(f'Training {n_null} null classifiers with {n_epochs} epochs')
-    precompute_c2st_nf_null_classifiers(
+    precompute_null_distribution_nf_classifiers(
         null_key,
+        d,
         null_cls,
-        latent_dim=latent_dim,
-        N_cal=n_cal,
         num_epochs=n_epochs
     )
 
@@ -362,12 +362,13 @@ def analyse_c2stnf(
     logger.info(f'z_posterior corrcoef: {jnp.corrcoef(z_posterior, rowvar=False)}')
     
     ev_key, key = jr.split(key)
-    null_stats, main_stat, p_value = evaluate_c2st_nf(
+    null_stats, main_stat, p_value = evaluate_l_c2st_nf(
         ev_key,
-        z_posterior,
+        observation,
         main,
         null_cls,
-        latent_dim=latent_dim
+        latent_dim=latent_dim,
+        Nv=n_cal
     )
 
     logger.info(f'null_stats: {null_stats}')
