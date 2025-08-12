@@ -1,3 +1,4 @@
+import pytest
 from tensorflow_probability.substrates.jax import distributions as tfd
 from jax import numpy as jnp
 
@@ -14,3 +15,7 @@ def simulator_fn(seed, theta):
     p = tfd.Normal(jnp.zeros_like(theta["theta"]), 1.0)
     y = theta["theta"] + p.sample(seed=seed)
     return y
+
+@pytest.fixture
+def prior_simulator_tuple():
+    return (prior_fn, simulator_fn)

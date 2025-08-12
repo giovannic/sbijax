@@ -3,8 +3,8 @@ from jax import numpy as jnp
 from jax import random as jr
 from flax import nnx
 
-from sfmpe.fmpe import SFMPE
-from sfmpe.nn.make_continuous_flow import CNF
+from sfmpe.sfmpe import SFMPE
+from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.nn.transformer.transformer import Transformer
 
 
@@ -30,7 +30,7 @@ def test_fmpe(prior_simulator_tuple):
         index_dim=0,
         rngs=rngs
     )
-    estim = SFMPE(prior_simulator_tuple, CNF(nn))
+    estim = SFMPE(StructuredCNF(nn))
     data, params = None, {}
     for _ in range(2):
         data, _ = estim.simulate_data_and_possibly_append(

@@ -4,10 +4,10 @@ import pytest
 import jax.numpy as jnp
 from flax import nnx
 
-from sfmpe.nn.make_continuous_flow import CNF
-from sfmpe.nn.transform import Transform
+from sfmpe.structured_cnf import StructuredCNF
+from sfmpe.svf import StructuredVectorFieldModel
 
-class DummyTransform(Transform):
+class DummyTransform(StructuredVectorFieldModel):
     """Dummy transform implementation for testing."""
     
     def __init__(self, config, n_labels, in_dim, value_dim, out_dim, rngs):
@@ -59,7 +59,7 @@ def basic_cnf_setup():
         out_dim=n_dim,
         rngs=rngs
     )
-    cnf = CNF(transform)
+    cnf = StructuredCNF(transform)
     return cnf, rngs, n_context, n_dim
 
 def test_cnf_direction_parameter_validation(basic_cnf_setup):
@@ -80,7 +80,6 @@ def test_cnf_direction_parameter_validation(basic_cnf_setup):
     
     with pytest.raises(ValueError, match="Unknown direction"):
         cnf.sample(
-            rngs=rngs,
             context=context,
             context_label=context_label,
             context_index=context_index,
@@ -112,7 +111,6 @@ def test_cnf_backward_sampling_shape_consistency(basic_cnf_setup):
    
     # Test backward sampling
     backward_samples = cnf.sample(
-        rngs=rngs,
         context=context,
         context_label=context_label,
         context_index=context_index,
@@ -150,7 +148,6 @@ def test_cnf_integration_is_finite(basic_cnf_setup):
    
     # test forward sampling (should not raise errors)
     forward_samples = cnf.sample(
-        rngs=rngs,
         context=context,
         context_label=context_label,
         context_index=context_index,
@@ -186,7 +183,6 @@ def test_cnf_back_integration_is_finite(basic_cnf_setup):
 
     # test backward sampling (should not raise errors about direction)
     backward_samples = cnf.sample(
-        rngs=rngs,
         context=context,
         context_label=context_label,
         context_index=context_index,
@@ -223,8 +219,7 @@ def test_sample_size_parameter_consistency(basic_cnf_setup):
     for sample_size in sample_sizes:
         # Test forward sampling
         forward_samples = cnf.sample(
-            rngs=rngs,
-            context=context,
+                context=context,
             context_label=context_label,
             context_index=context_index,
             context_mask=context_mask,
@@ -239,8 +234,7 @@ def test_sample_size_parameter_consistency(basic_cnf_setup):
         
         # Test backward sampling
         backward_samples = cnf.sample(
-            rngs=rngs,
-            context=context,
+                context=context,
             context_label=context_label,
             context_index=context_index,
             context_mask=context_mask,
@@ -277,7 +271,6 @@ def test_cnf_can_recover_initial_parameters(basic_cnf_setup):
     
     # Forward pass: transform from initial parameters
     forward_samples = cnf.sample(
-        rngs=rngs,
         context=context,
         context_label=context_label,
         context_index=context_index,
@@ -294,7 +287,6 @@ def test_cnf_can_recover_initial_parameters(basic_cnf_setup):
     
     # Backward pass: recover initial parameters
     recovered_theta = cnf.sample(
-        rngs=rngs,
         context=context,
         context_label=context_label,
         context_index=context_index,
