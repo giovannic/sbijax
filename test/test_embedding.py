@@ -17,7 +17,7 @@ def test_embedding_outputs_correct_dimensions_basic(
     batch_size
     ):
     values = jnp.zeros((batch_size, theta_dim, value_dim))
-    labels = jnp.arange(theta_dim)
+    labels = jnp.tile(jnp.arange(theta_dim)[None, :], (batch_size, 1))
     index = jnp.zeros((batch_size, theta_dim, index_dim))
 
     embedding = Embedding(
@@ -50,7 +50,7 @@ def test_embedding_outputs_correct_dimensions_with_set_rvs(
     batch_size
     ):
     values = jnp.zeros((batch_size, theta_dim, value_dim))
-    labels = jnp.full((theta_dim,), 0)
+    labels = jnp.zeros((batch_size, theta_dim), dtype=int)
     index = jnp.zeros((batch_size, theta_dim, index_dim))
 
     embedding = Embedding(

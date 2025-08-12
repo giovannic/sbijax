@@ -15,8 +15,7 @@ def test_single_block_single_sample_2d():
     block_size = prod(block_shape)  # 3*4=12
     block_info = {
         "offset": 0,
-        "size": block_size,
-        "shape": block_shape,
+        "event_shape": block_shape,
     }
 
     # Only 1 key in block_slices
@@ -33,7 +32,7 @@ def test_single_block_single_sample_2d():
         "my_block": jnp.array([2,2])  # shape (2,) => n_event_dims=2
     }
 
-    mask = build_padding_mask(event_shapes, block_slices)
+    mask = build_padding_mask(block_slices, event_shapes)
     # We expect mask.shape = (sum_of_block_sizes,) => (12,)
     assert mask.shape == (12,)
 
@@ -63,8 +62,7 @@ def test_single_block_multi_sample_2d():
     block_size = prod(block_shape)  # 6
     block_info = {
         "offset": 0,
-        "size": block_size,
-        "shape": block_shape,
+        "event_shape": block_shape,
     }
     block_slices = {
         "my_block": block_info
@@ -80,7 +78,7 @@ def test_single_block_multi_sample_2d():
     event_shapes = {
         "my_block": shapes
     }
-    mask = build_padding_mask(event_shapes, block_slices)
+    mask = build_padding_mask(block_slices, event_shapes)
     # shape => (2,6)
     assert mask.shape == (2,6)
 
@@ -110,12 +108,12 @@ def test_two_blocks_single_sample_2d():
     blockA = {
         "offset": 0,
         "size": 4,
-        "shape": (2,2),
+        "event_shape": (2,2),
     }
     blockB = {
         "offset": 4,
         "size": 4,
-        "shape": (2,2),
+        "event_shape": (2,2),
     }
     # The dictionary is sorted by offset => blockA then blockB
     block_slices = {
@@ -131,7 +129,7 @@ def test_two_blocks_single_sample_2d():
         "blockB": jnp.array([1,2]),
     }
 
-    mask = build_padding_mask(event_shapes, block_slices)
+    mask = build_padding_mask(block_slices, event_shapes)
     # shape => (8,). Because sample_shape=(), each block is size=4 => total=8
     assert mask.shape == (8,)
 
@@ -155,8 +153,8 @@ def test_check_axis_negative_two():
     them into shape=(2,2, total_size). If so, great. If not, we see an error.
     """
     block_slices = {
-        "b0": {"offset":0, "size":4, "shape":(2,2)},
-        "b1": {"offset":4, "size":6, "shape":(2,3)},
+        "b0": {"offset":0, "event_shape":(2,2)},
+        "b1": {"offset":4, "event_shape":(2,3)},
     }
     # sample_shape=(2,2), n_event_dims=2 => event_shapes["b0"].shape=(2,2,2)
     # We'll do an example with small actual shapes, ignoring correctness for brevity
@@ -173,7 +171,7 @@ def test_check_axis_negative_two():
         "b0": shapes_b0,
         "b1": shapes_b1
     }
-    mask = build_padding_mask(event_shapes, block_slices)
+    mask = build_padding_mask(block_slices, event_shapes)
     # If successful, mask.shape should be (2,2, 4+6) => (2,2,10)
     assert mask.shape == (2,2,10), f"Got shape {mask.shape}, expected (2,2,10)."
 
@@ -186,8 +184,8 @@ def test_offset_order(use_unsupported_offset_order):
     correct shape.
     """
     # We'll do 2 blocks again, but reversed order if use_unsupported_offset_order
-    blockA = {"offset":0, "size":4, "shape":(2,2)}
-    blockB = {"offset":4, "size":4, "shape":(2,2)}
+    blockA = {"offset":0, "event_shape":(2,2)}
+    blockB = {"offset":4, "event_shape":(2,2)}
     if use_unsupported_offset_order:
         block_slices = {"blockB": blockB, "blockA": blockA}
     else:
@@ -197,7 +195,7 @@ def test_offset_order(use_unsupported_offset_order):
         "blockA": jnp.array([2,2]),
         "blockB": jnp.array([2,2]),
     }
-    mask = build_padding_mask(event_shapes, block_slices)
+    mask = build_padding_mask(block_slices, event_shapes)
 
     # shape => (8,) either way
     assert mask.shape == (8,)
@@ -214,8 +212,7 @@ def test_block_3d_single_sample():
     # Padded shape => (2,2,2), so 8 tokens total in row-major flatten
     block_info = {
         "offset": 0,
-        "size": 8,             # 2*2*2 = 8
-        "shape": (2,2,2),      # (Z,Y,X)
+        "event_shape": (2,2,2),      # (Z,Y,X)
     }
     # Single block dictionary
     block_slices = {
@@ -229,7 +226,7 @@ def test_block_3d_single_sample():
         "my_3d_block": jnp.array([1,2,1])
     }
     
-    mask = build_padding_mask(event_shapes, block_slices)
+    mask = build_padding_mask(block_slices, event_shapes)
     # We expect shape=(8,)
     assert mask.shape == (8,), f"Got {mask.shape}, expected (8,)."
 

@@ -1,7 +1,7 @@
 import pytest
 from jax import numpy as jnp, random as jr, tree
 import flax.nnx as nnx
-from sfmpe.lc2stnf import (
+from sfmpe.metrics.lc2stnf import (
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier,
     train_l_c2st_nf_main_classifier,

@@ -479,7 +479,7 @@ def flatten_structured(
         data_sample_ndims
     )
 
-    data = {
+    flat_data = {
         'theta': flat_theta,
         'y': flat_y,
     }
@@ -494,7 +494,7 @@ def flatten_structured(
         'y': y_slices
     }
 
-    ret = {'data': data, 'labels': labels}
+    ret = {'data': flat_data, 'labels': labels}
 
     if event_shapes is not None or independence:
         masks = {}
@@ -537,80 +537,18 @@ def flatten_structured(
     if index is not None:
         ret['index'] = {
             'theta': _flatten_index(
-                { k: index[k] for k in data['theta'].keys() },
+                { k: index[k] for k in index.keys() if k in data['theta'] },
                 pad_value,
                 data_sample_ndims
             ),
             'y': _flatten_index(
-                { k: index[k] for k in data['y'].keys() },
+                { k: index[k] for k in index.keys() if k in data['y'] },
                 pad_value,
                 data_sample_ndims
             )
         }
 
     return ret, slices
-
-def flat_as_batch_iterators(
-    rng_key: Array,
-    data: PyTree,
-    batch_size=100,
-    split=.7,
-    shuffle=True,
-    data_sample_ndims=1
-    ):
-
-    # broadcast labels and masks to data sample shape
-    sample_shape = jnp.shape(data['data']['y'])[:data_sample_ndims]
-    data = tree.map(
-        lambda leaf: jnp.broadcast_to(
-            leaf,
-            sample_shape + leaf.shape[data_sample_ndims:]
-        ),
-        data
-    )
-
-    train_iter, val_iter = as_batch_iterators(
-        rng_key,
-        data,
-        batch_size,
-        split,
-        shuffle
-    )
-    
-    return train_iter, val_iter
-
-
-def structured_as_batch_iterators(
-    rng_key: Array,
-    data: PyTree,
-    batch_size=100,
-    split=.7,
-    shuffle=True,
-    data_sample_ndims=1,
-    data_batch_ndims: Optional[PyTree]=None,
-    pad_value=PAD_VALUE,
-    event_shapes: Optional[PyTree]=None,
-    independence: Dict={}
-):
-    
-    data, slices = flatten_structured(
-        data,
-        data_sample_ndims=data_sample_ndims,
-        data_batch_ndims=data_batch_ndims,
-        pad_value=pad_value,
-        event_shapes=event_shapes,
-        independence=independence
-    )
-
-    train_iter, val_iter = flat_as_batch_iterators(
-        rng_key,
-        data,
-        batch_size,
-        split,
-        shuffle
-    )
-    
-    return train_iter, val_iter, slices
 
 def encode_unknown_theta(
     theta_slices,

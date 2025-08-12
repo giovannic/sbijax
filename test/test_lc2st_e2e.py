@@ -9,7 +9,7 @@ from sfmpe.cnf import CNF
 from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
-from sfmpe.lc2st import (
+from sfmpe.metrics.lc2st import (
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier,
     train_lc2st_classifiers,

@@ -4,8 +4,8 @@ from jaxtyping import PyTree
 from jax import random as jr, numpy as jnp
 from flax import nnx
 import optax
-from .train import fit_model_no_branch
-from .utils import split_data
+from ..train import fit_model_no_branch
+from ..utils import split_data
 
 import numpy as np
 from matplotlib import pyplot as plt
