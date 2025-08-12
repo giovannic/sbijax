@@ -139,6 +139,7 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
 
     # Create proxy functions for FMPE training
     def fmpe_prior_fn(key, n_samples):
+        n_samples = n_samples // n_theta # account for multiple simulations
         """Prior function compatible with FMPE interface"""
         theta_samples = prior_fn(n_theta).sample((n_samples,), seed=key)
         # Flatten: combine mu and theta
