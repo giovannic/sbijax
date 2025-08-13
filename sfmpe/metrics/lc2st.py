@@ -2,6 +2,7 @@ from typing import Tuple
 from jax import random as jr, numpy as jnp
 from jaxtyping import Array
 
+# TODO: refactor out
 # Import shared classifier components from lc2stnf
 from .lc2stnf import (
     BinaryMLPClassifier,

@@ -18,7 +18,32 @@ def theta_t_linear(theta_0, times, theta, sigma_min):
     return theta_0 * sigma + theta * times
 
 def ut_linear(theta_t, theta, times, sigma_min):
-    return theta - (1.0 - sigma_min) * theta_t
+    num = theta - (1.0 - sigma_min) * theta_t
+    denom = 1.0 - (1.0 - sigma_min) * times
+    return num / denom
+
+def sample_power_law(key, shape, alpha, x_min, x_max):
+    """
+    Calculates the inverse CDF of a truncated continuous power law distribution.
+
+    Args:
+        u (float or np.array): A random number(s) uniformly distributed between 0 and 1.
+        alpha (float): The exponent of the power law (must be > 1).
+        x_min (float): The lower truncation point.
+        x_max (float): The upper truncation point.
+
+    Returns:
+        jnp.array: Sample(s) from the truncated power law distribution.
+    """
+    # Calculate the constants for the inverse CDF based on the truncation points
+    # F(x) = (x^(1-alpha) - x_min^(1-alpha)) / (x_max^(1-alpha) - x_min^(1-alpha))
+    # where F(x) is the CDF of the truncated power law distribution
+    # Therefore, x = (u * (x_max^(1-alpha) - x_min^(1-alpha)) + x_min^(1-alpha))^(1/(1-alpha))
+    
+    u = jr.uniform(key, shape)
+    numerator = u * (x_max**(1 - alpha) - x_min**(1 - alpha)) + x_min**(1 - alpha)
+    x = numerator**(1 / (1 - alpha))
+    return x
 
 def _cfm_loss(
     model,
@@ -30,7 +55,14 @@ def _cfm_loss(
     n = theta.shape[0]
 
     t_key, rng_key = jr.split(rng_key)
-    times = jr.uniform(t_key, shape=(n, 1))
+    # times = jr.uniform(t_key, shape=(n, 1))
+    times = sample_power_law(
+        t_key,
+        shape=(n, 1),
+        alpha=.25,
+        x_min=1e-9,
+        x_max=1.0
+    )
     theta_key, rng_key = jr.split(rng_key)
     theta_0 = jr.normal(theta_key, theta.shape)
 

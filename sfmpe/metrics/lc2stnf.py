@@ -1,6 +1,7 @@
+import logging
 from typing import Callable, Tuple
 from pathlib import Path
-from jaxtyping import PyTree
+from jaxtyping import PyTree, Array
 from jax import random as jr, numpy as jnp
 from flax import nnx
 import optax
@@ -9,6 +10,8 @@ from ..utils import split_data
 
 import numpy as np
 from matplotlib import pyplot as plt
+
+logger = logging.getLogger(__name__)
 
 class FFLayer(nnx.Module):
 
@@ -98,6 +101,104 @@ class MultiBinaryMLPClassifier(nnx.Module):
 
 Classifier = BinaryMLPClassifier | MultiBinaryMLPClassifier
 
+def create_calibration_dataset(
+    key: jnp.ndarray,
+    prior_fn: Callable[..., PyTree],
+    simulator_fn: Callable[..., PyTree],
+    n: int
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    prior_key, sim_key = jr.split(key)
+    prior = prior_fn().sample((n,), seed=prior_key)
+    y = simulator_fn(sim_key, prior)
+    return prior, y
+
+def apply_lc2stnf(
+    key: Array,
+    inverse: Callable[[Array, Array], Array],
+    prior_fn: Callable[[], Array],
+    simulator_fn: Callable[[Array, Array], Array],
+    posterior_samples: Array,
+    n_cal: int,
+    observation: Array,
+    n_epochs: int,
+    ):
+    """
+    Apply an lc2stnf pipeline
+    """
+    cal_key, key = jr.split(key)
+    # Generate z samples using inverse transformation
+    d = create_calibration_dataset(
+        cal_key,
+        prior_fn,
+        simulator_fn,
+        n_cal,
+    )
+    theta_cal, x_cal = d
+    z_samples = inverse(theta_cal, x_cal)
+    
+    # Train main classifier
+    main_key, null_key, key = jr.split(key, 3)
+    n_layers = 2
+    n_null = 100
+    activation = nnx.relu
+    latent_dim = z_samples.shape[-1]
+    
+    main = BinaryMLPClassifier(
+        dim=latent_dim + observation.shape[-1],
+        latent_dim=16,
+        n_layers=n_layers,
+        activation=activation,
+        rngs=nnx.Rngs(main_key),
+    )
+    logger.info(f'Training main classifier with {n_epochs} epochs')
+    train_l_c2st_nf_main_classifier(
+        main_key,
+        main,
+        d,
+        z_samples,
+        n_epochs
+    )
+
+    null_cls = MultiBinaryMLPClassifier(
+        dim=latent_dim + observation.shape[-1],
+        latent_dim=16,
+        n_layers=n_layers,
+        activation=activation,
+        n=n_null,
+        rngs=nnx.Rngs(null_key)
+    )
+    logger.info(f'Training {n_null} null classifiers with {n_epochs} epochs')
+    precompute_null_distribution_nf_classifiers(
+        null_key,
+        d,
+        null_cls,
+        num_epochs=n_epochs
+    )
+
+    # Generate posterior samples at observation using provided posterior samples
+    z_posterior = inverse(
+        posterior_samples,
+        jnp.repeat(
+            observation[None, :],
+            posterior_samples.shape[0],
+            axis=0
+        )
+    )
+    logger.info(f'z_posterior mean: {jnp.mean(z_posterior, axis=0)}')
+    logger.info(f'z_posterior std: {jnp.std(z_posterior, axis=0)}')
+    logger.info(f'z_posterior corrcoef: {jnp.corrcoef(z_posterior, rowvar=False)}')
+    
+    ev_key, key = jr.split(key)
+    null_stats, main_stat, p_value = evaluate_l_c2st_nf(
+        ev_key,
+        observation,
+        main,
+        null_cls,
+        latent_dim=latent_dim,
+        Nv=n_cal
+    )
+    return main_stat, null_stats, p_value
+
 def train_l_c2st_nf_main_classifier(
         rng_key: jnp.ndarray,
         classifier: BinaryMLPClassifier,
@@ -138,6 +239,8 @@ def train_l_c2st_nf_main_classifier(
     g1 = sns.jointplot(x=jnp.mean(x_cal, axis=1), y=z_base[:, 1], kind='scatter', 
                        marginal_kws={'bins': 30})
     g1.fig.suptitle('z_base distribution')
+    plt.xlabel('x')
+    plt.ylabel('z')
     plt.savefig('z_base.png')
     plt.close()
     
@@ -146,6 +249,8 @@ def train_l_c2st_nf_main_classifier(
     g2 = sns.jointplot(x=jnp.mean(x_cal, axis=1), y=z_samples[:, 1], kind='scatter',
                        marginal_kws={'bins': 30})
     g2.fig.suptitle('z_samples distribution')
+    plt.xlabel('x')
+    plt.ylabel('z')
     plt.savefig('z_sampled.png')
     plt.close()
 

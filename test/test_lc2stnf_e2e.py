@@ -1,5 +1,5 @@
 import pytest
-from jax import numpy as jnp, random as jr, tree
+from jax import numpy as jnp, random as jr
 
 from sfmpe.util.dataloader import flatten_structured
 from sfmpe.utils import split_data
@@ -16,11 +16,12 @@ from sfmpe.metrics.lc2stnf import (
     precompute_null_distribution_nf_classifiers,
     evaluate_l_c2st_nf
 )
+from sfmpe.utils import split_data
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
 import optax
 
-n_epochs_train = 100
+n_epochs_train = 1_000
 
 
 def create_transformer(rngs, config, dim):
@@ -102,7 +103,6 @@ def test_lc2stnf_on_learned_distribution_sfmpe(dim, train_size, num_classifiers,
     
     # Generate z_samples using the inverse function
     z_samples = estim.sample_base_dist(
-        key,
         theta_cal[..., None],
         x_cal[..., None],
         labels,
@@ -175,8 +175,7 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
     key = jr.PRNGKey(42)
     nnx_key, key = jr.split(key)
     rngs = nnx.Rngs(nnx_key)
-    n_epochs = 100
-    n_obs = 10
+    n_obs = 1
 
     nn = MLPVectorField(
         theta_dim=dim,
@@ -206,11 +205,15 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         }
     }
 
-    batch_size = train_size // 10
-    n_train = int(train_size * 0.8)
+    split_key, key = jr.split(key)
+    train, val = split_data(
+        data,
+        train_size,
+        split=.8,
+        shuffle_rng=split_key
+    )
 
-    train = tree.map(lambda x: x[:n_train], data)
-    val = tree.map(lambda x: x[n_train:], data)
+    batch_size = train_size // 10
 
     estim.fit(
         train,
@@ -252,7 +255,7 @@ def test_lc2stnf_on_learned_distribution_fmpe(dim, train_size, cal_size, num_cla
         main,
         calibration_data,
         z_samples,
-        n_epochs
+        num_epochs=100
     )
 
     # Initialize null classifiers

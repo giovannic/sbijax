@@ -4,11 +4,11 @@ import logging
 import time
 from pathlib import Path
 from typing import Tuple, Callable
-from jaxtyping import PyTree
+from jaxtyping import PyTree, Array
 from flax import nnx
 import optax
 
-from jax import numpy as jnp, random as jr, tree
+from jax import numpy as jnp, random as jr, tree, vmap
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 from sfmpe.sfmpe import SFMPE
@@ -19,14 +19,13 @@ from sfmpe.cnf import CNF
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.train_rounds import train_fmpe_rounds
-from sfmpe.lc2stnf import (
-    train_l_c2st_nf_main_classifier,
-    precompute_null_distribution_nf_classifiers,
-    evaluate_l_c2st_nf,
+from sfmpe.metrics.lc2st import (
+    train_lc2st_classifiers,
+    evaluate_lc2st,
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier
 )
-from sfmpe.lc2stnf import lc2st_quant_plot
+from sfmpe.metrics.lc2stnf import lc2st_quant_plot
 
 def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
     logger = logging.getLogger(__name__)
@@ -139,13 +138,16 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
 
     # Create proxy functions for FMPE training
     def fmpe_prior_fn(key, n_samples):
-        n_samples = n_samples // n_theta # account for multiple simulations
         """Prior function compatible with FMPE interface"""
         theta_samples = prior_fn(n_theta).sample((n_samples,), seed=key)
         # Flatten: combine mu and theta
         mu_flat = theta_samples['mu'].reshape((n_samples, 1)) #type:ignore
         theta_flat = theta_samples['theta'].reshape((n_samples, n_theta)) #type:ignore 
         return jnp.concatenate([mu_flat, theta_flat], axis=1)
+
+    def sim_corrected_fmpe_prior_fn(key, n_samples):
+        n = n_samples // n_theta
+        return fmpe_prior_fn(key, n)
     
     def fmpe_simulator_fn(key, theta_flat):
         """Simulator function compatible with FMPE interface"""
@@ -181,7 +183,7 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
     fmpe_estim = train_fmpe_rounds(
         train_key,
         fmpe_estim,
-        fmpe_prior_fn,
+        sim_corrected_fmpe_prior_fn,
         fmpe_simulator_fn,
         fmpe_y_observed,
         theta_shape=(1 + n_theta,),
@@ -207,48 +209,37 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
     print(f'posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
     logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
-    cal_key, key = jr.split(key)
     n_cal = 1_000
     logger.info(f"Creating calibration dataset with {n_cal} samples")
     start_time = time.time()
-    d = create_calibration_dataset(
-        cal_key,
-        prior_fn,
-        simulator_fn,
-        n_theta,
-        n_cal,
-    )
-    logger.info(f"Calibration dataset creation completed in {time.time() - start_time:.2f} seconds")
 
-    logger.info(f'Calibration dataset shapes: {tree.map(lambda x: x.shape, d)}')
-
-    def inverse(theta, x):
-        # Use SFMPE's sample_base_dist method like in the test
-        # theta and x should be flat arrays with singleton dimension added
-        z_samples = estim.sample_base_dist(
-            theta[..., None],  # Add singleton dimension for theta
-            x[..., None],      # Add singleton dimension for context
+    def sample_single_sfmpe_posterior(key, x):
+        theta_0 = jr.normal(key, (1, 1 + n_theta, 1))
+        x = tree.map(lambda leaf: leaf[None, ...], x)
+        context = _flatten(x)[..., None]
+        posterior = estim.sample_posterior(
+            context,
             labels, #type:ignore
             slices,
-            masks=masks
+            masks=masks,
+            n_samples=1,
+            theta_0 = theta_0
         )
-        
-        # Flatten the structured output
-        z = jnp.concatenate([
-            z_samples['mu'].reshape((theta.shape[0], -1)),
-            z_samples['theta'].reshape((theta.shape[0], -1))
-        ], axis=1)
-        return z
+        return jnp.concatenate([
+            posterior['mu'].reshape(-1),
+            posterior['theta'].reshape(-1)
+        ])
 
-    def inverse_fmpe(theta, x):
-        """Inverse function for FMPE model"""
-        z_samples = fmpe_estim.sample_base_dist(
-            theta,
-            x,
-            theta_shape=(1 + n_theta,)
-        )
-        return z_samples
-
+    def sample_single_fmpe_posterior(key, x):
+        dim = (1 + n_theta)
+        theta_0 = jr.normal(key, (1, dim))
+        return fmpe_estim.sample_posterior(
+            x[None, ...],
+            theta_shape = (dim,),
+            n_samples=1,
+            theta_0 = theta_0
+        ).reshape((dim,))
+    
     n_cal_epochs = 100
     analyse_key, key = jr.split(key)
     out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'/f'{n_simulations}sims_{n_rounds}rounds_{n_epochs}epochs'
@@ -258,122 +249,126 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
     
     logger.info("Starting C2ST-NF analysis for SFMPE")
     start_time = time.time()
-    analyse_lc2stnf(
+    #TODO: figure out design to generalise this and put it into lc2st.py
+    null_stats, main_stat, p_value = apply_lc2st(
         analyse_key,
-        d,
-        inverse,
+        create_sfmpe_calibration_dataset,
+        sample_single_sfmpe_posterior,
+        lambda: prior_fn(n_theta),
+        simulator_fn,
         y_observed['obs'].reshape(-1),
         sfmpe_posterior_flat,
         n_cal_epochs,
-        out_dir/'sfmpe',
-        n_cal
+        n_cal,
+        rngs
     )
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe')
     logger.info(f"SFMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
     logger.info("Starting C2ST-NF analysis for FMPE")
     start_time = time.time()
-    analyse_lc2stnf(
+    null_stats, main_stat, p_value = apply_lc2st(
         analyse_key,
-        d,
-        inverse_fmpe,
+        create_fmpe_calibration_dataset,
+        sample_single_fmpe_posterior,
+        fmpe_prior_fn,
+        fmpe_simulator_fn,
         y_observed['obs'].reshape(-1),
-        fmpe_posterior_samples.reshape(fmpe_posterior_samples.shape[0], -1),
+        fmpe_posterior_samples,
         n_cal_epochs,
-        out_dir/'fmpe',
-        n_cal
+        n_cal,
+        rngs
     )
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe')
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
 
-def analyse_lc2stnf(
+def apply_lc2st(
     key: jnp.ndarray,
-    d: Tuple[jnp.ndarray, jnp.ndarray],
-    inverse: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    create_calibration_dataset: Callable,
+    sample_single_posterior: Callable[[Array, Array], Array],
+    prior_fn: Callable,
+    simulator_fn: Callable,
     observation: jnp.ndarray,
     posterior_samples: jnp.ndarray,
     n_epochs: int,
-    out_dir: Path,
-    n_cal: int
+    n_cal: int,
+    rngs: nnx.Rngs
     ):
     """
-    Analyse C2ST-NF
+    Apply l-c2st pipeline
 
     Input:
-        key: JAX PRNG key for reproducibility.
-        d: Tuple of (Theta_n, X_n) sampled from p(theta, x). Expects a flat dataset
-        inverse: Callable that applies the inverse NF transformation.
+        key: JAX PRNG key.
+        sample_single_posterior: Function that samples from a posterior.
+        prior_fn: Prior function.
+        simulator_fn: Simulator function.
         observation: Observation.
+        posterior_samples: Posterior samples.
+        n_epochs: Number of epochs.
         n_cal: Number of calibration samples.
-        out_dir: Output directory.
+        rngs: nnx.Rngs.
     """
-    # Generate z samples using inverse transformation
-    theta_cal, x_cal = d
-    z_samples = inverse(theta_cal, x_cal)
+    cal_key, key = jr.split(key)
+    d = create_calibration_dataset(
+        cal_key,
+        sample_single_posterior,
+        prior_fn,
+        simulator_fn,
+        n_cal
+    )
+
+    theta_cal, x_cal = d[0], d[1]
+    classifier_dim = theta_cal.shape[-1] + x_cal.shape[-1]
     
     # Train main classifier
-    main_key, null_key, key = jr.split(key, 3)
+    train_key, key = jr.split(key)
     n_layers = 2
     n_null = 100
     activation = nnx.relu
-    latent_dim = z_samples.shape[-1]
-    
+
     main = BinaryMLPClassifier(
-        dim=latent_dim + observation.shape[-1],
+        dim=classifier_dim,
         latent_dim=16,
         n_layers=n_layers,
         activation=activation,
-        rngs=nnx.Rngs(main_key),
-    )
-    logger.info(f'Training main classifier with {n_epochs} epochs')
-    train_l_c2st_nf_main_classifier(
-        main_key,
-        main,
-        d,
-        z_samples,
-        n_epochs
+        rngs=rngs
     )
 
     null_cls = MultiBinaryMLPClassifier(
-        dim=latent_dim + observation.shape[-1],
+        dim=classifier_dim,
         latent_dim=16,
         n_layers=n_layers,
         activation=activation,
         n=n_null,
-        rngs=nnx.Rngs(null_key)
+        rngs=rngs
     )
-    logger.info(f'Training {n_null} null classifiers with {n_epochs} epochs')
-    precompute_null_distribution_nf_classifiers(
-        null_key,
+    logger.info(f'Training classifiers with {n_epochs} epochs')
+    train_lc2st_classifiers(
+        train_key,
         d,
-        null_cls,
-        num_epochs=n_epochs
-    )
-
-    # Generate posterior samples at observation using provided posterior samples
-    z_posterior = inverse(
-        posterior_samples,
-        jnp.repeat(
-            observation[None, :],
-            posterior_samples.shape[0],
-            axis=0
-        )
-    )
-    logger.info(f'z_posterior mean: {jnp.mean(z_posterior, axis=0)}')
-    logger.info(f'z_posterior std: {jnp.std(z_posterior, axis=0)}')
-    logger.info(f'z_posterior corrcoef: {jnp.corrcoef(z_posterior, rowvar=False)}')
-    
-    ev_key, key = jr.split(key)
-    null_stats, main_stat, p_value = evaluate_l_c2st_nf(
-        ev_key,
-        observation,
         main,
         null_cls,
-        latent_dim=latent_dim,
-        Nv=n_cal
+        n_epochs
+    )
+    
+    null_stats, main_stat, p_value = evaluate_lc2st(
+        observation,
+        posterior_samples,
+        main,
+        null_cls
     )
 
     logger.info(f'null_stats: {null_stats}')
     logger.info(f'main_stat: {main_stat}')
     logger.info(f'p-value: {p_value}')
+    return null_stats, main_stat, p_value
+
+def save_lc2st_results(
+    null_stats: jnp.ndarray,
+    main_stat: jnp.ndarray,
+    p_value: jnp.ndarray,
+    out_dir: Path
+    ):
 
     # Create output directory and make quant plot
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -409,19 +404,36 @@ def _flatten(x: PyTree) -> jnp.ndarray:
         axis=-1
     )
 
-def create_calibration_dataset(
+def create_sfmpe_calibration_dataset(
     key: jnp.ndarray,
-    prior_fn: Callable[..., PyTree],
-    simulator_fn: Callable[..., PyTree],
-    n_theta: int,
+    sample_posterior: Callable[[Array, PyTree], PyTree],
+    prior_fn: Callable[[], tfd.Distribution],
+    simulator_fn: Callable[[Array, PyTree], PyTree],
     n: int
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    prior_key, sim_key = jr.split(key)
-    prior = prior_fn(n_theta).sample((n,), seed=prior_key)
+    ) -> Tuple[Array, Array, Array]:
+    prior_key, post_key, sim_key = jr.split(key, 3)
+    prior = prior_fn().sample((n,), seed=prior_key)
     y = simulator_fn(sim_key, prior)
+    post_estimate = vmap(
+        sample_posterior,
+        in_axes=[0, tree.map(lambda _: 0, y)]
+    )(jr.split(post_key, n), y)
     x = _flatten(prior)
     y = _flatten(y)
-    return x, y
+    return y, x, post_estimate
+
+def create_fmpe_calibration_dataset(
+    key: jnp.ndarray,
+    sample_posterior: Callable[[Array, Array], Array],
+    prior_fn: Callable[[Array, int], PyTree],
+    simulator_fn: Callable[[Array, Array], PyTree],
+    n: int
+    ) -> Tuple[Array, Array, Array]:
+    prior_key, post_key, sim_key = jr.split(key, 3)
+    prior = prior_fn(prior_key, n)
+    y = simulator_fn(sim_key, prior)
+    post_estimate = vmap(sample_posterior)(jr.split(post_key, n), y)
+    return y, prior, post_estimate
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hierarchical Gaussian Flow Matching Example")

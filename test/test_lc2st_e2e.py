@@ -237,14 +237,16 @@ def test_lc2st_on_learned_distribution_fmpe(dim, train_size, cal_size, num_class
             jr.normal(key_x, (cal_size, dim * n_obs)) * sigma
     
     # Generate posterior samples theta_q using the trained estimator (batched with vmap)
-    def sample_single_posterior(x):
+    def sample_single_posterior(key, x):
+        theta_0 = jr.normal(key, (1, dim))
         return estim.sample_posterior(
             x[None, ...],
             theta_shape = (dim,),
-            n_samples=1
+            n_samples=1,
+            theta_0 = theta_0
         ).reshape((dim,))
     
-    theta_q = vmap(sample_single_posterior)(x_cal)
+    theta_q = vmap(sample_single_posterior)(jr.split(key, cal_size), x_cal)
 
     # Create calibration dataset (x, theta, theta_q)
     d_cal = (x_cal, theta_cal, theta_q)
@@ -286,12 +288,11 @@ def test_lc2st_on_learned_distribution_fmpe(dim, train_size, cal_size, num_class
     observation = jnp.tile(theta_truth, (n_obs,)) + obs_noise
     
     # Sample from posterior  
-    n_post = 1_000
     posterior_samples = estim.sample_posterior(
         observation[None,...],
         theta_shape=(dim,),
-        n_samples=n_post
-    ).reshape((n_post, dim))
+        n_samples=cal_size
+    ).reshape((cal_size, dim))
     print(f'truth: {theta_truth}')
     print(f'observation: {observation}')
     print(f'posterior mean: {jnp.mean(posterior_samples, axis=0)}')
