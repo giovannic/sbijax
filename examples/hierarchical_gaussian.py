@@ -27,15 +27,13 @@ from sfmpe.metrics.lc2st import (
 )
 from sfmpe.metrics.lc2stnf import lc2st_quant_plot
 
-def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
+def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000):
     logger = logging.getLogger(__name__)
     logger.info(f"Running with n_simulations={n_simulations}, n_rounds={n_rounds}, n_epochs={n_epochs}")
     n_post_samples = 1_000
     var_mu = 1.
     var_theta = 1e-1
     var_obs = 1e-2
-    n_theta = 2
-    n_obs = 5
 
     independence = {
         'local': ['obs'],  # y observations independent of each other
@@ -119,7 +117,7 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
         y_observed,
         independence,
         optimiser=optax.adam(3e-4),
-        batch_size=100
+        batch_size=n_simulations // 10
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
@@ -191,7 +189,7 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
         n_simulations=n_simulations,
         n_epochs=n_epochs,
         optimizer=optax.adam(3e-4),
-        batch_size=100
+        batch_size=(n_simulations // n_theta) // 10
     )
 
     logger.info(f"FMPE round-based training completed in {time.time() - start_time:.2f} seconds")
@@ -242,7 +240,7 @@ def run(n_simulations=1_000, n_rounds=2, n_epochs=1000):
     
     n_cal_epochs = 100
     analyse_key, key = jr.split(key)
-    out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'/f'{n_simulations}sims_{n_rounds}rounds_{n_epochs}epochs'
+    out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'/f'{n_simulations}_sims_{n_rounds}_rounds_{n_epochs}_epochs'
 
     # Preprocess posterior samples for SFMPE
     sfmpe_posterior_flat = _flatten(posterior)
@@ -438,8 +436,10 @@ def create_fmpe_calibration_dataset(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hierarchical Gaussian Flow Matching Example")
     parser.add_argument("--n_simulations", type=int, default=1_000, help="Number of simulations per round")
-    parser.add_argument("--n_rounds", type=int, default=2, help="Number of training rounds (default: 2)")
+    parser.add_argument("--n_rounds", type=int, default=1, help="Number of training rounds (default: 1)")
     parser.add_argument("--n_epochs", type=int, default=1_000, help="Number of epochs per round (default: 1000)")
+    parser.add_argument("--n_theta", type=int, default=2, help="Number of theta parameters (default: 2)")
+    parser.add_argument("--n_obs", type=int, default=5, help="Number of theta parameters (default: 5)")
     
     args = parser.parse_args()
     
@@ -451,4 +451,10 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
     logger.info(f"Running with n_rounds={args.n_rounds}, n_epochs={args.n_epochs}")
-    run(n_simulations=args.n_simulations, n_rounds=args.n_rounds, n_epochs=args.n_epochs)
+    run(
+        n_theta=args.n_theta,
+        n_obs=args.n_obs,
+        n_simulations=args.n_simulations,
+        n_rounds=args.n_rounds,
+        n_epochs=args.n_epochs
+    )
