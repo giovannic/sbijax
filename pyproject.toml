@@ -17,7 +17,7 @@ dependencies = [
     "tensorflow-probability>=0.20.0",
     "tqdm>=4.64.1",
     "flax>=0.10.2",
-    "sbijax==0.3.3.post1"
+    "hydra-core>=1.3.0",
 ]
 dynamic = ["version"]
 
@@ -29,3 +29,6 @@ dev = [
     "pyright",
     "jaxtyping"
 ]
+
+[tool.setuptools]
+packages = ["sfmpe"]

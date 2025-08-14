@@ -1,34 +1,36 @@
 """
 Plot LC2ST metrics from hierarchical Gaussian runs with different sample sizes.
 
-This script scans the outputs directory for results from different simulation 
+This script scans Hydra output directories for results from different simulation 
 budgets and creates a comparison plot showing how the LC2ST statistic varies 
 with the number of simulations for different estimation methods.
 """
 
 import argparse
 import json
-import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
-import numpy as np
+from omegaconf import OmegaConf
 
 
-def parse_directory_name(dir_name: str) -> Optional[Tuple[int, int, int]]:
+def load_config_from_run(run_dir: Path):
     """
-    Parse directory name to extract n_simulations, n_rounds, n_epochs.
+    Load configuration from Hydra's .hydra directory.
     
     Args:
-        dir_name: Directory name like "1000sims_2rounds_1000epochs"
+        run_dir: Directory containing a Hydra run output
         
     Returns:
-        Tuple of (n_simulations, n_rounds, n_epochs) or None if parse fails
+        Configuration dictionary or None if not found
     """
-    pattern = r'(\d+)sims_(\d+)rounds_(\d+)epochs'
-    match = re.match(pattern, dir_name)
-    if match:
-        return int(match.group(1)), int(match.group(2)), int(match.group(3))
+    config_path = run_dir / ".hydra" / "config.yaml"
+    if config_path.exists():
+        try:
+            cfg = OmegaConf.load(config_path)
+            return OmegaConf.to_container(cfg, resolve=True)
+        except Exception as e:
+            print(f"Warning: Failed to load config from {config_path}: {e}")
     return None
 
 
@@ -38,10 +40,10 @@ def collect_metrics(
     n_epochs_filter: Optional[int] = None
 ) -> Dict[str, List[Tuple[int, float]]]:
     """
-    Collect LC2ST metrics from all runs.
+    Collect LC2ST metrics from all Hydra runs.
     
     Args:
-        base_dir: Base directory containing outputs
+        base_dir: Base directory containing Hydra outputs
         n_rounds_filter: Only include runs with this number of rounds
         n_epochs_filter: Only include runs with this number of epochs
         
@@ -50,22 +52,23 @@ def collect_metrics(
     """
     metrics = {}
     
-    # Scan for hierarchical_gaussian results
-    hg_dir = base_dir / 'hierarchical_gaussian'
-    if not hg_dir.exists():
-        print(f"Warning: {hg_dir} does not exist")
-        return metrics
-    
-    for run_dir in hg_dir.iterdir():
+    # Scan for Hydra output directories (typically contain .hydra subdirectory)
+    for run_dir in base_dir.iterdir():
         if not run_dir.is_dir():
             continue
             
-        # Parse directory name
-        parsed = parse_directory_name(run_dir.name)
-        if parsed is None:
+        # Check if this is a Hydra run directory
+        if not (run_dir / ".hydra").exists():
             continue
             
-        n_simulations, n_rounds, n_epochs = parsed
+        # Load configuration
+        config = load_config_from_run(run_dir)
+        if config is None:
+            continue
+            
+        n_simulations = config.get("n_simulations")
+        n_rounds = config.get("n_rounds")
+        n_epochs = config.get("n_epochs")
         
         # Apply filters if specified
         if n_rounds_filter is not None and n_rounds != n_rounds_filter:
@@ -73,9 +76,9 @@ def collect_metrics(
         if n_epochs_filter is not None and n_epochs != n_epochs_filter:
             continue
         
-        # Check for method subdirectories
+        # Check for method subdirectories (sfmpe, fmpe)
         for method_dir in run_dir.iterdir():
-            if not method_dir.is_dir():
+            if not method_dir.is_dir() or method_dir.name.startswith('.'):
                 continue
                 
             method_name = method_dir.name.upper()  # SFMPE or FMPE
@@ -152,13 +155,13 @@ def plot_metrics(
 def main() -> None:
     """Main function with command-line interface."""
     parser = argparse.ArgumentParser(
-        description="Plot LC2ST metrics from hierarchical Gaussian runs"
+        description="Plot LC2ST metrics from hierarchical Gaussian Hydra runs"
     )
     parser.add_argument(
         "--output-dir", 
         type=Path, 
-        default=Path("examples/outputs"),
-        help="Base output directory (default: examples/outputs)"
+        default=Path("outputs"),
+        help="Base output directory containing Hydra runs (default: outputs)"
     )
     parser.add_argument(
         "--save-path",
@@ -180,7 +183,7 @@ def main() -> None:
     args = parser.parse_args()
     
     # Collect metrics
-    print("Collecting metrics...")
+    print("Collecting metrics from Hydra runs...")
     metrics = collect_metrics(
         args.output_dir, 
         n_rounds_filter=args.n_rounds,

@@ -1,5 +1,4 @@
 import json
-import argparse
 import logging
 import time
 from pathlib import Path
@@ -7,6 +6,9 @@ from typing import Tuple, Callable
 from jaxtyping import PyTree, Array
 from flax import nnx
 import optax
+import hydra
+from omegaconf import DictConfig
+from hydra.core.hydra_config import HydraConfig
 
 from jax import numpy as jnp, random as jr, tree, vmap
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -27,13 +29,20 @@ from sfmpe.metrics.lc2st import (
 )
 from sfmpe.metrics.lc2stnf import lc2st_quant_plot
 
-def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000):
+def run(cfg: DictConfig):
     logger = logging.getLogger(__name__)
-    logger.info(f"Running with n_simulations={n_simulations}, n_rounds={n_rounds}, n_epochs={n_epochs}")
-    n_post_samples = 1_000
-    var_mu = 1.
-    var_theta = 1e-1
-    var_obs = 1e-2
+    logger.info(f"Running with n_simulations={cfg.n_simulations}, n_rounds={cfg.n_rounds}, n_epochs={cfg.n_epochs}")
+    
+    # Extract parameters from config
+    n_theta = cfg.n_theta
+    n_obs = cfg.n_obs
+    n_simulations = cfg.n_simulations
+    n_rounds = cfg.n_rounds
+    n_epochs = cfg.n_epochs
+    n_post_samples = cfg.n_post_samples
+    var_mu = cfg.var_mu
+    var_theta = cfg.var_theta
+    var_obs = cfg.var_obs
 
     independence = {
         'local': ['obs'],  # y observations independent of each other
@@ -69,27 +78,27 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
             'obs': obs
         }
 
-    key = jr.PRNGKey(42)
+    key = jr.PRNGKey(cfg.seed)
 
     theta_key, y_key, key = jr.split(key, 3)
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
     y_observed = simulator_fn(y_key, theta_truth)
 
     rngs = nnx.Rngs(key)
-    config = {
-        'latent_dim': 64,
-        'label_dim': 8,
-        'index_out_dim': 0,
-        'n_encoder': 1,
-        'n_decoder': 1,
-        'n_heads': 2,
-        'n_ff': 2,
-        'dropout': .1,
+    transformer_config = {
+        'latent_dim': cfg.sfmpe.transformer.latent_dim,
+        'label_dim': cfg.sfmpe.transformer.label_dim,
+        'index_out_dim': cfg.sfmpe.transformer.index_out_dim,
+        'n_encoder': cfg.sfmpe.transformer.n_encoder,
+        'n_decoder': cfg.sfmpe.transformer.n_decoder,
+        'n_heads': cfg.sfmpe.transformer.n_heads,
+        'n_ff': cfg.sfmpe.transformer.n_ff,
+        'dropout': cfg.sfmpe.transformer.dropout,
         'activation': nnx.relu,
     }
 
     nn = Transformer(
-        config,
+        transformer_config,
         value_dim=1,
         n_labels=3,
         index_dim=0,
@@ -116,8 +125,8 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
         n_epochs,
         y_observed,
         independence,
-        optimiser=optax.adam(3e-4),
-        batch_size=n_simulations // 10
+        optimiser=optax.adam(cfg.training.learning_rate),
+        batch_size=int(n_simulations * cfg.training.batch_size_fraction)
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
@@ -162,9 +171,9 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
     fmpe_nn = MLPVectorField(
         theta_dim=1 + n_theta,  # mu + theta
         context_dim=n_obs * n_theta,  # flattened observations
-        latent_dim=64,
-        n_layers=2,
-        dropout=.1,
+        latent_dim=cfg.fmpe.nn.latent_dim,
+        n_layers=cfg.fmpe.nn.n_layers,
+        dropout=cfg.fmpe.nn.dropout,
         activation=nnx.relu
     )
     
@@ -188,8 +197,8 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
         n_rounds=n_rounds,
         n_simulations=n_simulations,
         n_epochs=n_epochs,
-        optimizer=optax.adam(3e-4),
-        batch_size=(n_simulations // n_theta) // 10
+        optimizer=optax.adam(cfg.training.learning_rate),
+        batch_size=int((n_simulations // n_theta) * cfg.training.batch_size_fraction)
     )
 
     logger.info(f"FMPE round-based training completed in {time.time() - start_time:.2f} seconds")
@@ -207,7 +216,7 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
     print(f'posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
     logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
-    n_cal = 1_000
+    n_cal = cfg.analysis.n_cal
     logger.info(f"Creating calibration dataset with {n_cal} samples")
     start_time = time.time()
 
@@ -238,9 +247,12 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
             theta_0 = theta_0
         ).reshape((dim,))
     
-    n_cal_epochs = 100
+    n_cal_epochs = cfg.analysis.n_cal_epochs
     analyse_key, key = jr.split(key)
-    out_dir = Path(__file__).parent/'outputs'/'hierarchical_gaussian'/f'{n_simulations}_sims_{n_rounds}_rounds_{n_epochs}_epochs'
+    
+    # Use Hydra's output directory
+    hydra_cfg = HydraConfig.get()
+    out_dir = Path(hydra_cfg.runtime.output_dir)
 
     # Preprocess posterior samples for SFMPE
     sfmpe_posterior_flat = _flatten(posterior)
@@ -258,6 +270,9 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
         sfmpe_posterior_flat,
         n_cal_epochs,
         n_cal,
+        cfg.analysis.classifier.n_layers,
+        cfg.analysis.n_null,
+        cfg.analysis.classifier.latent_dim,
         rngs
     )
     save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe')
@@ -275,6 +290,9 @@ def run(n_theta: int, n_obs: int, n_simulations=1_000, n_rounds=2, n_epochs=1000
         fmpe_posterior_samples,
         n_cal_epochs,
         n_cal,
+        cfg.analysis.classifier.n_layers,
+        cfg.analysis.n_null,
+        cfg.analysis.classifier.latent_dim,
         rngs
     )
     save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe')
@@ -290,6 +308,9 @@ def apply_lc2st(
     posterior_samples: jnp.ndarray,
     n_epochs: int,
     n_cal: int,
+    n_layers: int,
+    n_null: int,
+    latent_dim: int,
     rngs: nnx.Rngs
     ):
     """
@@ -320,13 +341,11 @@ def apply_lc2st(
     
     # Train main classifier
     train_key, key = jr.split(key)
-    n_layers = 2
-    n_null = 100
     activation = nnx.relu
 
     main = BinaryMLPClassifier(
         dim=classifier_dim,
-        latent_dim=16,
+        latent_dim=latent_dim,
         n_layers=n_layers,
         activation=activation,
         rngs=rngs
@@ -334,12 +353,13 @@ def apply_lc2st(
 
     null_cls = MultiBinaryMLPClassifier(
         dim=classifier_dim,
-        latent_dim=16,
+        latent_dim=latent_dim,
         n_layers=n_layers,
         activation=activation,
         n=n_null,
         rngs=rngs
     )
+    logger = logging.getLogger(__name__)
     logger.info(f'Training classifiers with {n_epochs} epochs')
     train_lc2st_classifiers(
         train_key,
@@ -433,16 +453,9 @@ def create_fmpe_calibration_dataset(
     post_estimate = vmap(sample_posterior)(jr.split(post_key, n), y)
     return y, prior, post_estimate
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Hierarchical Gaussian Flow Matching Example")
-    parser.add_argument("--n_simulations", type=int, default=1_000, help="Number of simulations per round")
-    parser.add_argument("--n_rounds", type=int, default=1, help="Number of training rounds (default: 1)")
-    parser.add_argument("--n_epochs", type=int, default=1_000, help="Number of epochs per round (default: 1000)")
-    parser.add_argument("--n_theta", type=int, default=2, help="Number of theta parameters (default: 2)")
-    parser.add_argument("--n_obs", type=int, default=5, help="Number of theta parameters (default: 5)")
-    
-    args = parser.parse_args()
-    
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    """Main function with Hydra configuration management."""
     # Setup logging for main execution
     logging.basicConfig(
         level=logging.INFO,
@@ -450,11 +463,11 @@ if __name__ == "__main__":
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     logger = logging.getLogger(__name__)
-    logger.info(f"Running with n_rounds={args.n_rounds}, n_epochs={args.n_epochs}")
-    run(
-        n_theta=args.n_theta,
-        n_obs=args.n_obs,
-        n_simulations=args.n_simulations,
-        n_rounds=args.n_rounds,
-        n_epochs=args.n_epochs
-    )
+    logger.info(f"Starting hierarchical Gaussian experiment")
+    
+    # Run the experiment
+    run(cfg)
+
+
+if __name__ == "__main__":
+    main()
