@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 # Data parameters
-n_theta: 2  # Number of theta parameters
+n_theta: 5  # Number of theta parameters
 n_obs: 5    # Number of observations
 
 # Training parameters  
@@ -21,7 +21,7 @@ n_post_samples: 1000  # Number of posterior samples
 # Hierarchical model parameters
 var_mu: 1.0      # Variance for mu parameter
 var_theta: 0.1   # Variance for theta parameter  
-var_obs: 0.01    # Variance for observations
+var_obs: 0.1    # Variance for observations
 
 # Training configuration
 training:
