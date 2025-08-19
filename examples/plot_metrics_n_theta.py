@@ -1,20 +1,20 @@
 """
-Plot LC2ST metrics from hierarchical Gaussian runs with different sample sizes.
+Plot LC2ST metrics from hierarchical Gaussian runs with different n_theta values.
 
-This script scans Hydra output directories for results from different simulation 
-budgets and creates a comparison plot showing how the LC2ST statistic varies 
-with the number of simulations for different estimation methods.
+This script scans Hydra output directories for results from different numbers
+of theta parameters and creates a comparison plot showing how the LC2ST statistic 
+varies with n_theta for different estimation methods.
 """
 
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 
 
-def load_config_from_run(run_dir: Path) -> Optional[Dict]:
+def load_config_from_run(run_dir: Path) -> Optional[Dict[str, Any]]:
     """
     Load configuration from Hydra's .hydra directory.
     
@@ -28,7 +28,7 @@ def load_config_from_run(run_dir: Path) -> Optional[Dict]:
     if config_path.exists():
         try:
             cfg = OmegaConf.load(config_path)
-            return OmegaConf.to_container(cfg, resolve=True)
+            return OmegaConf.to_container(cfg, resolve=True)  # type: ignore
         except Exception as e:
             print(f"Warning: Failed to load config from {config_path}: {e}")
     return None
@@ -36,6 +36,7 @@ def load_config_from_run(run_dir: Path) -> Optional[Dict]:
 
 def collect_metrics(
     base_dir: Path, 
+    n_simulations_filter: Optional[int] = 5000,
     n_rounds_filter: Optional[int] = None,
     n_epochs_filter: Optional[int] = None
 ) -> Dict[str, List[Tuple[int, float]]]:
@@ -44,11 +45,12 @@ def collect_metrics(
     
     Args:
         base_dir: Base directory containing Hydra outputs
+        n_simulations_filter: Only include runs with this number of simulations
         n_rounds_filter: Only include runs with this number of rounds
         n_epochs_filter: Only include runs with this number of epochs
         
     Returns:
-        Dictionary mapping method names to list of (n_simulations, main_stat)
+        Dictionary mapping method names to list of (n_theta, main_stat)
     """
     metrics = {}
     
@@ -66,11 +68,14 @@ def collect_metrics(
         if config is None:
             continue
             
+        n_theta = config.get("n_theta")
         n_simulations = config.get("n_simulations")
         n_rounds = config.get("n_rounds")
         n_epochs = config.get("n_epochs")
         
         # Apply filters if specified
+        if n_simulations_filter is not None and n_simulations != n_simulations_filter:
+            continue
         if n_rounds_filter is not None and n_rounds != n_rounds_filter:
             continue
         if n_epochs_filter is not None and n_epochs != n_epochs_filter:
@@ -92,16 +97,16 @@ def collect_metrics(
                     stats = json.load(f)
                     
                 main_stat = stats.get('main_stat')
-                if main_stat is not None:
+                if main_stat is not None and n_theta is not None:
                     if method_name not in metrics:
                         metrics[method_name] = []
-                    metrics[method_name].append((n_simulations, main_stat))
+                    metrics[method_name].append((n_theta, main_stat))
                     
             except (json.JSONDecodeError, KeyError) as e:
                 print(f"Warning: Failed to parse {stats_file}: {e}")
                 continue
     
-    # Sort by n_simulations
+    # Sort by n_theta
     for method_name in metrics:
         metrics[method_name].sort(key=lambda x: x[0])
     
@@ -113,10 +118,10 @@ def plot_metrics(
     output_path: Path
 ) -> None:
     """
-    Create a plot comparing LC2ST statistics across simulation budgets.
+    Create a plot comparing LC2ST statistics across different n_theta values.
     
     Args:
-        metrics: Dictionary mapping method names to (n_simulations, main_stat) 
+        metrics: Dictionary mapping method names to (n_theta, main_stat) pairs
         output_path: Path to save the plot
     """
     plt.figure(figsize=(10, 6))
@@ -127,15 +132,15 @@ def plot_metrics(
         if not data:
             continue
             
-        n_sims, stats = zip(*data)
+        n_thetas, stats = zip(*data)
         color = colors[i % len(colors)]
         
-        plt.plot(n_sims, stats, 'o-', label=method_name, color=color, 
+        plt.plot(n_thetas, stats, 'o-', label=method_name, color=color, 
                 linewidth=2, markersize=6)
     
-    plt.xlabel('Number of Simulations')
+    plt.xlabel('Number of Theta Parameters (n_theta)')
     plt.ylabel('LC2ST Statistic')
-    plt.title('LC2ST Statistic vs Simulation Budget by Method')
+    plt.title('LC2ST Statistic vs n_theta by Method')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -155,7 +160,7 @@ def plot_metrics(
 def main() -> None:
     """Main function with command-line interface."""
     parser = argparse.ArgumentParser(
-        description="Plot LC2ST metrics from hierarchical Gaussian Hydra runs"
+        description="Plot LC2ST metrics vs n_theta from hierarchical Gaussian Hydra runs"
     )
     parser.add_argument(
         "--output-dir", 
@@ -166,8 +171,14 @@ def main() -> None:
     parser.add_argument(
         "--save-path",
         type=Path,
-        default=Path("examples/outputs/lc2st_comparison.png"),
-        help="Path to save the plot (default: examples/outputs/lc2st_comparison.png)"
+        default=Path("examples/outputs/lc2st_n_theta_comparison.png"),
+        help="Path to save the plot (default: examples/outputs/lc2st_n_theta_comparison.png)"
+    )
+    parser.add_argument(
+        "--n-simulations",
+        type=int,
+        default=5000,
+        help="Filter results by number of simulations (default: 5000)"
     )
     parser.add_argument(
         "--n-rounds",
@@ -186,20 +197,22 @@ def main() -> None:
     print("Collecting metrics from Hydra runs...")
     metrics = collect_metrics(
         args.output_dir, 
+        n_simulations_filter=args.n_simulations,
         n_rounds_filter=args.n_rounds,
         n_epochs_filter=args.n_epochs
     )
     
     if not metrics:
         print("No metrics found. Make sure to run hierarchical_gaussian.py first.")
+        print(f"Looking for runs with n_simulations={args.n_simulations}")
         return
     
     # Print summary
     print("\nFound metrics for:")
     for method_name, data in metrics.items():
-        n_sims = [x[0] for x in data]
+        n_thetas = [x[0] for x in data]
         print(f"  {method_name}: {len(data)} runs, "
-              f"simulations: {min(n_sims)}-{max(n_sims)}")
+              f"n_theta values: {min(n_thetas)}-{max(n_thetas)}")
     
     # Create plot
     print(f"\nCreating plot...")
