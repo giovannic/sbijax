@@ -54,8 +54,9 @@ def train_bottom_up(
             theta_samples_full = estim.sample_posterior(
                 flat_y_obs['data']['y'],
                 flat_data['labels'], #type: ignore
-                data_slices['theta'], #type: ignore
+                data_slices, #type: ignore
                 masks=flat_data['masks'], #type: ignore
+                index=flat_data['index'] if f_in is not None else None,
                 n_samples=n_simulations
             )
             theta_samples = {}
@@ -109,7 +110,8 @@ def train_bottom_up(
 
         z_flat, _ = flatten_structured(
             z_data,
-            independence=independence
+            independence=independence,
+            index=f_in_sample if f_in is not None else None
         )
 
         if train_data is None:
@@ -146,12 +148,27 @@ def train_bottom_up(
         z_sim = z_data.copy()
         sim_key, key = jr.split(key)
 
-        z_sim['y']['obs'] = jr.choice(
+        # Sample batch indices to expand from 1 to n_local in event dimension
+        # z_data['y']['obs'].shape = (n_simulations, 1, n_obs, obs_dim)
+        batch_indices = jr.choice(
             sim_key,
-            z_data['y']['obs'],
-            shape=(n_local,),
-            axis=1
+            jnp.arange(z_data['y']['obs'].shape[0]),  # Sample from batch dimension (n_simulations)
+            shape=(n_simulations, n_local),
+            replace=True
         )
+        # z_sim['y']['obs'].shape = (n_simulations, n_local, n_obs, obs_dim)
+        z_sim['y']['obs'] = _resample_to_events(z_data['y']['obs'], batch_indices)
+
+        # Resample f_in to match resampled observations if f_in is present
+        if f_in is not None:
+            # f_in_sample['obs'].shape = (n_simulations, n_theta, n_obs, 1)
+            # f_in_resampled['obs'].shape = (n_simulations, n_local, n_obs, 1)
+            f_in_resampled = {
+                k: _resample_to_events(v, batch_indices) if k == 'obs' else v
+                for k, v in f_in_sample.items()
+            }
+        else:
+            f_in_resampled = None
 
         # pad z to n_z
         for l in local_names:
@@ -166,7 +183,8 @@ def train_bottom_up(
             z_sim_slices
         ) = flatten_structured(
             z_sim,
-            independence=independence
+            independence=independence,
+            index=f_in_resampled if f_in is not None else None
         )
 
         @jit
@@ -175,8 +193,9 @@ def train_bottom_up(
             post = estim.sample_posterior(
                 jnp.expand_dims(context, 0),
                 flat_z_sim['labels'],
-                z_sim_slices['theta'],
+                z_sim_slices,
                 masks=flat_z_sim['masks'],
+                index=flat_z_sim['index'] if f_in is not None else None,
                 n_samples=1
             )
             return tree.map(lambda leaf: leaf[0], post)
@@ -201,7 +220,8 @@ def train_bottom_up(
 
         flat_data, data_slices = flatten_structured(
             data,
-            independence=independence
+            independence=independence,
+            index=f_in_resampled if f_in is not None else None
         )
 
         train_data = tree.map(
@@ -239,4 +259,12 @@ def train_bottom_up(
         flat_data['labels'],
         data_slices['theta'],
         flat_data['masks']
+    )
+
+def _resample_to_events(
+    sample: Array,
+    batch_indices: Array
+):
+    return jnp.take(sample, batch_indices, axis=0).reshape(
+        batch_indices.shape + sample.shape[2:]
     )

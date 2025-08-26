@@ -51,12 +51,14 @@ def create_hierarchical_simulator_fn(n_obs: int, var_obs: float = 1.0):
     return simulator_fn
 
 
-def create_f_in_fn(n_obs: int, obs_rate: float = 1.0):
+def create_f_in_fn(obs_rate: float = 1.0):
     """Create f_in function that returns TFP distribution similar to hierarchical_brownian.py"""
-    def f_in_fn(n):
+    def f_in_fn(n_obs, n_theta):
         return tfd.JointDistributionNamed(
             dict(
-                obs=tfd.Exponential(jnp.full((n, 1), obs_rate)),
+                mu=tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                theta=tfd.Deterministic(jnp.zeros((n_theta, 1))), # dummy f_in for indexing purposes
+                obs=tfd.Exponential(jnp.full((n_theta, n_obs, 1), obs_rate)),
             ),
             batch_ndims=1
         )
@@ -67,17 +69,14 @@ def create_hierarchical_simulator_fn_with_f_in(n_obs: int):
     """Create hierarchical simulator function that accepts f_in parameter"""
     def simulator_fn(seed, theta, f_in):
         # theta['theta'] has shape (n_simulations, n_theta, 1)
-        # f_in['obs'] has shape (n_simulations, n_obs, 1)
+        # f_in['obs'] has shape (n_simulations, n_theta, n_obs, 1)
         # We want n_theta means each with n_obs different variances
-        # Expand theta to (n_simulations, n_theta, n_obs, 1) and f_in to (n_simulations, n_theta, n_obs, 1)
+        # Expand theta to (n_simulations, n_theta, n_obs, 1)
         theta_expanded = jnp.expand_dims(theta['theta'], -2)  # (n_simulations, n_theta, 1, 1)
         theta_expanded = jnp.broadcast_to(theta_expanded, (*theta_expanded.shape[:-2], n_obs, 1))  # (n_simulations, n_theta, n_obs, 1)
         
-        f_in_expanded = jnp.expand_dims(f_in['obs'], 1)  # (n_simulations, 1, n_obs, 1)
-        f_in_expanded = jnp.broadcast_to(f_in_expanded, (*f_in_expanded.shape[:-3], theta['theta'].shape[1], n_obs, 1))  # (n_simulations, n_theta, n_obs, 1)
-        
         obs = tfd.Independent(
-            tfd.Normal(theta_expanded, f_in_expanded),
+            tfd.Normal(theta_expanded, f_in['obs']),
             reinterpreted_batch_ndims=2
         ).sample(seed=seed)
         return {
@@ -300,14 +299,14 @@ def test_train_bottom_up_with_f_in_single_round():
     
     prior_fn = create_hierarchical_prior_fn(var_mu, var_theta)
     simulator_fn = create_hierarchical_simulator_fn_with_f_in(n_obs)
-    f_in_fn = create_f_in_fn(n_obs, obs_rate)
+    f_in_fn = create_f_in_fn(obs_rate)
     
     # Generate observed data
     key = jr.PRNGKey(42)
     theta_key, y_key, f_in_key, estim_key = jr.split(key, 4)
     
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
-    f_in_truth = f_in_fn(n_obs).sample((1,), seed=f_in_key)
+    f_in_truth = f_in_fn(n_obs, n_theta).sample((1,), seed=f_in_key)
     y_observed = simulator_fn(y_key, theta_truth, f_in_truth)
     
     estim = create_test_estimator_with_index(estim_key)
@@ -348,13 +347,13 @@ def test_train_bottom_up_with_f_in_single_round():
             optimiser=optax.adam(0.001),
             batch_size=10,
             f_in=f_in_spy,
-            f_in_args=(n_obs,)
+            f_in_args=(n_obs, 1)
         )
     
     # 1. f_in Function Calls
     assert f_in_spy.call_count == 1
     f_in_call = f_in_spy.call_args_list[0]
-    assert f_in_call[0][0] == n_obs  # Called with n_obs argument
+    assert f_in_call[0] == (n_obs, 1)  # Called with n_obs, 1 arguments
     
     # 2. Simulator Function Calls
     assert simulator_spy.call_count == 1
@@ -362,7 +361,7 @@ def test_train_bottom_up_with_f_in_single_round():
     assert len(sim_call[0]) == 3  # Called with 3 arguments (seed, theta, f_in)
     f_in_sample = sim_call[0][2]  # Third argument is f_in_sample
     assert 'obs' in f_in_sample
-    assert f_in_sample['obs'].shape == (n_simulations, n_obs, 1)
+    assert f_in_sample['obs'].shape == (n_simulations, 1, n_obs, 1)
     
     # 3. flatten_structured Index Parameter
     # Verify flatten_structured called exactly 3 times for single round
@@ -372,22 +371,22 @@ def test_train_bottom_up_with_f_in_single_round():
     first_call = flatten_spy.call_args_list[0]
     assert 'index' in first_call[1]  # Should have index kwarg
     index_first = first_call[1]['index']
-    # Expected index shape: flattened f_in with shape (n_simulations, n_obs, 1)
-    assert index_first.shape == (n_simulations, n_obs, 1)
+    # Expected index shape: flattened f_in with shape (n_simulations, n_theta, n_obs, 1)
+    assert index_first['obs'].shape == (n_simulations, 1, n_obs, 1)
     
     # 2nd call: z_sim flattening for z sampling  
     second_call = flatten_spy.call_args_list[1]
     assert 'index' in second_call[1]  # Should have index kwarg
     index_second = second_call[1]['index']
-    # Expected index shape: (n_simulations, n_local * n_obs, 1) = (50, 15, 1)
-    assert index_second.shape == (n_simulations, n_local * n_obs, 1)
+    # Expected index shape: (n_simulations, n_local, n_obs, 1) = (50, 3, 5, 1)
+    assert index_second['obs'].shape == (n_simulations, n_local, n_obs, 1)
     
     # 3rd call: final data flattening for full posterior training
     third_call = flatten_spy.call_args_list[2]
     assert 'index' in third_call[1]  # Should have index kwarg
     index_third = third_call[1]['index']
-    # Expected index shape: (n_simulations, n_local * n_obs, 1) = (50, 15, 1)
-    assert index_third.shape == (n_simulations, n_local * n_obs, 1)
+    # Expected index shape: (n_simulations, n_local, n_obs, 1) = (50, 3, 5, 1)
+    assert index_third['obs'].shape == (n_simulations, n_local, n_obs, 1)
     
     # 4. sample_posterior Integration
     # Check sample_posterior calls receive flattened f_in data via index kwarg
