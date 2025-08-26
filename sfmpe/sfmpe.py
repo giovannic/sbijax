@@ -151,17 +151,16 @@ class SFMPE:
         self,
         context: Array,
         labels: Array,
-        slices: PyTree,
+        theta_slices: PyTree,
         masks: Optional[PyTree] = None,
         index: Optional[PyTree] = None,
         n_samples: int = 1_000,
         theta_0: Optional[PyTree]=None,
         direction: Direction = 'forward',
     ) -> PyTree:
-        theta_slices = slices['theta']
         if index is not None:
-            context_index = {k: index[k] for k in slices['y'].keys()}
-            theta_index = {k: index[k] for k in theta_slices.keys()}
+            context_index = index['y']
+            theta_index = index['theta']
         else:
             context_index = None
             theta_index = None

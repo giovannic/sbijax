@@ -54,7 +54,7 @@ def train_bottom_up(
             theta_samples_full = estim.sample_posterior(
                 flat_y_obs['data']['y'],
                 flat_data['labels'], #type: ignore
-                data_slices, #type: ignore
+                data_slices['theta'], #type: ignore
                 masks=flat_data['masks'], #type: ignore
                 index=flat_data['index'] if f_in is not None else None,
                 n_samples=n_simulations
@@ -164,7 +164,7 @@ def train_bottom_up(
             # f_in_sample['obs'].shape = (n_simulations, n_theta, n_obs, 1)
             # f_in_resampled['obs'].shape = (n_simulations, n_local, n_obs, 1)
             f_in_resampled = {
-                k: _resample_to_events(v, batch_indices) if k == 'obs' else v
+                k: _resample_to_events(v, batch_indices) if k in {'obs'} | set(local_names) else v
                 for k, v in f_in_sample.items()
             }
         else:
@@ -187,20 +187,37 @@ def train_bottom_up(
             index=f_in_resampled if f_in is not None else None
         )
 
-        @jit
-        @vmap
-        def sample_for_context(context):
-            post = estim.sample_posterior(
-                jnp.expand_dims(context, 0),
-                flat_z_sim['labels'],
-                z_sim_slices,
-                masks=flat_z_sim['masks'],
-                index=flat_z_sim['index'] if f_in is not None else None,
-                n_samples=1
-            )
-            return tree.map(lambda leaf: leaf[0], post)
+        if f_in is not None:
+            @jit
+            @vmap
+            def sample_for_context(context, index):
+                post = estim.sample_posterior(
+                    jnp.expand_dims(context, 0),
+                    flat_z_sim['labels'],
+                    z_sim_slices['theta'],
+                    masks=flat_z_sim['masks'],
+                    index=tree.map(lambda leaf: jnp.expand_dims(leaf, 0), index),
+                    n_samples=1
+                )
+                return tree.map(lambda leaf: leaf[0], post)
 
-        z_vec = sample_for_context(flat_z_sim['data']['y'])
+            z_vec = sample_for_context(flat_z_sim['data']['y'], flat_z_sim['index'])
+        else:
+            @jit
+            @vmap
+            def sample_for_context(context):
+                post = estim.sample_posterior(
+                    jnp.expand_dims(context, 0),
+                    flat_z_sim['labels'],
+                    z_sim_slices['theta'],
+                    masks=flat_z_sim['masks'],
+                    n_samples=1
+                )
+                return tree.map(lambda leaf: leaf[0], post)
+
+            z_vec = sample_for_context(flat_z_sim['data']['y'])
+
+
         logger.info(f"Round {i+1} posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
         # fit p(theta,z_vec|y_vec)

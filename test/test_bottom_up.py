@@ -390,12 +390,13 @@ def test_train_bottom_up_with_f_in_single_round():
     
     # 4. sample_posterior Integration
     # Check sample_posterior calls receive flattened f_in data via index kwarg
-    assert sample_posterior_spy.call_count > 0
+    assert sample_posterior_spy.call_count == 1 #vmap
     posterior_call = sample_posterior_spy.call_args_list[0]
     assert 'index' in posterior_call[1]  # Should have index kwarg
-    index_context = posterior_call[1]['index']['context']
+    index = posterior_call[1]['index']
     # Expected context index shape: (n_simulations, n_obs, 1) = (50, 5, 1)
-    assert index_context.shape == (n_simulations, n_obs, 1)
+    assert index['theta'].shape == (1, n_theta, 1) # theta
+    assert index['y'].shape == (1, 1 + n_theta * n_obs, 1) # mu + y_observed
 
 
 def test_train_bottom_up_multiple_rounds(hierarchical_setup):
