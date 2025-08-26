@@ -517,3 +517,148 @@ def test_train_bottom_up_multiple_rounds(hierarchical_setup):
     assert isinstance(masks, dict)
     assert 'attention' in masks
     assert set(masks['attention'].keys()) == {'theta', 'y', 'cross'}  # type: ignore
+
+
+def test_train_bottom_up_with_f_in_multiple_rounds():
+    """Test train_bottom_up with f_in and f_in_args (multiple rounds)"""
+    n_theta = 3
+    n_obs = 5
+    n_local = n_theta
+    var_mu = 1.0
+    var_theta = 0.5
+    obs_rate = 1.0
+    
+    independence = {
+        'local': ['obs'],
+        'cross': [('mu', 'obs')],
+        'cross_local': [('theta', 'obs', (0, 0))]
+    }
+    
+    prior_fn = create_hierarchical_prior_fn(var_mu, var_theta)
+    simulator_fn = create_hierarchical_simulator_fn_with_f_in(n_obs)
+    f_in_fn = create_f_in_fn(obs_rate)
+    
+    # Generate observed data and f_in_target
+    key = jr.PRNGKey(42)
+    theta_key, y_key, f_in_target_key, estim_key = jr.split(key, 4)
+    
+    theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
+    f_in_target = f_in_fn(n_obs, n_theta).sample((1,), seed=f_in_target_key)
+    y_observed = simulator_fn(y_key, theta_truth, f_in_target)
+    
+    estim = create_test_estimator_with_index(estim_key)
+    
+    # Test parameters
+    n_rounds = 2
+    n_simulations = 50
+    n_epochs = 1
+    
+    key = jr.PRNGKey(123)
+    
+    # Create spies using wraps
+    prior_spy = Mock(wraps=prior_fn)
+    simulator_spy = Mock(wraps=simulator_fn)
+    f_in_spy = Mock(wraps=f_in_fn)
+    fit_spy = Mock(wraps=estim.fit)
+    flatten_spy = Mock(wraps=flatten_structured)
+    sample_posterior_spy = Mock(wraps=estim.sample_posterior)
+    
+    # Patch the functions
+    with unittest.mock.patch.object(estim, 'fit', fit_spy), \
+         unittest.mock.patch.object(estim, 'sample_posterior', sample_posterior_spy), \
+         unittest.mock.patch('sfmpe.bottom_up.flatten_structured', flatten_spy):
+        
+        labels, slices, masks = train_bottom_up(
+            key=key,
+            estim=estim,
+            prior_fn=prior_spy,
+            simulator_fn=simulator_spy,
+            global_names=['mu'],
+            local_names=['theta'],
+            n_local=n_local,
+            n_rounds=n_rounds,
+            n_simulations=n_simulations,
+            n_epochs=n_epochs,
+            y_observed=y_observed,
+            independence=independence,
+            optimiser=optax.adam(0.001),
+            batch_size=10,
+            f_in=f_in_spy,
+            f_in_args=(n_obs, 1),
+            f_in_target=f_in_target
+        )
+    
+    # 1. f_in Function Calls
+    assert f_in_spy.call_count == 2
+    for i in range(2):
+        f_in_call = f_in_spy.call_args_list[i]
+        assert f_in_call[0] == (n_obs, 1)  # Called with n_obs, 1 arguments
+    
+    # 2. Simulator Function Calls
+    assert simulator_spy.call_count == 2
+    for i in range(2):
+        sim_call = simulator_spy.call_args_list[i]
+        assert len(sim_call[0]) == 3  # Called with 3 arguments (seed, theta, f_in)
+        f_in_sample = sim_call[0][2]  # Third argument is f_in_sample
+        assert 'obs' in f_in_sample
+        assert f_in_sample['obs'].shape == (n_simulations, 1, n_obs, 1)
+    
+    # 3. flatten_structured Index Parameter
+    # Verify flatten_structured called exactly 7 times for 2 rounds
+    assert flatten_spy.call_count == 7
+    
+    # Round 1 calls (indices 0-2): Same as single-round test
+    # 1st call: z_data flattening for initial simulation training data
+    first_call = flatten_spy.call_args_list[0]
+    assert 'index' in first_call[1]  # Should have index kwarg
+    index_first = first_call[1]['index']
+    assert index_first['obs'].shape == (n_simulations, 1, n_obs, 1)
+    
+    # 2nd call: z_sim flattening for z sampling  
+    second_call = flatten_spy.call_args_list[1]
+    assert 'index' in second_call[1]  # Should have index kwarg
+    index_second = second_call[1]['index']
+    assert index_second['obs'].shape == (n_simulations, n_local, n_obs, 1)
+    
+    # 3rd call: final data flattening for full posterior training
+    third_call = flatten_spy.call_args_list[2]
+    assert 'index' in third_call[1]  # Should have index kwarg
+    index_third = third_call[1]['index']
+    assert index_third['obs'].shape == (n_simulations, n_local, n_obs, 1)
+    
+    # Round 2 calls (indices 3-6):
+    # 1st call: NEW - full posterior sample flattening for round 2
+    round2_call1 = flatten_spy.call_args_list[3]
+    assert 'index' in round2_call1[1]  # Should have index kwarg
+    index_round2_call1 = round2_call1[1]['index']
+    # Should use f_in_target for y_observed structure
+    assert index_round2_call1['obs'].shape == (1, n_theta, n_obs, 1)
+    assert jnp.array_equal(index_round2_call1['obs'], f_in_target['obs'])
+    
+    # 2nd call: z_data flattening
+    round2_call2 = flatten_spy.call_args_list[4]
+    assert 'index' in round2_call2[1]  # Should have index kwarg
+    index_round2_call2 = round2_call2[1]['index']
+    assert index_round2_call2['obs'].shape == (n_simulations, 1, n_obs, 1)
+    
+    # 3rd call: z_sim flattening
+    round2_call3 = flatten_spy.call_args_list[5]
+    assert 'index' in round2_call3[1]  # Should have index kwarg
+    index_round2_call3 = round2_call3[1]['index']
+    assert index_round2_call3['obs'].shape == (n_simulations, n_local, n_obs, 1)
+    
+    # 4th call: final data flattening
+    round2_call4 = flatten_spy.call_args_list[6]
+    assert 'index' in round2_call4[1]  # Should have index kwarg
+    index_round2_call4 = round2_call4[1]['index']
+    assert index_round2_call4['obs'].shape == (n_simulations, n_local, n_obs, 1)
+    
+    # 4. sample_posterior Integration
+    # Check sample_posterior calls receive flattened f_in data via index kwarg
+    assert sample_posterior_spy.call_count == 1  # vmap in round 2
+    posterior_call = sample_posterior_spy.call_args_list[0]
+    assert 'index' in posterior_call[1]  # Should have index kwarg
+    index = posterior_call[1]['index']
+    # Expected context index shape from round 2 posterior sampling
+    assert index['theta'].shape == (1, n_theta, 1)  # theta
+    assert index['y'].shape == (1, 1 + n_theta * n_obs, 1)  # mu + y_observed
