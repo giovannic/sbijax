@@ -1,30 +1,38 @@
+import time
+import optax
+import logging
+from jax import numpy as jnp, random as jr, jit, vmap, tree
+from typing import Callable, Optional, List
+from jaxtyping import Array
+
 from sfmpe.util.dataloader import (
     flatten_structured,
     pad_multidim_event,
     combine_data
 )
+from sfmpe.sfmpe import SFMPE
 from sfmpe.utils import split_data
-import optax
-import logging
-import time
 
-from jax import numpy as jnp, random as jr, jit, vmap, tree
+F_IN = Optional[Array | Callable]
+F_IN_ARGS = Optional[List]
 
 def train_bottom_up(
-    key,
-    estim,
-    prior_fn,
-    simulator_fn,
-    global_names,
-    local_names,
-    n_local,
-    n_rounds,
-    n_simulations,
-    n_epochs,
-    y_observed,
-    independence,
-    optimiser=optax.adam(0.0003),
-    batch_size=100
+    key: Array,
+    estim: SFMPE,
+    prior_fn: Callable,
+    simulator_fn: Callable,
+    global_names: list[str],
+    local_names: list[str],
+    n_local: int,
+    n_rounds: int,
+    n_simulations: int,
+    n_epochs: int,
+    y_observed: Array,
+    independence: dict,
+    optimiser: optax.GradientTransformation=optax.adam(0.0003),
+    batch_size: int=100,
+    f_in: F_IN = None,
+    f_in_args: F_IN_ARGS = None
     ):
     logger = logging.getLogger(__name__)
     
@@ -67,7 +75,24 @@ def train_bottom_up(
                 sample_shape=(n_simulations,)
             )
 
-        y_samples = simulator_fn(obs_key, theta_samples)
+        if f_in is not None:
+            # get a sample of f_in
+            if callable(f_in):
+                if f_in_args is None:
+                    f_in_sample = f_in()
+                else:
+                    f_in_key, key = jr.split(key)
+                    f_in_sample = f_in(*f_in_args).sample(
+                        (n_simulations,),
+                        seed=f_in_key
+                    )
+            else:
+                f_in_sample = f_in
+
+            # sample y
+            y_samples = simulator_fn(obs_key, theta_samples, f_in_sample)
+        else:
+            y_samples = simulator_fn(obs_key, theta_samples)
 
         z_data = {
             'theta': {
