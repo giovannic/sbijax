@@ -655,10 +655,18 @@ def test_train_bottom_up_with_f_in_multiple_rounds():
     
     # 4. sample_posterior Integration
     # Check sample_posterior calls receive flattened f_in data via index kwarg
-    assert sample_posterior_spy.call_count == 1  # vmap in round 2
+    assert sample_posterior_spy.call_count == 3
     posterior_call = sample_posterior_spy.call_args_list[0]
     assert 'index' in posterior_call[1]  # Should have index kwarg
     index = posterior_call[1]['index']
     # Expected context index shape from round 2 posterior sampling
     assert index['theta'].shape == (1, n_theta, 1)  # theta
     assert index['y'].shape == (1, 1 + n_theta * n_obs, 1)  # mu + y_observed
+
+    # Check that full posteiror call receives index consistent with f_in_target
+    posterior_call = sample_posterior_spy.call_args_list[1]
+    assert 'index' in posterior_call[1]  # Should have index kwarg
+    index = posterior_call[1]['index']
+    # Expected context index shape from round 2 posterior sampling
+    assert index['theta'].shape == (1, 1 + n_theta, 1)  # mu + theta
+    assert index['y'].shape == (1, n_theta * n_obs, 1)  # y_observed

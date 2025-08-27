@@ -3,7 +3,7 @@ import optax
 import logging
 from jax import numpy as jnp, random as jr, jit, vmap, tree
 from typing import Callable, Optional, List
-from jaxtyping import Array
+from jaxtyping import Array, PyTree
 
 from sfmpe.util.dataloader import (
     flatten_structured,
@@ -13,7 +13,7 @@ from sfmpe.util.dataloader import (
 from sfmpe.sfmpe import SFMPE
 from sfmpe.utils import split_data
 
-F_IN = Optional[Array | Callable]
+F_IN = Optional[PyTree | Callable]
 F_IN_ARGS = Optional[List]
 
 def train_bottom_up(
@@ -32,7 +32,8 @@ def train_bottom_up(
     optimiser: optax.GradientTransformation=optax.adam(0.0003),
     batch_size: int=100,
     f_in: F_IN = None,
-    f_in_args: F_IN_ARGS = None
+    f_in_args: F_IN_ARGS = None,
+    f_in_target: Optional[PyTree] = None
     ):
     logger = logging.getLogger(__name__)
     
@@ -44,19 +45,28 @@ def train_bottom_up(
         # Fit p(z|theta, y)
         theta_key, obs_key, key = jr.split(key, 3)
         if i > 0:
+            if f_in is not None:
+                if f_in_target is None:
+                    raise ValueError(
+                        "f_in_target must be provided for \
+                        multi-round inference on \
+                        function valued variables"
+                    )
+
             flat_y_obs, data_slices = flatten_structured(
                 {
                     'theta': data['theta'],
                     'y': y_observed
                 },
-                independence=independence
+                independence=independence,
+                index=f_in_target
             )
             theta_samples_full = estim.sample_posterior(
                 flat_y_obs['data']['y'],
                 flat_data['labels'], #type: ignore
                 data_slices['theta'], #type: ignore
                 masks=flat_data['masks'], #type: ignore
-                index=flat_data['index'] if f_in is not None else None,
+                index=flat_y_obs['index'],
                 n_samples=n_simulations
             )
             theta_samples = {}
