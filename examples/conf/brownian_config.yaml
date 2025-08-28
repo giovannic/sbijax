@@ -1,0 +1,41 @@
+# Hierarchical Brownian Motion Flow Matching Configuration
+# Configuration for hierarchical Brownian model with functional random variables
+
+defaults:
+  - sfmpe: indexed  # Use indexed SFMPE for f_in support
+  - fmpe: default
+  - _self_
+
+# Data parameters
+n_theta: 5  # Number of theta parameters
+n_obs: 5    # Number of observations per theta
+
+# Training parameters  
+n_simulations: 1000  # Number of simulations per round
+n_rounds: 2          # Number of training rounds
+n_epochs: 1000       # Number of epochs per round
+
+# Model hyperparameters
+n_post_samples: 1000  # Number of posterior samples
+
+# Hierarchical model parameters
+var_mu: 1.0      # Variance for mu parameter
+var_theta: 0.1   # Variance for theta parameter  
+obs_rate: 1.0    # Rate parameter for exponential f_in distribution
+
+# Training configuration
+training:
+  learning_rate: 3e-4
+  batch_size_fraction: 0.1  # Fraction of n_simulations for batch size
+
+# Analysis parameters
+analysis:
+  n_cal: 1000        # Number of calibration samples
+  n_cal_epochs: 100  # Number of calibration epochs
+  n_null: 100        # Number of null classifiers
+  classifier:
+    latent_dim: 16
+    n_layers: 2
+
+# Random seed
+seed: 42

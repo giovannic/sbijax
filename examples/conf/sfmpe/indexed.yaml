@@ -1,0 +1,13 @@
+# SFMPE Configuration for Indexed/Functional Random Variables
+# Configuration for the Transformer-based structured CNF with temporal indexing
+
+# Transformer neural network configuration
+transformer:
+  latent_dim: 64
+  label_dim: 8
+  index_out_dim: 4  # Enable indexing for temporal observations
+  n_encoder: 1
+  n_decoder: 1
+  n_heads: 2
+  n_ff: 2
+  dropout: 0.1

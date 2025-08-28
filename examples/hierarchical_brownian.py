@@ -68,29 +68,35 @@ def run(cfg: DictConfig):
 
     # make simulator function
     def simulator_fn(seed, theta, f_in: dict):
+        # theta['theta'] has shape (n_simulations, n_theta, 1)
+        # f_in['obs'] has shape (n_simulations, n_theta, n_obs, 1)
+        # We want n_theta means each with n_obs different variances
+        # Expand theta to (n_simulations, n_theta, n_obs, 1)
+        theta_expanded = jnp.expand_dims(theta['theta'], -2)  # (n_simulations, n_theta, 1, 1)
+        theta_expanded = jnp.broadcast_to(theta_expanded, (*theta_expanded.shape[:-2], n_obs, 1))  # (n_simulations, n_theta, n_obs, 1)
+        
         obs = tfd.Independent(
-            tfd.Normal(theta['theta'], f_in['obs']),
-            reinterpreted_batch_ndims=1
-        ).sample((n_obs,), seed=seed)
-        obs = jnp.transpose(obs, (1, 2, 0, 3)) #type:ignore
+            tfd.Normal(theta_expanded, f_in['obs']),
+            reinterpreted_batch_ndims=2
+        ).sample(seed=seed)
         return {
-            'obs': obs
+            'obs': obs  # Shape: (n_simulations, n_theta, n_obs, 1)
         }
 
     # make function input sampler
-    def f_in_fn(n):
+    def f_in_fn(n_obs, n_theta):
         return tfd.JointDistributionNamed(
             dict(
-                obs = tfd.Exponential(jnp.full((n, 1), obs_rate)),
+                obs = tfd.Exponential(jnp.full((n_theta, n_obs, 1), obs_rate)),
             ),
             batch_ndims=1
         )
 
     key = jr.PRNGKey(cfg.seed)
 
-    theta_key, y_key, obs_key, key = jr.split(key, 4)
+    theta_key, y_key, f_in_key, key = jr.split(key, 4)
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
-    f_in: dict = f_in_fn(n_obs).sample((1,), seed=obs_key) #type:ignore
+    f_in: dict = f_in_fn(n_obs, n_theta).sample((1,), seed=f_in_key) #type:ignore
     y_observed = simulator_fn(y_key, theta_truth, f_in)
 
     rngs = nnx.Rngs(key)
@@ -110,7 +116,7 @@ def run(cfg: DictConfig):
         transformer_config,
         value_dim=1,
         n_labels=3,
-        index_dim=0,
+        index_dim=1,  # Enable indexing for f_in
         rngs=rngs
     )
 
@@ -132,24 +138,27 @@ def run(cfg: DictConfig):
         n_rounds,
         n_simulations,
         n_epochs,
-        y_observed,
+        y_observed, # type: ignore
         independence,
         optimiser=optax.adam(cfg.training.learning_rate),
         batch_size=int(n_simulations * cfg.training.batch_size_fraction),
         f_in=f_in_fn,
-        f_in_args=(n_obs,)
+        f_in_args=[n_obs, n_theta],
+        f_in_target=f_in
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
     logger.info("Sampling SFMPE posterior")
     start_time = time.time()
+    # Create flattened f_in index for posterior sampling
+    f_in_flattened = flatten_f_in(f_in)
     posterior = estim.sample_posterior(
         _flatten(y_observed)[..., None],
         labels, #type:ignore
         slices,
         masks=masks,
         n_samples=n_post_samples,
-        f_in=f_in
+        index=f_in_flattened
     )
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
@@ -176,8 +185,8 @@ def run(cfg: DictConfig):
         theta_dict = {'mu': mu, 'theta': theta}
         
         # Run simulator
-        y_samples = simulator_fn(key, theta_dict, t_obs)
-        return y_samples['obs'].reshape((theta_flat.shape[0], -1))
+        y_samples = simulator_fn(key, theta_dict, f_in)
+        return y_samples['obs'].reshape((theta_flat.shape[0], -1)) # type: ignore
     
     # Create FMPE model
     fmpe_nn = MLPVectorField(
@@ -193,7 +202,7 @@ def run(cfg: DictConfig):
     fmpe_estim = FMPE(fmpe_model, rngs=rngs)
     
     # Flatten observed data for FMPE
-    fmpe_y_observed = y_observed['obs'].reshape(-1)
+    fmpe_y_observed = y_observed['obs'].reshape(-1) # type: ignore
     
     # Train using round-based approach
     train_key, key = jr.split(key)
@@ -242,7 +251,8 @@ def run(cfg: DictConfig):
             slices,
             masks=masks,
             n_samples=1,
-            theta_0 = theta_0
+            theta_0 = theta_0,
+            index=f_in_flattened
         )
         return jnp.concatenate([
             posterior['mu'].reshape(-1),
@@ -277,8 +287,8 @@ def run(cfg: DictConfig):
         create_sfmpe_calibration_dataset,
         sample_single_sfmpe_posterior,
         lambda: prior_fn(n_theta),
-        simulator_fn,
-        y_observed['obs'].reshape(-1),
+        lambda key, theta: simulator_fn(key, theta, f_in),
+        y_observed['obs'].reshape(-1), # type: ignore
         sfmpe_posterior_flat,
         n_cal_epochs,
         n_cal,
@@ -298,7 +308,7 @@ def run(cfg: DictConfig):
         sample_single_fmpe_posterior,
         fmpe_prior_fn,
         fmpe_simulator_fn,
-        y_observed['obs'].reshape(-1),
+        y_observed['obs'].reshape(-1), # type: ignore
         fmpe_posterior_samples,
         n_cal_epochs,
         n_cal,
@@ -434,6 +444,33 @@ def _flatten(x: PyTree) -> jnp.ndarray:
         axis=-1
     )
 
+def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8, 
+                 data_sample_ndims: int = 1) -> PyTree:
+    """
+    Flatten f_in data for use as index in SFMPE posterior sampling.
+    
+    Uses the same methodology as flatten_structured: splits f_in into 
+    'theta' and 'y' blocks based on parameter structure, then applies
+    _flatten_index to each block.
+    """
+    from sfmpe.util.dataloader import _flatten_index
+    
+    # Define which keys go to which block (matching the data structure)
+    theta_keys = ['mu', 'theta']  # global and local parameters
+    y_keys = ['obs']              # observations
+    
+    # Split f_in_data into theta and y components
+    theta_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in theta_keys}
+    y_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in y_keys}
+    
+    # Apply _flatten_index to each block
+    flattened_index = {
+        'theta': _flatten_index(theta_f_in, pad_value, data_sample_ndims),
+        'y': _flatten_index(y_f_in, pad_value, data_sample_ndims)
+    }
+    
+    return flattened_index
+
 def create_sfmpe_calibration_dataset(
     key: jnp.ndarray,
     sample_posterior: Callable[[Array, PyTree], PyTree],
@@ -465,7 +502,7 @@ def create_fmpe_calibration_dataset(
     post_estimate = vmap(sample_posterior)(jr.split(post_key, n), y)
     return y, prior, post_estimate
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_path="conf", config_name="brownian_config")
 def main(cfg: DictConfig) -> None:
     """Main function with Hydra configuration management."""
     # Setup logging for main execution
@@ -475,7 +512,7 @@ def main(cfg: DictConfig) -> None:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     logger = logging.getLogger(__name__)
-    logger.info(f"Starting hierarchical Gaussian experiment")
+    logger.info(f"Starting hierarchical Brownian experiment")
     
     # Run the experiment
     run(cfg)
