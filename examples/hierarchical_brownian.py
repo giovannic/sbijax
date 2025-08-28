@@ -45,12 +45,26 @@ def run(cfg: DictConfig):
     obs_rate = cfg.obs_rate
 
     independence = {
-        'local': ['obs'],  # y observations independent of each other
+        'local': ['obs', 'theta'],  # observations and theta are independent of each other
         'cross': [('mu', 'obs')],  # mu is independent of observations
         'cross_local': [('theta', 'obs', (0, 0))]  # theta[i] connects to y[i]
     }
 
     # make prior distribution
+    def p_local(g, n):
+        return tfd.JointDistributionNamed(
+            dict(
+                theta = tfd.Independent(
+                    tfd.Normal(
+                        jnp.repeat(g['mu'], n, axis=-2),
+                        var_theta
+                    ),
+                    reinterpreted_batch_ndims=1
+                )
+            ),
+            batch_ndims=1,
+        )
+
     def prior_fn(n):
         return tfd.JointDistributionNamed(
             dict(
@@ -94,26 +108,21 @@ def run(cfg: DictConfig):
             batch_ndims=1
         )
 
-    def f_in_fn_train(times):
-        logits = jnp.log(jnp.ones((n_theta,)) / n_theta)
-        return tfd.JointDistributionNamed(
-            dict(
-                mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
-                theta = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
-                theta_index = tfd.Categorical(logits=logits),
-                obs = lambda theta_index: tfd.Deterministic(
-                    # jr.choice(
-                        # times,
-                        # shape=[1],
-                        # axis=1,
+    # def f_in_fn_train(times):
+        # logits = jnp.log(jnp.ones((n_theta,)) / n_theta)
+        # return tfd.JointDistributionNamed(
+            # dict(
+                # mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                # theta = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                # theta_index = tfd.Categorical(logits=logits),
+                # obs = lambda theta_index: tfd.Deterministic(
+                    # times[0, theta_index, ...].reshape(
+                        # theta_index.shape[:1] + (1, n_obs, 1)
                     # )
-                    times[0, theta_index, ...].reshape(
-                        theta_index.shape[:1] + (1, n_obs, 1)
-                    )
-                ),
-            ),
-            batch_ndims=1
-        )
+                # ),
+            # ),
+            # batch_ndims=1
+        # )
 
     key = jr.PRNGKey(cfg.seed)
 
@@ -154,6 +163,7 @@ def run(cfg: DictConfig):
         train_key,
         estim,
         prior_fn,
+        p_local,
         simulator_fn,
         ['mu'],
         ['theta'],
@@ -165,8 +175,9 @@ def run(cfg: DictConfig):
         independence,
         optimiser=optax.adam(cfg.training.learning_rate),
         batch_size=int(n_simulations * cfg.training.batch_size_fraction),
-        f_in=f_in_fn_train,
-        f_in_args=[f_in['obs']],
+        f_in=f_in_fn,
+        f_in_args=(n_obs, 1),
+        f_in_args_global=(n_obs, n_theta),
         f_in_target=f_in
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")

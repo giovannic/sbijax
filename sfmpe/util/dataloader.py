@@ -190,15 +190,12 @@ def flatten_blocks(
     """
     # We'll store the flattened leaves plus block metadata:
     flattened_leaves = []
-    slices= {}  # key -> { offset, size, original_event_shape, ... }
+    slices = {}  # key -> { offset, size, original_event_shape, ... }
     current_offset = 0
 
     for key, leaf in data.items():
         # Possibly get the corresponding batch_ndims
-        if batch_ndims is not None:
-            batch_ndim= batch_ndims.get(key, 1)
-        else:
-            batch_ndim= 1
+        batch_ndim = batch_ndims.get(key, 1)
 
         # pad+flatten
         leaf_flat = _flatten_leaf(

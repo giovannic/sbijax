@@ -45,14 +45,28 @@ def run(cfg: DictConfig):
     var_obs = cfg.var_obs
 
     independence = {
-        'local': ['obs'],  # y observations independent of each other
-        'cross': [('mu', 'obs')],  # mu is independent of observations
+        'local': ['obs', 'theta'],  # observations and theta are locally independent
+        'cross': [('mu', 'obs'), ('obs', 'mu')],  # mu and observations are independent of each other
         'cross_local': [('theta', 'obs', (0, 0))]  # theta[i] connects to y[i]
     }
 
     # make prior distribution
+    def p_local(g, n):
+        return tfd.JointDistributionNamed(
+            dict(
+                theta = tfd.Independent(
+                    tfd.Normal(
+                        jnp.repeat(g['mu'], n, axis=-2),
+                        var_theta
+                    ),
+                    reinterpreted_batch_ndims=1
+                )
+            ),
+            batch_ndims=1,
+        )
+
     def prior_fn(n):
-        prior = tfd.JointDistributionNamed(
+        return tfd.JointDistributionNamed(
             dict(
                 mu = tfd.Normal(jnp.zeros((1, 1)), jnp.full((1, 1), var_mu)), #type:ignore
                 theta = lambda mu: tfd.Independent(
@@ -65,7 +79,6 @@ def run(cfg: DictConfig):
             ),
             batch_ndims=1,
         )
-        return prior
 
     # make simulator function
     def simulator_fn(seed, theta):
@@ -116,6 +129,7 @@ def run(cfg: DictConfig):
         train_key,
         estim,
         prior_fn,
+        p_local,
         simulator_fn,
         ['mu'],
         ['theta'],
