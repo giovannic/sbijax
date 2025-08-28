@@ -87,6 +87,8 @@ def run(cfg: DictConfig):
     def f_in_fn(n_obs, n_theta):
         return tfd.JointDistributionNamed(
             dict(
+                mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                theta = tfd.Deterministic(jnp.zeros((n_theta, 1))), # dummy f_in for indexing purposes
                 obs = tfd.Exponential(jnp.full((n_theta, n_obs, 1), obs_rate)),
             ),
             batch_ndims=1
@@ -143,7 +145,7 @@ def run(cfg: DictConfig):
         optimiser=optax.adam(cfg.training.learning_rate),
         batch_size=int(n_simulations * cfg.training.batch_size_fraction),
         f_in=f_in_fn,
-        f_in_args=[n_obs, n_theta],
+        f_in_args=[n_obs, 1],
         f_in_target=f_in
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
