@@ -94,6 +94,27 @@ def run(cfg: DictConfig):
             batch_ndims=1
         )
 
+    def f_in_fn_train(times):
+        logits = jnp.log(jnp.ones((n_theta,)) / n_theta)
+        return tfd.JointDistributionNamed(
+            dict(
+                mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                theta = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                theta_index = tfd.Categorical(logits=logits),
+                obs = lambda theta_index: tfd.Deterministic(
+                    # jr.choice(
+                        # times,
+                        # shape=[1],
+                        # axis=1,
+                    # )
+                    times[0, theta_index, ...].reshape(
+                        theta_index.shape[:1] + (1, n_obs, 1)
+                    )
+                ),
+            ),
+            batch_ndims=1
+        )
+
     key = jr.PRNGKey(cfg.seed)
 
     theta_key, y_key, f_in_key, key = jr.split(key, 4)
@@ -144,8 +165,8 @@ def run(cfg: DictConfig):
         independence,
         optimiser=optax.adam(cfg.training.learning_rate),
         batch_size=int(n_simulations * cfg.training.batch_size_fraction),
-        f_in=f_in_fn,
-        f_in_args=[n_obs, 1],
+        f_in=f_in_fn_train,
+        f_in_args=[f_in['obs']],
         f_in_target=f_in
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
