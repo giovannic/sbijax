@@ -107,21 +107,21 @@ def train_bottom_up(
         else:
             y_samples = simulator_fn(obs_key, theta_samples)
 
-        z_data = {
-            'theta': theta_samples,
-            'y': y_samples
+        y_data = {
+            'theta': y_samples,
+            'y': theta_samples
         }
 
-        z_flat, _ = flatten_structured(
-            z_data,
+        y_flat, _ = flatten_structured(
+            y_data,
             independence=independence,
             index=f_in_sample if f_in is not None else None
         )
 
         if train_data is None:
-            train_data = z_flat
+            train_data = y_flat
         else:
-            train_data = combine_data(train_data, z_flat)
+            train_data = combine_data(train_data, y_flat)
 
         # Split data for training
         split_key, key = jr.split(key)
@@ -149,12 +149,13 @@ def train_bottom_up(
         # simulate from p(y_vec|theta, z_vec)
         logger.info(f"Sampling from p(y_vec|theta,z_vec) for round {i+1}")
         start_time = time.time()
-        z_sim = z_data.copy()
+        y_sim = y_data.copy()
+
         sim_key, key = jr.split(key)
 
         global_samples = {
             k: v
-            for k, v in z_sim['theta'].items()
+            for k, v in y_sim['y'].items()
             if k in global_names
         }
 
@@ -163,7 +164,7 @@ def train_bottom_up(
         )
 
         for l in local_names:
-            z_sim['theta'][l] = local_samples[l]
+            y_sim['y'][l] = local_samples[l]
 
         # Resample f_in to match resampled observations if f_in is present
         if f_in is not None:
@@ -182,20 +183,17 @@ def train_bottom_up(
 
 
         # Pad obs to n_local
-        z_sim['y']['obs'] = pad_multidim_event(
-            z_sim['y']['obs'],
+        y_sim['theta']['obs'] = pad_multidim_event(
+            y_sim['theta']['obs'],
             1,
             (n_local,)
         )
 
-        # swap y and theta
-        z_sim['theta'], z_sim['y'] = z_sim['y'], z_sim['theta']
-
         (
-            flat_z_sim,
-            z_sim_slices
+            flat_y_sim,
+            y_sim_slices
         ) = flatten_structured(
-            z_sim,
+            y_sim,
             independence=independence,
             index=f_in_sample if f_in is not None else None
         )
@@ -206,29 +204,29 @@ def train_bottom_up(
             def sample_for_context(context, index):
                 post = estim.sample_posterior(
                     jnp.expand_dims(context, 0),
-                    flat_z_sim['labels'],
-                    z_sim_slices['theta'],
-                    masks=flat_z_sim['masks'],
+                    flat_y_sim['labels'], #type: ignore
+                    y_sim_slices['theta'],
+                    masks=flat_y_sim['masks'],
                     index=tree.map(lambda leaf: jnp.expand_dims(leaf, 0), index),
                     n_samples=1
                 )
                 return tree.map(lambda leaf: leaf[0], post)
 
-            y_vec = sample_for_context(flat_z_sim['data']['y'], flat_z_sim['index'])
+            y_vec = sample_for_context(flat_y_sim['data']['y'], flat_y_sim['index'])
         else:
             @jit
             @vmap
             def sample_for_context(context):
                 post = estim.sample_posterior(
                     jnp.expand_dims(context, 0),
-                    flat_z_sim['labels'],
-                    z_sim_slices['theta'],
-                    masks=flat_z_sim['masks'],
+                    flat_y_sim['labels'],
+                    y_sim_slices['theta'],
+                    masks=flat_y_sim['masks'],
                     n_samples=1
                 )
                 return tree.map(lambda leaf: leaf[0], post)
 
-            y_vec = sample_for_context(flat_z_sim['data']['y'])
+            y_vec = sample_for_context(flat_y_sim['data']['y'])
 
 
         logger.info(f"Round {i+1} posterior sampling completed in {time.time() - start_time:.2f} seconds")
@@ -236,7 +234,7 @@ def train_bottom_up(
         # fit p(theta,z_vec|y_vec)
         logger.info(f"Preparing data for p(theta,z_vec|y_vec) training in round {i+1}")
         data = {
-            'theta': z_sim['y'],
+            'theta': y_sim['y'],
             'y': y_vec
         }
 
@@ -281,12 +279,4 @@ def train_bottom_up(
         flat_data['labels'],
         data_slices['theta'],
         flat_data['masks']
-    )
-
-def _resample_to_events(
-    sample: Array,
-    batch_indices: Array
-):
-    return jnp.take(sample, batch_indices, axis=0).reshape(
-        batch_indices.shape + sample.shape[2:]
     )
