@@ -46,7 +46,7 @@ def run(cfg: DictConfig):
 
     independence = {
         'local': ['obs', 'theta'],  # observations and theta are independent of each other
-        'cross': [('mu', 'obs')],  # mu is independent of observations
+        'cross': [('mu', 'obs'), ('obs', 'mu')],  # mu is independent of observations
         'cross_local': [('theta', 'obs', (0, 0))]  # theta[i] connects to y[i]
     }
 
