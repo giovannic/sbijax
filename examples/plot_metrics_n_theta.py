@@ -73,10 +73,11 @@ def main() -> None:
     
     # Print summary
     print("\nFound metrics for:")
-    for method_name, data in metrics.items():
+    for (task, method), data in metrics.items():
         n_thetas = [x[0] for x in data]
-        print(f"  {method_name}: {len(data)} runs, "
-              f"n_theta values: {min(n_thetas)}-{max(n_thetas)}")
+        total_runs = sum(len(seed_stats) for _, seed_stats in data)
+        print(f"  {task} {method}: {len(data)} parameter sets, "
+              f"{total_runs} total runs, n_theta values: {min(n_thetas)}-{max(n_thetas)}")
     
     # Create plot
     print(f"\nCreating plot...")
@@ -85,7 +86,7 @@ def main() -> None:
         metrics, 
         args.save_path,
         x_label='Number of Theta Parameters (n_theta)',
-        title='LC2ST Statistic vs n_theta by Method'
+        title='LC2ST Statistic vs n_theta by Task and Method'
     )
 
 

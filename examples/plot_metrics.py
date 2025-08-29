@@ -64,10 +64,11 @@ def main() -> None:
     
     # Print summary
     print("\nFound metrics for:")
-    for method_name, data in metrics.items():
+    for (task, method), data in metrics.items():
         n_sims = [x[0] for x in data]
-        print(f"  {method_name}: {len(data)} runs, "
-              f"simulations: {min(n_sims)}-{max(n_sims)}")
+        total_runs = sum(len(seed_stats) for _, seed_stats in data)
+        print(f"  {task} {method}: {len(data)} parameter sets, "
+              f"{total_runs} total runs, simulations: {min(n_sims)}-{max(n_sims)}")
     
     # Create plot
     print(f"\nCreating plot...")
@@ -76,7 +77,7 @@ def main() -> None:
         metrics, 
         args.save_path,
         x_label='Number of Simulations',
-        title='LC2ST Statistic vs Simulation Budget by Method'
+        title='LC2ST Statistic vs Simulation Budget by Task and Method'
     )
 
 
