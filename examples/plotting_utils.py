@@ -58,14 +58,23 @@ def collect_metrics(
     # Final metrics grouped by (task, method)
     metrics = {}
     
-    # Scan for Hydra output directories (typically contain .hydra subdirectory)
-    for run_dir in base_dir.iterdir():
-        if not run_dir.is_dir():
-            continue
-            
-        # Check if this is a Hydra run directory
-        if not (run_dir / ".hydra").exists():
-            continue
+    # Scan for Hydra output directories (recursively look for .hydra subdirectories)
+    def find_hydra_runs(directory: Path):
+        hydra_runs = []
+        if directory.is_dir():
+            # Check if this directory contains .hydra
+            if (directory / ".hydra").exists():
+                hydra_runs.append(directory)
+            else:
+                # Recursively search subdirectories (up to 2 levels deep to avoid infinite recursion)
+                for subdir in directory.iterdir():
+                    if subdir.is_dir() and not subdir.name.startswith('.'):
+                        hydra_runs.extend(find_hydra_runs(subdir))
+        return hydra_runs
+    
+    all_run_dirs = find_hydra_runs(base_dir)
+    
+    for run_dir in all_run_dirs:
             
         # Load configuration
         config = load_config_from_run(run_dir)
@@ -230,6 +239,16 @@ def plot_metrics(
     plt.title(title)
     plt.legend()
     plt.grid(True, alpha=0.3)
+    
+    # Set discrete x-axis ticks
+    if metrics:
+        all_x_values = set()
+        for data in metrics.values():
+            for x_value, _ in data:
+                all_x_values.add(x_value)
+        if all_x_values:
+            sorted_x_values = sorted(all_x_values)
+            plt.xticks(sorted_x_values)
     
     # Set reasonable axis limits
     if metrics:
