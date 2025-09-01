@@ -77,7 +77,7 @@ def main() -> None:
         metrics, 
         args.save_path,
         x_label='Number of Simulations',
-        title='LC2ST Statistic vs Simulation Budget by Task and Method'
+        title='LC2ST Statistic vs Simulation Budget'
     )
 
 

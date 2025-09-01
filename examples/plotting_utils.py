@@ -183,87 +183,95 @@ def plot_metrics(
     title: str
 ) -> None:
     """
-    Create a plot comparing LC2ST statistics with confidence intervals.
+    Create separate plots for each task comparing LC2ST statistics with confidence intervals.
     
     Args:
         metrics: Dictionary mapping (task, method) to (x_value, [seed_stats]) pairs
-        output_path: Path to save the plot
+        output_path: Base path to save the plots (will be modified for each task)
         x_label: Label for the x-axis
-        title: Plot title
+        title: Base title for the plots
     """
-    plt.figure(figsize=(12, 8))
-    
-    # Color scheme: Gaussian (blues), Brownian (oranges/reds)
-    task_colors = {
-        'Gaussian': '#1f77b4',  # Blue
-        'Brownian': '#ff7f0e'   # Orange
+    # Color scheme for methods
+    method_colors = {
+        'FMPE': '#1f77b4',   # Blue
+        'TFMPE': '#ff7f0e'   # Orange
     }
     
-    # Line styles: FMPE (solid), TFMPE (dashed)
-    method_styles = {
-        'FMPE': '-',
-        'TFMPE': '--'
-    }
-    
+    # Group metrics by task
+    tasks_data = {}
     for (task, method), data in metrics.items():
-        if not data:
+        if task not in tasks_data:
+            tasks_data[task] = {}
+        tasks_data[task][method] = data
+    
+    # Create separate plot for each task
+    for task, task_metrics in tasks_data.items():
+        if not task_metrics:
             continue
             
-        x_values = []
-        y_means = []
-        y_stds = []
+        plt.figure(figsize=(10, 6))
         
-        for x_value, seed_stats in data:
-            x_values.append(x_value)
-            y_means.append(np.mean(seed_stats))
-            y_stds.append(np.std(seed_stats))
-        
-        x_values = np.array(x_values)
-        y_means = np.array(y_means)
-        y_stds = np.array(y_stds)
-        
-        color = task_colors.get(task, '#666666')
-        linestyle = method_styles.get(method, '-')
-        label = f"{task} {method}"
-        
-        # Plot mean line
-        plt.plot(x_values, y_means, linestyle=linestyle, color=color, 
-                label=label, linewidth=2, markersize=6, marker='o')
-        
-        # Plot confidence interval (mean ± std)
-        plt.fill_between(x_values, y_means - y_stds, y_means + y_stds, 
-                        color=color, alpha=0.2)
-    
-    plt.xlabel(x_label)
-    plt.ylabel('LC2ST Statistic')
-    plt.title(title)
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Set discrete x-axis ticks
-    if metrics:
+        # Get all x_values for this task to set consistent axis
         all_x_values = set()
-        for data in metrics.values():
-            for x_value, _ in data:
+        all_means = []
+        all_stds = []
+        
+        for method, data in task_metrics.items():
+            if not data:
+                continue
+                
+            x_values = []
+            y_means = []
+            y_stds = []
+            
+            for x_value, seed_stats in data:
+                x_values.append(x_value)
+                y_means.append(np.mean(seed_stats))
+                y_stds.append(np.std(seed_stats))
                 all_x_values.add(x_value)
+            
+            x_values = np.array(x_values)
+            y_means = np.array(y_means)
+            y_stds = np.array(y_stds)
+            
+            all_means.extend(y_means)
+            all_stds.extend(y_stds)
+            
+            color = method_colors.get(method, '#666666')
+            
+            # Plot mean line with solid line style
+            plt.plot(x_values, y_means, '-', color=color, 
+                    label=method, linewidth=2, markersize=6, marker='o')
+            
+            # Plot confidence interval (mean ± std)
+            plt.fill_between(x_values, y_means - y_stds, y_means + y_stds, 
+                            color=color, alpha=0.2)
+        
+        plt.xlabel(x_label)
+        plt.ylabel('LC2ST Statistic')
+        plt.title(f'{title}: {task} Task')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Set discrete x-axis ticks
         if all_x_values:
             sorted_x_values = sorted(all_x_values)
             plt.xticks(sorted_x_values)
-    
-    # Set reasonable axis limits
-    if metrics:
-        all_means = []
-        all_stds = []
-        for data in metrics.values():
-            for _, seed_stats in data:
-                all_means.append(np.mean(seed_stats))
-                all_stds.append(np.std(seed_stats))
+        
+        # Set reasonable axis limits
         if all_means:
             max_val = max(np.array(all_means) + np.array(all_stds))
             plt.ylim(0, max_val * 1.1)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Plot saved to {output_path}")
+        
+        plt.tight_layout()
+        
+        # Create task-specific output path
+        output_dir = output_path.parent
+        output_stem = output_path.stem
+        output_suffix = output_path.suffix
+        task_output_path = output_dir / f"{output_stem}_{task.lower()}{output_suffix}"
+        
+        plt.savefig(task_output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Plot saved to {task_output_path}")

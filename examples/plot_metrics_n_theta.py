@@ -86,7 +86,7 @@ def main() -> None:
         metrics, 
         args.save_path,
         x_label='Number of Theta Parameters (n_theta)',
-        title='LC2ST Statistic vs n_theta by Task and Method'
+        title='LC2ST Statistic vs n_theta'
     )
 
 
