@@ -26,6 +26,7 @@ Homepage = "https://github.com/giovannic/sfmpe"
 
 [project.optional-dependencies]
 dev = [
+    "pytest",
     "pyright",
     "jaxtyping"
 ]
