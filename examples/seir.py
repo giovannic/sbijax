@@ -97,17 +97,18 @@ def seir_dynamics(
 
 def p_local(g, n):
     """Local prior distribution for site-specific parameters (independent of global)."""
+    n_sims = g['beta_0'].shape[0]
     return tfd.JointDistributionNamed(
         dict(
             # Site-specific seasonal parameters  
-            A = tfd.Uniform(jnp.zeros((n, 1)), jnp.ones((n, 1))),
+            A = tfd.Uniform(jnp.zeros((n_sims, n, 1)), jnp.ones((n, 1))),
             T_season = tfd.Normal(
-                jnp.full((n, 1), 365.0), 
-                jnp.full((n, 1), 50.0)
+                jnp.full((n_sims, n, 1), 365.0), 
+                jnp.full((n_sims, n, 1), 50.0)
             ),
             phi = tfd.Uniform(
-                jnp.zeros((n, 1)), 
-                jnp.full((n, 1), 2*jnp.pi)
+                jnp.zeros((n_sims, n, 1)), 
+                jnp.full((n_sims, n, 1), 2*jnp.pi)
             )
         ),
         batch_ndims=1,
@@ -281,7 +282,7 @@ def create_prior_bijector(n_sites: int) -> PyTreeBijector:
 def create_local_bijector(n_sites: int) -> PyTreeBijector:
     """Create bijector for transforming local prior samples to unconstrained space."""
     # Create bijector from p_local distribution default bijectors
-    dummy_global = {}  # p_local doesn't depend on global parameters in our case
+    dummy_global = { 'beta_0': jnp.zeros((1, 1, 1)) }  # p_local doesn't depend on global parameters in our case
     return create_bijector_from_distribution(p_local(dummy_global, n_sites))
 
 
