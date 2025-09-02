@@ -21,6 +21,7 @@ import optax
 
 n_epochs_train = 1_000
 
+pytestmark = pytest.mark.slow
 
 def create_transformer(rngs, config, dim):
     estimator = Transformer(

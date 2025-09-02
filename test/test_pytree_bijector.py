@@ -184,6 +184,24 @@ class TestPyTreeBijector:
             x_recovered['level1']['other'],
             x['level1']['other']
         )
+    
+    def test_forward_dtype(self):
+        """Test forward_dtype method returns correct dtype structure."""
+        # Create a JointDistributionNamed to get realistic dtype structure
+        prior = tfd.JointDistributionNamed({
+            'float_param': tfd.Normal(0.0, 1.0),
+            'bounded_param': tfd.Uniform(0.0, 1.0)
+        })
+        
+        # Create PyTreeBijector from distribution
+        pytree_bij = create_bijector_from_distribution(prior)
+        
+        # Get output dtype structure from the bijector
+        output_dtype = pytree_bij.forward_dtype(prior.dtype)
+        
+        # Should preserve the structure and dtypes
+        assert tree.structure(output_dtype) == tree.structure(prior.dtype)
+        assert tree.leaves(output_dtype) == tree.leaves(prior.dtype)
 
 
 class TestCreateBijectorFromDistribution:

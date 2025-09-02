@@ -372,13 +372,17 @@ def test_train_bottom_up_with_f_in_single_round():
             optimiser=optax.adam(0.001),
             batch_size=10,
             f_in=f_in_spy,
-            f_in_args=(n_obs, 1)
+            f_in_args=(n_obs, 1),
+            f_in_args_global=(n_obs, n_theta),
+            f_in_target=f_in_truth
         )
     
     # 1. f_in Function Calls
-    assert f_in_spy.call_count == 1
-    f_in_call = f_in_spy.call_args_list[0]
-    assert f_in_call[0] == (n_obs, 1)  # Called with n_obs, 1 arguments
+    assert f_in_spy.call_count == 2
+    f_in_call_1 = f_in_spy.call_args_list[0]
+    assert f_in_call_1[0] == (n_obs, 1)  # Called with n_obs, 1 arguments
+    f_in_call_2 = f_in_spy.call_args_list[1]
+    assert f_in_call_2[0] == (n_obs, n_theta)  # Called with n_obs, n_theta arguments
     
     # 2. Simulator Function Calls
     assert simulator_spy.call_count == 1
@@ -419,9 +423,9 @@ def test_train_bottom_up_with_f_in_single_round():
     posterior_call = sample_posterior_spy.call_args_list[0]
     assert 'index' in posterior_call[1]  # Should have index kwarg
     index = posterior_call[1]['index']
-    # Expected context index shape: (n_simulations, n_obs, 1) = (50, 5, 1)
-    assert index['theta'].shape == (1, n_theta, 1) # theta
-    assert index['y'].shape == (1, 1 + n_theta * n_obs, 1) # mu + y_observed
+    # Expected context index shape from flattened structure
+    assert index['theta'].shape == (1, n_theta * n_obs, 1) # y_observed
+    assert index['y'].shape == (1, 1 + n_theta, 1) # mu + theta parameters
 
 
 def test_train_bottom_up_multiple_rounds(hierarchical_setup):
@@ -613,14 +617,17 @@ def test_train_bottom_up_with_f_in_multiple_rounds():
             batch_size=10,
             f_in=f_in_spy,
             f_in_args=(n_obs, 1),
+            f_in_args_global=(n_obs, n_theta),
             f_in_target=f_in_target
         )
     
     # 1. f_in Function Calls
-    assert f_in_spy.call_count == 2
-    for i in range(2):
-        f_in_call = f_in_spy.call_args_list[i]
-        assert f_in_call[0] == (n_obs, 1)  # Called with n_obs, 1 arguments
+    assert f_in_spy.call_count == 4  # 2 calls per round for 2 rounds
+    for i in range(0, 4, 2):  # Check pairs: (0,1) and (2,3)
+        f_in_call_1 = f_in_spy.call_args_list[i]
+        assert f_in_call_1[0] == (n_obs, 1)  # Called with n_obs, 1 arguments
+        f_in_call_2 = f_in_spy.call_args_list[i+1]
+        assert f_in_call_2[0] == (n_obs, n_theta)  # Called with n_obs, n_theta arguments
     
     # 2. Simulator Function Calls
     assert simulator_spy.call_count == 2
@@ -688,8 +695,8 @@ def test_train_bottom_up_with_f_in_multiple_rounds():
     assert 'index' in posterior_call[1]  # Should have index kwarg
     index = posterior_call[1]['index']
     # Expected context index shape from round 2 posterior sampling
-    assert index['theta'].shape == (1, n_theta, 1)  # theta
-    assert index['y'].shape == (1, 1 + n_theta * n_obs, 1)  # mu + y_observed
+    assert index['theta'].shape == (1, n_theta * n_obs, 1)  # y_observed
+    assert index['y'].shape == (1, 1 + n_theta, 1)  # mu + theta parameters
 
     # Check that full posteiror call receives index consistent with f_in_target
     posterior_call = sample_posterior_spy.call_args_list[1]

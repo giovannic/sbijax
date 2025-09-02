@@ -196,6 +196,20 @@ class PyTreeBijector(tfb.Bijector):
         
         # Sum all log determinants
         return jnp.sum(jnp.array(log_dets)) if log_dets else jnp.array(0.0)
+    
+    def forward_dtype(self, dtype=None, name='forward_dtype', **kwargs) -> PyTree:
+        """Returns the dtype returned by forward for the provided input."""
+        if dtype is None:
+            # Use the bijector's default dtype structure based on example tree
+            dtype_leaves = [bij.forward_dtype() for bij in self._bijector_list]
+            return tree.unflatten(self._treedef, dtype_leaves)
+        else:
+            # Handle PyTree dtype input
+            dtype_leaves, dtype_treedef = tree.flatten(dtype)
+            output_dtype_leaves = [
+                bij.forward_dtype(dt) for bij, dt in zip(self._bijector_list, dtype_leaves)
+            ]
+            return tree.unflatten(dtype_treedef, output_dtype_leaves)
 
 
 def create_bijector_from_distribution(

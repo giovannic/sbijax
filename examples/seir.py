@@ -3,7 +3,7 @@ SEIR (Susceptible-Exposed-Infectious-Recovered) model implementation
 using Flow Matching for Posterior Estimation.
 
 This script implements a modern epidemiological model with:
-- Functional random variables (obs_inc) with temporal indexing
+- Functional random variables (obs) with temporal indexing
 - PyTree bijectors for continuous data transformation  
 - Both structured (SFMPE) and flat (FMPE) inference approaches
 - Hydra configuration management
@@ -16,7 +16,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Tuple, Callable, Dict, Any
+from typing import Tuple, Callable, Dict
 from jaxtyping import PyTree, Array
 from flax import nnx
 import optax
@@ -24,7 +24,7 @@ import hydra
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 
-from jax import numpy as jnp, random as jr, tree, vmap, jit
+from jax import numpy as jnp, random as jr, tree, vmap
 from jax.experimental.ode import odeint
 from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
@@ -96,7 +96,7 @@ def seir_dynamics(
 
 
 def p_local(g, n):
-    """Local prior distribution conditional on global parameters."""
+    """Local prior distribution for site-specific parameters (independent of global)."""
     return tfd.JointDistributionNamed(
         dict(
             # Site-specific seasonal parameters  
@@ -118,18 +118,18 @@ def prior_fn(n):
     """Global prior distribution."""
     return tfd.JointDistributionNamed(
         dict(
-            # Global parameters (independent of obs_inc by exchangeability)
+            # Global parameters (independent of obs by exchangeability)
             beta_0 = tfd.Uniform(jnp.full((1, 1), 0.1), jnp.full((1, 1), 2.0)),
             alpha = tfd.Uniform(jnp.full((1, 1), 1/30), jnp.full((1, 1), 1/7)),
             sigma = tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
             
-            # Local parameters are generated using hierarchical structure
-            A = lambda: tfd.Uniform(jnp.zeros((n, 1)), jnp.ones((n, 1))),
-            T_season = lambda: tfd.Normal(
+            # Local parameters are independent of global parameters
+            A = tfd.Uniform(jnp.zeros((n, 1)), jnp.ones((n, 1))),
+            T_season = tfd.Normal(
                 jnp.full((n, 1), 365.0), 
                 jnp.full((n, 1), 50.0)
             ),
-            phi = lambda: tfd.Uniform(
+            phi = tfd.Uniform(
                 jnp.zeros((n, 1)), 
                 jnp.full((n, 1), 2*jnp.pi)
             )
@@ -156,13 +156,13 @@ def create_simulator_fn(
             f_in: Functional input data containing observation indices
             
         Returns:
-            Dictionary with 'obs_inc' key containing observations at specified indices
+            Dictionary with 'obs' key containing observations at specified indices
         """
         batch_size = theta['beta_0'].shape[0]
-        obs_times = f_in['obs_inc']  # Extract observation times from f_in
+        obs_times = f_in['obs']  # Extract observation times from f_in
         # obs_times shape: (batch_size, n_sites, n_obs, 1)
         n_sites = obs_times.shape[1] 
-        n_obs = obs_times.shape[2]
+        n_obs = obs_times.shape[2]  # Extract n_obs dynamically from f_in 
         
         # Initial conditions for SEIR
         I0 = population * I0_prop
@@ -213,11 +213,14 @@ def create_simulator_fn(
         key_poisson = jr.split(key, batch_size * n_sites)
         key_poisson = key_poisson.reshape((batch_size, n_sites, 2))
         
-        obs_inc = vmap(vmap(
+        obs = vmap(vmap(
             lambda k, rate: tfd.Poisson(jnp.maximum(rate, 0.1)).sample(seed=k)
         ))(key_poisson, incidence_batch)
         
-        return {'obs_inc': obs_inc}
+        # Add final dimension to match expected shape (batch_size, n_sites, n_obs, 1)
+        obs = obs[..., None]
+        
+        return {'obs': obs}
     
     return simulator_fn
 
@@ -237,7 +240,7 @@ def f_in_fn(n_obs, n_sites):
             phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
             
             # Functional observation times - Exponential(1) distributed per site
-            obs_inc = tfd.Exponential(
+            obs = tfd.Exponential(
                 jnp.ones((n_sites, n_obs, 1))  # Exponential(1) for observation times
             )
         ),
@@ -247,7 +250,7 @@ def f_in_fn(n_obs, n_sites):
 
 def apply_dequantization(
     obs_data: Dict[str, Array], 
-    key: jr.PRNGKey
+    key: Array
 ) -> Dict[str, Array]:
     """
     Apply uniform dequantization to discrete observations while preserving positivity.
@@ -286,7 +289,7 @@ def create_simulator_bijector(obs_sample: Dict[str, Array]) -> PyTreeBijector:
     """Create bijector for transforming simulator outputs to unconstrained space."""
     # For incidence data (positive values), use Softplus transformation
     bijector_specs = {
-        'obs_inc': tfb.Softplus()  # Maps R -> R+ for positive incidence values
+        'obs': tfb.Softplus()  # Maps R -> R+ for positive incidence values
     }
     
     return create_manual_bijector_tree(obs_sample, bijector_specs)
@@ -309,16 +312,16 @@ def run(cfg: DictConfig) -> None:
     
     # Independence structure for structured inference
     independence = {
-        'local': ['obs_inc'],  # Observations independent across time/sites
+        'local': ['obs'],  # Observations independent across time/sites
         'cross': [
-            ('beta_0', 'obs_inc'),  # Global parameters independent by exchangeability
-            ('alpha', 'obs_inc'),
-            ('sigma', 'obs_inc')
+            ('beta_0', 'obs'),  # Global parameters independent by exchangeability
+            ('alpha', 'obs'),
+            ('sigma', 'obs')
         ],
         'cross_local': [  # Site-specific parameters connect to their observations
-            ('A', 'obs_inc', (0, 0)),
-            ('T_season', 'obs_inc', (0, 0)),
-            ('phi', 'obs_inc', (0, 0))
+            ('A', 'obs', (0, 0)),
+            ('T_season', 'obs', (0, 0)),
+            ('phi', 'obs', (0, 0))
         ]
     }
     
@@ -339,13 +342,11 @@ def run(cfg: DictConfig) -> None:
     y_processed = apply_dequantization(y_observed, deq_key)
     
     # Apply bijectors to data
-    bij_key, key = jr.split(key)
     prior_bijector = create_prior_bijector(n_sites)
     local_bijector = create_local_bijector(n_sites)
     simulator_bijector = create_simulator_bijector(y_processed)
     
     # Transform prior samples and observations to unconstrained space
-    theta_unconstrained = prior_bijector.forward(theta_truth)
     y_unconstrained = simulator_bijector.forward(y_processed)
     
     # Create wrapped functions for train_bottom_up
@@ -381,9 +382,9 @@ def run(cfg: DictConfig) -> None:
         return y_unconstrained_sim
     
     logger.info("Generated ground truth and processed observations")
-    logger.info(f"Observation times shape: {f_in['obs_inc'].shape}")
-    logger.info(f"Truth incidence shape: {y_observed['obs_inc'].shape}")
-    logger.info(f"Processed incidence range: {jnp.min(y_processed['obs_inc'])} to {jnp.max(y_processed['obs_inc'])}")
+    logger.info(f"Observation times shape: {f_in['obs'].shape}")
+    logger.info(f"Truth incidence shape: {y_observed['obs'].shape}")
+    logger.info(f"Processed incidence range: {jnp.min(y_processed['obs'])} to {jnp.max(y_processed['obs'])}")
     
     # SFMPE Implementation
     rngs = nnx.Rngs(key)
@@ -402,7 +403,7 @@ def run(cfg: DictConfig) -> None:
     nn = Transformer(
         transformer_config,
         value_dim=1,
-        n_labels=7,  # 3 global + 6 site-specific parameters
+        n_labels=7,  # 3 global + 3 site-specific parameters + obs
         index_dim=1,  # Temporal indexing
         rngs=rngs
     )
@@ -488,7 +489,7 @@ def run(cfg: DictConfig) -> None:
         y_samples = simulator_fn(key, theta_dict, f_in)
         # Apply same dequantization as observations
         y_deq = apply_dequantization(y_samples, key)
-        return y_deq['obs_inc'].reshape((theta_flat.shape[0], -1))
+        return y_deq['obs'].reshape((theta_flat.shape[0], -1))
 
     # Create FMPE model
     total_params = 3 + 3 * n_sites  # 3 global + 3 * n_sites local parameters (SEIR model)
@@ -505,7 +506,7 @@ def run(cfg: DictConfig) -> None:
     fmpe_estim = FMPE(fmpe_model, rngs=rngs)
     
     # Flatten observed data for FMPE
-    fmpe_y_observed = y_processed['obs_inc'].reshape(-1)
+    fmpe_y_observed = y_processed['obs'].reshape(-1)
     
     # Train using round-based approach
     train_key, key = jr.split(key)
@@ -595,7 +596,7 @@ def run(cfg: DictConfig) -> None:
         lambda seed, theta: apply_dequantization(
             simulator_fn(seed, theta, f_in), seed
         ),
-        y_processed['obs_inc'].reshape(-1),
+        y_processed['obs'].reshape(-1),
         sfmpe_posterior_flat,
         n_cal_epochs,
         n_cal,
@@ -615,7 +616,7 @@ def run(cfg: DictConfig) -> None:
         sample_single_fmpe_posterior,
         fmpe_prior_fn,
         fmpe_simulator_fn,
-        y_processed['obs_inc'].reshape(-1),
+        y_processed['obs'].reshape(-1),
         fmpe_posterior_samples,
         n_cal_epochs,
         n_cal,
@@ -773,7 +774,6 @@ def _flatten(x: PyTree) -> jnp.ndarray:
         axis=-1
     )
 
-
 def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8, 
                  data_sample_ndims: int = 1) -> PyTree:
     """
@@ -787,7 +787,7 @@ def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8,
     
     # Define which keys go to which block (matching the data structure)
     theta_keys = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']  # all parameters
-    y_keys = ['obs_inc']              # observations
+    y_keys = ['obs']              # observations
     
     # Split f_in_data into theta and y components
     theta_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in theta_keys}
@@ -800,7 +800,6 @@ def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8,
     }
     
     return flattened_index
-
 
 @hydra.main(version_base=None, config_path="conf", config_name="sveir_config")
 def main(cfg: DictConfig) -> None:
