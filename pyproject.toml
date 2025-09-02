@@ -33,3 +33,10 @@ dev = [
 
 [tool.setuptools]
 packages = ["sfmpe"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselected by default)",
+    "flow_diagnostics: marks tests as flow diagnostic tests (deselected by default)"
+]
+addopts = "-v --tb=short -m 'not slow and not flow_diagnostics'"

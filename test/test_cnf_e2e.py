@@ -8,6 +8,8 @@ import flax.nnx as nnx
 import optax
 from tensorflow_probability.substrates.jax import distributions as tfd
 
+pytestmark = pytest.mark.flow_diagnostics
+
 from sfmpe.util.dataloader import flatten_structured
 from sfmpe.utils import split_data
 from sfmpe.nn.transformer.transformer import Transformer

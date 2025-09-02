@@ -13,7 +13,27 @@ The virtualenv is in the `env` directory
 
 Tests use pytest and are located in `test/`. The `conftest.py` defines common fixtures for prior/simulator functions using Tensorflow Probability distributions.
 
-At the moment the e2e tests and the MMD test take too long and do not pass. Please only check them if they are related to the task at hand and check them one by one. i.e. `--ignore=test/test_cnf_e2e.py --ignore=test/test_lc2stnf_e2e.py --ignore=test/test_lc2st_e2e.py --ignore=test/test_mmd.py`
+Tests use custom markers to categorize different types of tests:
+
+- **Default tests**: Core functionality tests that run quickly and should always pass
+- **Slow tests**: Tests that take longer to run (marked with `@pytest.mark.slow`)
+- **Flow diagnostic tests**: Tests for validating flow-based models (marked with `@pytest.mark.flow_diagnostics`)
+
+By default, slow and flow diagnostic tests are excluded to keep the development feedback loop fast. Use these commands to run specific test categories:
+
+```bash
+# Run all tests including slow ones
+python -m pytest test/ -m "slow or not slow"
+
+# Run only slow tests
+python -m pytest test/ -m "slow"
+
+# Run only flow diagnostic tests
+python -m pytest test/ -m "flow_diagnostics"
+
+# Run all tests (including slow and diagnostic)
+python -m pytest test/ -m ""
+```
 
 ## Experimentation
 

@@ -31,3 +31,42 @@ python examples/plot_metrics.py --output-dir outputs
 ```
 
 Configuration files are located in `examples/conf/` and can be customized as needed.
+
+## Testing
+
+The project uses pytest for testing with custom markers to categorize different types of tests:
+
+### Running Tests
+
+#### Default test run (excludes slow and diagnostic tests):
+```bash
+python -m pytest test/
+```
+
+#### Run all tests including slow ones:
+```bash
+python -m pytest test/ -m "slow or not slow"
+```
+
+#### Run only slow tests:
+```bash
+python -m pytest test/ -m "slow"
+```
+
+#### Run only flow diagnostic tests:
+```bash
+python -m pytest test/ -m "flow_diagnostics"
+```
+
+#### Run all tests (including slow and diagnostic):
+```bash
+python -m pytest test/ -m ""
+```
+
+### Test Categories
+
+- **Default tests**: Core functionality tests that run quickly and should always pass
+- **Slow tests**: Tests that take longer to run (marked with `@pytest.mark.slow`)
+- **Flow diagnostic tests**: Tests for validating flow-based models (marked with `@pytest.mark.flow_diagnostics`)
+
+The default configuration excludes slow and flow diagnostic tests to keep the development feedback loop fast.

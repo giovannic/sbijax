@@ -1,6 +1,8 @@
 import pytest
 from jax import numpy as jnp, random as jr
 
+pytestmark = [pytest.mark.flow_diagnostics, pytest.mark.slow]
+
 from sfmpe.util.dataloader import flatten_structured
 from sfmpe.utils import split_data
 import flax.nnx as nnx

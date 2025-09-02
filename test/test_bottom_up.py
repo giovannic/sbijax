@@ -37,6 +37,24 @@ def create_hierarchical_prior_fn(var_mu: float = 1.0,
     return prior_fn
 
 
+def create_hierarchical_local_fn(var_theta: float = 1.0):
+    """Create local distribution function for hierarchical model"""
+    def local_fn(g, n):
+        return tfd.JointDistributionNamed(
+            dict(
+                theta = tfd.Independent(
+                    tfd.Normal(
+                        jnp.repeat(g['mu'], n, axis=-2),
+                        var_theta
+                    ),
+                    reinterpreted_batch_ndims=1
+                )
+            ),
+            batch_ndims=1,
+        )
+    return local_fn
+
+
 def create_hierarchical_simulator_fn(n_obs: int, var_obs: float = 1.0):
     """Create hierarchical simulator function similar to hierarchical_gaussian.py"""
     def simulator_fn(seed, theta):
@@ -162,6 +180,7 @@ def hierarchical_setup():
     }
     
     prior_fn = create_hierarchical_prior_fn(var_mu, var_theta)
+    local_fn = create_hierarchical_local_fn(var_theta)
     simulator_fn = create_hierarchical_simulator_fn(n_obs, var_obs)
     
     # Generate observed data
@@ -175,6 +194,7 @@ def hierarchical_setup():
     
     return {
         'prior_fn': prior_fn,
+        'local_fn': local_fn,
         'simulator_fn': simulator_fn,
         'estim': estim,
         'y_observed': y_observed,
@@ -198,10 +218,11 @@ def test_train_bottom_up_single_round(hierarchical_setup):
     
     # Create spies using wraps
     prior_spy = Mock(wraps=setup['prior_fn'])
+    local_spy = Mock(wraps=setup['local_fn'])
     simulator_spy = Mock(wraps=setup['simulator_fn'])
     fit_spy = Mock(wraps=setup['estim'].fit)
     flatten_spy = Mock(wraps=flatten_structured)
-    
+
     # Patch the functions
     with unittest.mock.patch.object(setup['estim'], 'fit', fit_spy), \
          unittest.mock.patch('sfmpe.bottom_up.flatten_structured', flatten_spy):
@@ -210,6 +231,7 @@ def test_train_bottom_up_single_round(hierarchical_setup):
             key=key,
             estim=setup['estim'],
             prior_fn=prior_spy,
+            local_fn=local_spy,
             simulator_fn=simulator_spy,
             global_names=setup['global_names'],
             local_names=setup['local_names'],
@@ -233,6 +255,8 @@ def test_train_bottom_up_single_round(hierarchical_setup):
     assert simulator_spy.call_count == 1
     sim_call = simulator_spy.call_args_list[0]
     theta_samples = sim_call[0][1]  # Second argument is theta
+    from jax import tree
+    print(tree.map(lambda x: x.shape, theta_samples))
     assert set(theta_samples.keys()) == {'mu', 'theta'}
     # theta shape is (n_simulations, 1, 1) because prior_fn(1) creates theta with n=1
     assert theta_samples['theta'].shape == (n_simulations, 1, 1)
@@ -243,14 +267,14 @@ def test_train_bottom_up_single_round(hierarchical_setup):
     # 1st call: z_data flattening for initial simulation training data
     first_call = flatten_spy.call_args_list[0][0][0]  
     assert set(first_call.keys()) == {'theta', 'y'}
-    assert set(first_call['theta'].keys()) == {'theta'}  # local parameters only
-    assert set(first_call['y'].keys()) == {'obs', 'mu'}  # observations + global parameters
+    assert set(first_call['theta'].keys()) == {'obs'}
+    assert set(first_call['y'].keys()) == {'mu', 'theta'}
     
     # 2nd call: z_sim flattening for z sampling
     second_call = flatten_spy.call_args_list[1][0][0]
     assert set(second_call.keys()) == {'theta', 'y'}
-    assert set(second_call['theta'].keys()) == {'theta'}  # local parameters only
-    assert set(second_call['y'].keys()) == {'obs', 'mu'}  # observations + global parameters
+    assert set(second_call['theta'].keys()) == {'obs'}
+    assert set(second_call['y'].keys()) == {'mu', 'theta'}
     
     # 3rd call: final data flattening for full posterior training
     third_call = flatten_spy.call_args_list[2][0][0]
@@ -335,6 +359,7 @@ def test_train_bottom_up_with_f_in_single_round():
             key=key,
             estim=estim,
             prior_fn=prior_spy,
+            local_fn=create_hierarchical_local_fn(var_theta),
             simulator_fn=simulator_spy,
             global_names=['mu'],
             local_names=['theta'],
@@ -410,6 +435,7 @@ def test_train_bottom_up_multiple_rounds(hierarchical_setup):
     
     # Create spies using wraps
     prior_spy = Mock(wraps=setup['prior_fn'])
+    local_spy = Mock(wraps=setup['local_fn'])
     simulator_spy = Mock(wraps=setup['simulator_fn'])
     fit_spy = Mock(wraps=setup['estim'].fit)
     flatten_spy = Mock(wraps=flatten_structured)
@@ -422,6 +448,7 @@ def test_train_bottom_up_multiple_rounds(hierarchical_setup):
             key=key,
             estim=setup['estim'],
             prior_fn=prior_spy,
+            local_fn=local_spy,
             simulator_fn=simulator_spy,
             global_names=setup['global_names'],
             local_names=setup['local_names'],
@@ -459,14 +486,14 @@ def test_train_bottom_up_multiple_rounds(hierarchical_setup):
     # 1st call: z_data flattening
     round1_call1 = flatten_spy.call_args_list[0][0][0]
     assert set(round1_call1.keys()) == {'theta', 'y'}
-    assert set(round1_call1['theta'].keys()) == {'theta'}
-    assert set(round1_call1['y'].keys()) == {'obs', 'mu'}
+    assert set(round1_call1['theta'].keys()) == {'obs'}
+    assert set(round1_call1['y'].keys()) == {'mu', 'theta'}
     
     # 2nd call: z_sim flattening  
     round1_call2 = flatten_spy.call_args_list[1][0][0]
     assert set(round1_call2.keys()) == {'theta', 'y'}
-    assert set(round1_call2['theta'].keys()) == {'theta'}
-    assert set(round1_call2['y'].keys()) == {'obs', 'mu'}
+    assert set(round1_call2['theta'].keys()) == {'obs'}
+    assert set(round1_call2['y'].keys()) == {'mu', 'theta'}
     
     # 3rd call: final data flattening
     round1_call3 = flatten_spy.call_args_list[2][0][0]
@@ -484,14 +511,14 @@ def test_train_bottom_up_multiple_rounds(hierarchical_setup):
     # 2nd call: z_data flattening
     round2_call2 = flatten_spy.call_args_list[4][0][0]
     assert set(round2_call2.keys()) == {'theta', 'y'}
-    assert set(round2_call2['theta'].keys()) == {'theta'}
-    assert set(round2_call2['y'].keys()) == {'obs', 'mu'}
+    assert set(round2_call2['theta'].keys()) == {'obs'}
+    assert set(round2_call2['y'].keys()) == {'mu', 'theta'}
     
     # 3rd call: z_sim flattening
     round2_call3 = flatten_spy.call_args_list[5][0][0]
     assert set(round2_call3.keys()) == {'theta', 'y'}
-    assert set(round2_call3['theta'].keys()) == {'theta'}
-    assert set(round2_call3['y'].keys()) == {'obs', 'mu'}
+    assert set(round2_call3['theta'].keys()) == {'obs'}
+    assert set(round2_call3['y'].keys()) == {'mu', 'theta'}
     
     # 4th call: final data flattening
     round2_call4 = flatten_spy.call_args_list[6][0][0]
@@ -572,6 +599,7 @@ def test_train_bottom_up_with_f_in_multiple_rounds():
             key=key,
             estim=estim,
             prior_fn=prior_spy,
+            local_fn=create_hierarchical_local_fn(var_theta),
             simulator_fn=simulator_spy,
             global_names=['mu'],
             local_names=['theta'],

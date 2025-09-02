@@ -68,7 +68,7 @@ def train_bottom_up(
                 flat_data['labels'], #type: ignore
                 data_slices['theta'], #type: ignore
                 masks=flat_data['masks'], #type: ignore
-                index=flat_y_obs['index'],
+                index=flat_y_obs.get('index'),
                 n_samples=n_simulations
             )
             theta_samples = {}
@@ -87,7 +87,6 @@ def train_bottom_up(
                 seed=theta_key,
                 sample_shape=(n_simulations,)
             )
-
         if f_in is not None:
             # get a sample of f_in
             if callable(f_in):
@@ -123,6 +122,7 @@ def train_bottom_up(
         else:
             train_data = combine_data(train_data, y_flat)
 
+
         # Split data for training
         split_key, key = jr.split(key)
         total_samples = train_data['data']['theta'].shape[0]
@@ -149,22 +149,18 @@ def train_bottom_up(
         # simulate from p(y_vec|theta, z_vec)
         logger.info(f"Sampling from p(y_vec|theta,z_vec) for round {i+1}")
         start_time = time.time()
-        y_sim = y_data.copy()
 
         sim_key, key = jr.split(key)
 
         global_samples = {
             k: v
-            for k, v in y_sim['y'].items()
+            for k, v in theta_samples.items()
             if k in global_names
         }
 
         local_samples = local_fn(global_samples, n_local).sample(
             seed=sim_key,
         )
-
-        for l in local_names:
-            y_sim['y'][l] = local_samples[l]
 
         # Resample f_in to match resampled observations if f_in is present
         if f_in is not None:
@@ -181,13 +177,17 @@ def train_bottom_up(
             else:
                 f_in_sample = f_in
 
-
-        # Pad obs to n_local
-        y_sim['theta']['obs'] = pad_multidim_event(
-            y_sim['theta']['obs'],
-            1,
-            (n_local,)
-        )
+        # Construct y_sim from scratch to avoid reference issues
+        y_sim = {
+            'theta': {
+                'obs': pad_multidim_event(
+                    y_data['theta']['obs'],
+                    1,
+                    (n_local,)
+                )
+            },
+            'y': global_samples | local_samples
+        }
 
         (
             flat_y_sim,

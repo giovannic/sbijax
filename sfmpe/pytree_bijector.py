@@ -217,13 +217,14 @@ def create_bijector_from_distribution(
     # Get default bijectors for the distribution
     default_bijector = distribution.experimental_default_event_space_bijector()
     
-    # Extract the bijector tree structure
-    if hasattr(default_bijector, 'bijector'):
-        # Handle nested bijector structures
-        bijector_tree = default_bijector.bijector
+    # Create bijector tree by mapping model keys to individual bijectors
+    if hasattr(default_bijector, 'bijectors'):
+        # Map model keys to individual bijectors
+        model_keys = list(distribution.model.keys())
+        bijector_tree = dict(zip(model_keys, default_bijector.bijectors))
     else:
-        # Direct bijector
-        bijector_tree = default_bijector
+        # Fallback: create identity bijectors for all keys
+        bijector_tree = {key: tfb.Identity() for key in example_sample.keys()}
     
     return PyTreeBijector(bijector_tree, example_sample)
 

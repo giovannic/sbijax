@@ -4,6 +4,8 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 from sfmpe.metrics.mmd import mmd_test
 from jaxtyping import Array
 
+pytestmark = pytest.mark.slow
+
 @pytest.mark.parametrize("dim", [1, 2, 16])
 def test_mmd_accepts_null_normal(dim):
     """
