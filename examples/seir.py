@@ -185,15 +185,22 @@ def create_simulator_fn(
                 return seir_dynamics(state, t, params_dict)
             
             # Solve ODE at observation times for this site
+            # Sort times for ODE solver, then reorder results
             t_eval = obs_times_single[:, 0]  # Extract times (n_obs,)
-            solution = odeint(ode_func, initial_state, t_eval)
+            sort_indices = jnp.argsort(t_eval)
+            t_eval_sorted = t_eval[sort_indices]
+            solution = odeint(ode_func, initial_state, t_eval_sorted)
+            
+            # Reorder solution to match original time sequence
+            reorder_indices = jnp.argsort(sort_indices)
+            solution_reordered = solution[reorder_indices]
             
             # Extract incidence - since we're solving at the observation times directly,
             # we return the infection rate (new infections per day) at those times
             # For incidence, we use the infection rate α*E at observation times  
-            exposed = solution[:, 1]  # E compartment (index 1 in SEIR)
+            exposed = solution_reordered[:, 1]  # E compartment (index 1 in SEIR)
             incidence = params_dict['alpha'] * exposed
-            incidence = jnp.maximum(incidence, 0.0)  # Ensure non-negative
+            incidence = jnp.maximum(incidence, 1e-8)  # Ensure positive with small delta
             
             return incidence
         
