@@ -122,7 +122,6 @@ def train_bottom_up(
         else:
             train_data = combine_data(train_data, y_flat)
 
-
         # Split data for training
         split_key, key = jr.split(key)
         total_samples = train_data['data']['theta'].shape[0]

@@ -346,40 +346,41 @@ def run(cfg: DictConfig) -> None:
     deq_key, key = jr.split(key)
     y_processed = apply_dequantization(y_observed, deq_key)
     
-    # Apply bijectors to data
-    prior_bijector = create_prior_bijector(n_sites)
-    local_bijector = create_local_bijector(n_sites)
-    simulator_bijector = create_simulator_bijector(y_processed)
-    
     # Transform prior samples and observations to unconstrained space
+    simulator_bijector = create_simulator_bijector(y_processed)
     y_unconstrained = simulator_bijector.forward(y_processed)
     
     # Create wrapped functions for train_bottom_up
     def wrapped_prior_fn(n):
         """Prior function that returns TransformedDistribution."""
         base_prior = prior_fn(n)
+        bijector = create_prior_bijector(n)
         return tfd.TransformedDistribution(
             base_prior, 
-            prior_bijector,
+            bijector,
             name="transformed_prior"
         )
     
     def wrapped_p_local(g, n):
         """Local prior function that returns TransformedDistribution."""
         base_local = p_local(g, n)
+        bijector = create_local_bijector(n)
         return tfd.TransformedDistribution(
             base_local,
-            local_bijector, 
+            bijector, 
             name="transformed_local"
         )
     
     def wrapped_simulator_fn(seed, theta, f_in_sample):
         """Simulator function that handles bijector transformations."""
         # Transform parameters back to constrained space
+        n_sites = theta['A'].shape[-2]
+        prior_bijector = create_prior_bijector(n_sites)
         theta_constrained = prior_bijector.inverse(theta)
         
         # Apply original simulator
         y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
+        simulator_bijector = create_simulator_bijector(y_constrained)
         
         # Transform outputs to unconstrained space
         y_unconstrained_sim = simulator_bijector.forward(y_constrained)
@@ -524,8 +525,8 @@ def run(cfg: DictConfig) -> None:
     start_time = time.time()
     
     def sim_corrected_fmpe_prior_fn(key, n_samples):
-        n = n_samples // n_sites if n_sites > 0 else n_samples
-        return fmpe_prior_fn(key, max(n, 1))
+        n = n_samples // n_sites
+        return fmpe_prior_fn(key, n)
     
     fmpe_estim = train_fmpe_rounds(
         train_key,
@@ -538,7 +539,7 @@ def run(cfg: DictConfig) -> None:
         n_simulations=n_simulations,
         n_epochs=n_epochs,
         optimizer=optax.adam(cfg.training.learning_rate),
-        batch_size=int(n_simulations * cfg.training.batch_size_fraction)
+        batch_size=int((n_simulations // n_sites) * cfg.training.batch_size_fraction)
     )
 
     logger.info(f"FMPE round-based training completed in {time.time() - start_time:.2f} seconds")
@@ -804,7 +805,7 @@ def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8,
     
     return flattened_index
 
-@hydra.main(version_base=None, config_path="conf", config_name="sveir_config")
+@hydra.main(version_base=None, config_path="conf", config_name="seir_config")
 def main(cfg: DictConfig) -> None:
     """Main function with Hydra configuration management."""
     # Setup logging
@@ -814,7 +815,7 @@ def main(cfg: DictConfig) -> None:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     logger = logging.getLogger(__name__)
-    logger.info("Starting SVEIR experiment")
+    logger.info("Starting SEIR experiment")
     
     # Run the experiment
     run(cfg)
