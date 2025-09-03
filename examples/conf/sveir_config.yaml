@@ -1,0 +1,42 @@
+# SVEIR Flow Matching Configuration
+# Configuration for SVEIR epidemiological model with functional random variables
+
+defaults:
+  - sfmpe: indexed
+  - fmpe: default
+  - _self_
+
+# SVEIR model parameters
+n_timesteps: 200    # Total simulation timesteps
+n_obs: 50          # Number of observations to sample
+n_sites: 1         # Number of observation sites
+
+# ODE simulation parameters
+dt: 1.0            # Time step size (days)
+population: 10000  # Population size
+I0_prop: 0.001     # Initial infection proportion
+
+# Training parameters  
+n_simulations: 100  # Number of simulations per round (test setting)
+n_rounds: 1        # Number of training rounds (test setting)  
+n_epochs: 1        # Number of epochs per round (test setting)
+
+# Model hyperparameters
+n_post_samples: 1000  # Number of posterior samples
+
+# Training configuration
+training:
+  learning_rate: 3e-4
+  batch_size_fraction: 0.1  # Fraction of n_simulations for batch size
+
+# Analysis parameters
+analysis:
+  n_cal: 1000        # Number of calibration samples
+  n_cal_epochs: 100  # Number of calibration epochs
+  n_null: 100        # Number of null classifiers
+  classifier:
+    latent_dim: 16
+    n_layers: 2
+
+# Random seed
+seed: 42

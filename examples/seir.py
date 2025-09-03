@@ -49,8 +49,6 @@ from sfmpe.metrics.lc2st import (
     BinaryMLPClassifier,
     MultiBinaryMLPClassifier
 )
-from sfmpe.metrics.lc2stnf import lc2st_quant_plot
-
 
 def seir_dynamics(
     state: Array, 
@@ -147,7 +145,7 @@ def create_simulator_fn(
 ) -> Callable:
     """Create simulator function for SVEIR dynamics."""
     
-    def simulator_fn(key: jr.PRNGKey, theta: Dict[str, Array], f_in: dict) -> Dict[str, Array]:
+    def simulator_fn(key: Array, theta: Dict[str, Array], f_in: dict) -> Dict[str, Array]:
         """
         Simulate SVEIR dynamics and return indexed observations.
         
@@ -163,7 +161,6 @@ def create_simulator_fn(
         obs_times = f_in['obs']  # Extract observation times from f_in
         # obs_times shape: (batch_size, n_sites, n_obs, 1)
         n_sites = obs_times.shape[1] 
-        n_obs = obs_times.shape[2]  # Extract n_obs dynamically from f_in 
         
         # Initial conditions for SEIR
         I0 = population * I0_prop
@@ -456,7 +453,7 @@ def run(cfg: DictConfig) -> None:
     logger.info('Starting FMPE training')
     
     # Create proxy functions for FMPE training
-    def fmpe_prior_fn(key: jr.PRNGKey, n_samples: int) -> Array:
+    def fmpe_prior_fn(key: Array, n_samples: int) -> Array:
         """Prior function compatible with FMPE interface"""
         theta_samples = prior_fn(n_sites).sample((n_samples,), seed=key)
         # Flatten: combine all parameters
@@ -467,7 +464,7 @@ def run(cfg: DictConfig) -> None:
             flattened_parts.append(theta_samples[param_name].reshape((n_samples, n_sites)))
         return jnp.concatenate(flattened_parts, axis=1)
 
-    def fmpe_simulator_fn(key: jr.PRNGKey, theta_flat: Array) -> Array:
+    def fmpe_simulator_fn(key: Array, theta_flat: Array) -> Array:
         """Simulator function compatible with FMPE interface"""
         # Reconstruct structured theta from flat representation
         theta_dict = {}
@@ -487,7 +484,12 @@ def run(cfg: DictConfig) -> None:
             idx += n_sites
         
         # Run simulator
-        y_samples = simulator_fn(key, theta_dict, f_in)
+        n_simulations = theta_flat.shape[0]
+        f_in_matched = tree.map(
+            lambda leaf: jnp.repeat(leaf, n_simulations, axis=0),
+            f_in
+        )
+        y_samples = simulator_fn(key, theta_dict, f_in_matched)
         # Apply same dequantization as observations
         y_deq = apply_dequantization(y_samples, key)
         return y_deq['obs'].reshape((theta_flat.shape[0], -1))
@@ -565,7 +567,7 @@ def run(cfg: DictConfig) -> None:
             theta_0 = theta_0,
             index=f_in_flattened
         )
-        return _flatten(posterior)
+        return _flatten(posterior)[...,0,:]
 
     def sample_single_fmpe_posterior(key, x):
         dim = total_params
@@ -589,13 +591,15 @@ def run(cfg: DictConfig) -> None:
     
     logger.info("Starting C2ST-NF analysis for SFMPE")
     start_time = time.time()
+    cal_f_in = tree.map(lambda leaf: jnp.repeat(leaf, n_cal, axis=0), f_in)
     null_stats, main_stat, p_value = apply_lc2st(
         analyse_key,
         create_sfmpe_calibration_dataset,
         sample_single_sfmpe_posterior,
         lambda: prior_fn(n_sites),
         lambda seed, theta: apply_dequantization(
-            simulator_fn(seed, theta, f_in), seed
+            simulator_fn(seed, theta, cal_f_in),
+            seed
         ),
         y_processed['obs'].reshape(-1),
         sfmpe_posterior_flat,
@@ -713,15 +717,6 @@ def save_lc2st_results(
     # Create output directory and make quant plot
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    lc2st_quant_plot(
-        T_data = main_stat,
-        T_null = null_stats,
-        p_value = p_value,
-        reject = bool(p_value < 0.05),
-        conf_alpha = 0.05,
-        out_path = out_dir / 'quant_plot.jpg'
-    )
-
     # Write out stats json with serialize
     stats = {
         'main_stat': float(main_stat),
@@ -737,13 +732,13 @@ def create_sfmpe_calibration_dataset(
     key: jnp.ndarray,
     sample_posterior: Callable[[Array, PyTree], PyTree],
     prior_fn: Callable[[], tfd.Distribution],
-    simulator_fn: Callable[[Array, PyTree, PyTree], PyTree],
+    simulator_fn: Callable[[Array, PyTree], PyTree],
     n: int
     ) -> Tuple[Array, Array, Array]:
     """Create calibration dataset for SFMPE."""
     prior_key, post_key, sim_key = jr.split(key, 3)
     prior = prior_fn().sample((n,), seed=prior_key)
-    y = simulator_fn(sim_key, prior, f_in)
+    y = simulator_fn(sim_key, prior)
     post_estimate = vmap(
         sample_posterior,
         in_axes=[0, tree.map(lambda _: 0, y)]
