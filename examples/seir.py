@@ -296,7 +296,10 @@ def run(cfg: DictConfig) -> None:
         'cross': [
             ('beta_0', 'obs'),  # Global parameters independent by exchangeability
             ('alpha', 'obs'),
-            ('sigma', 'obs')
+            ('sigma', 'obs'),
+            ('obs', 'beta_0'),
+            ('obs', 'alpha'),
+            ('obs', 'sigma')
         ],
         'cross_local': [  # Site-specific parameters connect to their observations
             ('A', 'obs', (0, 0)),
