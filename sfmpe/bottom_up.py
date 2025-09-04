@@ -111,6 +111,10 @@ def train_bottom_up(
             'y': theta_samples
         }
 
+        print("y_data shapes")
+        print(tree.map(lambda x: x.shape, y_data))
+        print(tree.map(lambda x: x[:10], y_data))
+
         y_flat, _ = flatten_structured(
             y_data,
             independence=independence,
@@ -176,7 +180,12 @@ def train_bottom_up(
             else:
                 f_in_sample = f_in
 
-        # Construct y_sim from scratch to avoid reference issues
+        # Construct y_sim
+        # order theta similarly to y_data
+        theta = global_samples | local_samples
+        theta = {
+            key: theta[key] for key in y_data['theta'].keys()
+        }
         y_sim = {
             'theta': {
                 'obs': pad_multidim_event(
@@ -185,7 +194,7 @@ def train_bottom_up(
                     (n_local,)
                 )
             },
-            'y': global_samples | local_samples
+            'y': theta
         }
 
         (
@@ -236,6 +245,11 @@ def train_bottom_up(
             'theta': y_sim['y'],
             'y': y_vec
         }
+
+
+        print("y_vec shapes")
+        print(tree.map(lambda x: x.shape, data))
+        print(tree.map(lambda x: x[:10], data))
 
         flat_data, data_slices = flatten_structured(
             data,

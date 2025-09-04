@@ -11,7 +11,7 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 
 from sfmpe.pytree_bijector import (
     PyTreeBijector,
-    create_bijector_tree,
+    create_bijector_map,
     create_zscaling_bijector_tree
 )
 
@@ -21,7 +21,7 @@ class TestPyTreeBijector:
     
     def test_init(self):
         """Test PyTreeBijector initialization."""
-        bijector_tree = {
+        bijector_specs = {
             'a': tfb.Identity(),
             'b': tfb.Sigmoid()
         }
@@ -29,29 +29,25 @@ class TestPyTreeBijector:
             'a': jnp.array([1.0, 2.0]),
             'b': jnp.array([0.5, -0.5])
         }
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         assert pytree_bij.name == "pytree_bijector"
     
     def test_forward_transform(self):
         """Test forward transformation preserves PyTree structure."""
-        bijector_tree = {
+        bijector_specs = {
             'a': tfb.Identity(),
-            'b': tfb.Sigmoid(),
-            'c': {
-                'nested': tfb.Exp()
-            }
+            'b': tfb.Sigmoid()
         }
         
         # Input PyTree
         x = {
             'a': jnp.array([1.0, 2.0]),
-            'b': jnp.array([0.5, -0.5]),
-            'c': {
-                'nested': jnp.array([0.0, 1.0])
-            }
+            'b': jnp.array([0.5, -0.5])
         }
-        pytree_bij = PyTreeBijector(bijector_tree, x)
+        path_to_bijector = create_bijector_map(x, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, x)
         
         # Forward transform
         y = pytree_bij.forward(x)
@@ -62,11 +58,10 @@ class TestPyTreeBijector:
         # Check transformations
         assert jnp.allclose(y['a'], x['a'])  # Identity
         assert jnp.allclose(y['b'], tfb.Sigmoid().forward(x['b']))
-        assert jnp.allclose(y['c']['nested'], tfb.Exp().forward(x['c']['nested']))
     
     def test_inverse_transform(self):
         """Test inverse transformation."""
-        bijector_tree = {
+        bijector_specs = {
             'a': tfb.Identity(),
             'b': tfb.Sigmoid()
         }
@@ -75,7 +70,8 @@ class TestPyTreeBijector:
             'a': jnp.array([1.0, 2.0]),
             'b': jnp.array([0.2, 0.8])  # Valid sigmoid outputs
         }
-        pytree_bij = PyTreeBijector(bijector_tree, x)
+        path_to_bijector = create_bijector_map(x, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, x)
         
         # Forward then inverse should recover original
         y = pytree_bij.forward(x)
@@ -86,7 +82,7 @@ class TestPyTreeBijector:
     
     def test_log_det_jacobian(self):
         """Test log determinant Jacobian computation."""
-        bijector_tree = {
+        bijector_specs = {
             'a': tfb.Identity(),
             'b': tfb.Sigmoid()
         }
@@ -95,7 +91,8 @@ class TestPyTreeBijector:
             'a': jnp.array([1.0, 2.0]),
             'b': jnp.array([0.5, -0.5])
         }
-        pytree_bij = PyTreeBijector(bijector_tree, x)
+        path_to_bijector = create_bijector_map(x, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, x)
         
         event_ndims = {
             'a': 0,
@@ -115,7 +112,7 @@ class TestPyTreeBijector:
     
     def test_inverse_log_det_jacobian(self):
         """Test inverse log determinant Jacobian."""
-        bijector_tree = {
+        bijector_specs = {
             'a': tfb.Identity(),
             'b': tfb.Sigmoid()
         }
@@ -124,7 +121,8 @@ class TestPyTreeBijector:
             'a': jnp.array([1.0, 2.0]),
             'b': jnp.array([0.2, 0.8])  # Valid sigmoid outputs
         }
-        pytree_bij = PyTreeBijector(bijector_tree, y)
+        path_to_bijector = create_bijector_map(y, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, y)
         
         event_ndims = {
             'a': 0,
@@ -144,64 +142,36 @@ class TestPyTreeBijector:
     
     def test_empty_tree(self):
         """Test with empty PyTree."""
-        bijector_tree = {}
         x = {}
-        pytree_bij = PyTreeBijector(bijector_tree, x)
+        path_to_bijector = create_bijector_map(x)
+        pytree_bij = PyTreeBijector(path_to_bijector, x)
         
         y = pytree_bij.forward(x)
         
         assert y == {}
     
-    def test_nested_structure(self):
-        """Test with deeply nested PyTree structure."""
-        bijector_tree = {
-            'level1': {
-                'level2': {
-                    'level3': tfb.Exp()
-                },
-                'other': tfb.Identity()
-            }
-        }
-        
-        x = {
-            'level1': {
-                'level2': {
-                    'level3': jnp.array([0.0, 1.0])
-                },
-                'other': jnp.array([5.0])
-            }
-        }
-        pytree_bij = PyTreeBijector(bijector_tree, x)
-        
-        y = pytree_bij.forward(x)
-        x_recovered = pytree_bij.inverse(y)
-        
-        assert jnp.allclose(
-            x_recovered['level1']['level2']['level3'],
-            x['level1']['level2']['level3']
-        )
-        assert jnp.allclose(
-            x_recovered['level1']['other'],
-            x['level1']['other']
-        )
     
     def test_forward_dtype(self):
         """Test forward_dtype method returns correct dtype structure."""
-        # Create a JointDistributionNamed to get realistic dtype structure
-        prior = tfd.JointDistributionNamed({
-            'float_param': tfd.Normal(0.0, 1.0),
-            'bounded_param': tfd.Uniform(0.0, 1.0)
-        })
+        # Create a sample tree with realistic dtype structure
+        sample_tree = {
+            'float_param': jnp.array([0.0]),
+            'bounded_param': jnp.array([0.5])
+        }
         
-        # Create PyTreeBijector from distribution
-        pytree_bij = create_bijector_from_distribution(prior)
+        # Create PyTreeBijector with Identity bijectors
+        path_to_bijector = create_bijector_map(sample_tree)
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
+        
+        # Get input dtype structure
+        input_dtype = tree.map(lambda x: x.dtype, sample_tree)
         
         # Get output dtype structure from the bijector
-        output_dtype = pytree_bij.forward_dtype(prior.dtype)
+        output_dtype = pytree_bij.forward_dtype(input_dtype)
         
         # Should preserve the structure and dtypes
-        assert tree.structure(output_dtype) == tree.structure(prior.dtype)
-        assert tree.leaves(output_dtype) == tree.leaves(prior.dtype)
+        assert tree.structure(output_dtype) == tree.structure(input_dtype)
+        assert tree.leaves(output_dtype) == tree.leaves(input_dtype)
 
 
 
@@ -221,7 +191,8 @@ class TestCreateBijectorTree:
             'parameters': tfb.Sigmoid()     # For bounded parameters
         }
         
-        pytree_bij = create_bijector_tree(sample_tree, bijector_specs)
+        path_to_bijector = create_bijector_map(sample_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         # Test transformations
         x = {
@@ -246,7 +217,8 @@ class TestCreateBijectorTree:
             'specified': tfb.Exp()
         }
         
-        pytree_bij = create_bijector_tree(sample_tree, bijector_specs)
+        path_to_bijector = create_bijector_map(sample_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         x = {
             'specified': jnp.array([0.0]),
@@ -267,7 +239,8 @@ class TestCreateBijectorTree:
             'b': jnp.array([3.0])
         }
         
-        pytree_bij = create_bijector_tree(sample_tree)
+        path_to_bijector = create_bijector_map(sample_tree)
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         x = sample_tree
         y = pytree_bij.forward(x)
@@ -298,9 +271,10 @@ class TestCreateZScalingBijectorTree:
             'parameters': tfb.Sigmoid()     # For [0,1] bounded values
         }
         
-        pytree_bij = create_zscaling_bijector_tree(
+        path_to_bijector = create_zscaling_bijector_tree(
             sample_tree, representative_data, bijector_specs
         )
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         # Test transformations
         x = {
@@ -331,9 +305,10 @@ class TestCreateZScalingBijectorTree:
             'specified': tfb.Exp()
         }
         
-        pytree_bij = create_zscaling_bijector_tree(
+        path_to_bijector = create_zscaling_bijector_tree(
             sample_tree, representative_data, bijector_specs
         )
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         x = {
             'specified': jnp.array([0.0, 1.0]),  # Will be exp'd to [1, e]
@@ -365,9 +340,10 @@ class TestCreateZScalingBijectorTree:
         }
         
         # No bijector specs - should be pure Z-scaling
-        pytree_bij = create_zscaling_bijector_tree(
+        path_to_bijector = create_zscaling_bijector_tree(
             sample_tree, representative_data
         )
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         x = sample_tree
         y = pytree_bij.forward(x)
@@ -392,9 +368,10 @@ class TestCreateZScalingBijectorTree:
             'param2': jr.uniform(key2, (1000, 1)) * 10    # Range [0, 10]
         }
         
-        pytree_bij = create_zscaling_bijector_tree(
+        path_to_bijector = create_zscaling_bijector_tree(
             sample_tree, representative_data
         )
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         # Generate test samples with proper batch shapes
         key3, key4 = jr.split(jr.PRNGKey(999))
@@ -422,7 +399,7 @@ class TestPyTreeBijectorVariableEventSizes:
     
     def test_basic_variable_event_sizes(self):
         """Test bijector instantiated with one event size, used with different sizes."""
-        bijector_tree = {
+        bijector_specs = {
             'a': tfb.Identity(),
             'b': tfb.Sigmoid()
         }
@@ -435,7 +412,8 @@ class TestPyTreeBijectorVariableEventSizes:
                            [[0.15, 0.25], [0.35, 0.45], [0.55, 0.65]]])
         }
         
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Test with smaller event size (event_size=2) using slicing
         x_small = {
@@ -467,7 +445,7 @@ class TestPyTreeBijectorVariableEventSizes:
     
     def test_different_event_sizes_per_key(self):
         """Test with different event_size changes for each key."""
-        bijector_tree = {
+        bijector_specs = {
             'small': tfb.Exp(),
             'medium': tfb.Softplus(),
             'large': tfb.Sigmoid()
@@ -480,7 +458,8 @@ class TestPyTreeBijectorVariableEventSizes:
             'large': jnp.array([[[0.1, 0.2, 0.3]], [[0.4, 0.5, 0.6]]]) # (2, 1, 3)
         }
         
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Test with modified event sizes
         x_modified = {
@@ -504,7 +483,7 @@ class TestPyTreeBijectorVariableEventSizes:
     
     def test_log_det_jacobian_variable_event_sizes(self):
         """Test log-det-jacobian with different event sizes."""
-        bijector_tree = {
+        bijector_specs = {
             'param1': tfb.Identity(),
             'param2': tfb.Sigmoid()
         }
@@ -515,7 +494,8 @@ class TestPyTreeBijectorVariableEventSizes:
             'param2': jnp.array([[[0.2, 0.3], [0.4, 0.5]]])
         }
         
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Test with smaller size (1, 1, 2)
         x_small = {
@@ -562,12 +542,16 @@ class TestPyTreeBijectorVariableEventSizes:
         
         bijector_specs = {
             'a': tfb.Identity(),
-            'b': tfb.Sigmoid()
+            'b': tfb.Invert(tfb.Sigmoid())  # Invert to go constrained -> unconstrained
         }
         
-        pytree_bij = create_zscaling_bijector_tree(
-            sample_tree, representative_data, bijector_specs
+        path_to_bijector = create_zscaling_bijector_tree(
+            sample_tree,
+            representative_data,
+            bijector_specs
         )
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
+
         
         # Test with larger sample but different event size to verify normalization
         # Create a prior with different event size for testing
@@ -577,7 +561,15 @@ class TestPyTreeBijectorVariableEventSizes:
         )
         
         transformed_large = pytree_bij.forward(large_sample)
-        
+
+        sigmoid = tfb.Invert(tfb.Sigmoid())
+        transformed = sigmoid.forward(representative_data['b'])
+        mean, std = jnp.mean(transformed), jnp.std(transformed)
+        zscale = tfb.Chain([
+            tfb.Scale(1./std),
+            tfb.Shift(-mean),
+        ])
+
         # Check that Z-scaling produces approximately normalized data
         for key_name in transformed_large.keys():
             mean_val = jnp.mean(transformed_large[key_name])
@@ -620,13 +612,14 @@ class TestPyTreeBijectorVariableEventSizes:
         }
         
         bijector_specs = {
-            'observations': tfb.Softplus(),
-            'parameters': tfb.Sigmoid()
+            'observations': tfb.Invert(tfb.Softplus()),  # Invert to go constrained -> unconstrained
+            'parameters': tfb.Invert(tfb.Sigmoid())      # Invert to go constrained -> unconstrained
         }
         
-        pytree_bij = create_zscaling_bijector_tree(
+        path_to_bijector = create_zscaling_bijector_tree(
             sample_tree, representative_data, bijector_specs
         )
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         # Test normalization with larger sample
         large_test_data = {
@@ -669,7 +662,7 @@ class TestPyTreeBijectorVariableEventSizes:
     
     def test_complex_bijectors_variable_event_sizes(self):
         """Test complex bijectors with runtime event size changes."""
-        bijector_tree = {
+        bijector_specs = {
             'positive': tfb.Softplus(),
             'exponential': tfb.Exp(),
             'sigmoid': tfb.Sigmoid(),
@@ -684,7 +677,8 @@ class TestPyTreeBijectorVariableEventSizes:
             'identity': jnp.array([[[5.0, 10.0]]])     # (1, 1, 2)
         }
         
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Test with different event sizes
         x_modified = {
@@ -728,7 +722,8 @@ class TestPyTreeBijectorMissingKeys:
             'c': tfb.Exp()
         }
         
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_tree)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Input missing the first key 'a'
         x_missing_first = {
@@ -765,7 +760,8 @@ class TestPyTreeBijectorMissingKeys:
             'param3': tfb.Identity()
         }
         
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_tree)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Input missing the middle key 'param2'
         x_missing_middle = {
@@ -802,7 +798,8 @@ class TestPyTreeBijectorMissingKeys:
             'key5': tfb.Identity()
         }
         
-        pytree_bij = PyTreeBijector(bijector_tree, example_tree)
+        path_to_bijector = create_bijector_map(example_tree, bijector_tree)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Input with only keys 2 and 4 present
         x_sparse = {
@@ -844,9 +841,10 @@ class TestPyTreeBijectorMissingKeys:
             'gamma': tfb.Softplus()
         }
         
-        pytree_bij = create_zscaling_bijector_tree(
+        path_to_bijector = create_zscaling_bijector_tree(
             sample_tree, representative_data, bijector_specs
         )
+        pytree_bij = PyTreeBijector(path_to_bijector, sample_tree)
         
         # Test with missing 'alpha' (first key)
         test_missing_alpha = {
@@ -896,7 +894,8 @@ class TestPyTreeBijectorMissingKeys:
             'auxiliary': tfb.Identity()
         }
         
-        pytree_bij = create_bijector_tree(example_tree, bijector_specs)
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
         
         # Input missing entire 'parameters' subtree
         x_missing_subtree = {

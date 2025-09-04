@@ -10,6 +10,37 @@ from tensorflow_probability.substrates.jax import bijectors as tfb
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 
+def _find_bijector_for_path(path, bijector_tree):
+    """Find a bijector for a given path, defaulting to Identity."""
+    try:
+        # Navigate through the bijector tree following the path
+        current = bijector_tree
+        for key in path:
+            if hasattr(key, 'key'):
+                # Dictionary key
+                current = current[key.key]
+            else:
+                # List/tuple index
+                current = current[key]
+        return current
+    except (KeyError, IndexError, TypeError):
+        # Path not found, use Identity
+        return tfb.Identity()
+
+
+def _create_path_bijector_mapping(bijector_tree: PyTree, example_tree: PyTree) -> dict:
+    """Create a mapping from tree paths to bijectors."""
+    example_with_paths, _ = tree_util.tree_flatten_with_path(example_tree)
+    
+    path_to_bijector = {}
+    for path, _ in example_with_paths:
+        # Try to find a bijector for this path
+        bijector = _find_bijector_for_path(path, bijector_tree)
+        path_to_bijector[path] = bijector
+    
+    return path_to_bijector
+
+
 class PyTreeBijector(tfb.Bijector):
     """A bijector that applies a PyTree of bijectors to a PyTree structure.
     
@@ -27,7 +58,7 @@ class PyTreeBijector(tfb.Bijector):
     
     def __init__(
         self,
-        bijector_tree: PyTree,
+        path_to_bijector: dict,
         example_tree: PyTree,
         validate_args: bool = False,
         name: str = "pytree_bijector"
@@ -35,15 +66,15 @@ class PyTreeBijector(tfb.Bijector):
         # Store the example tree structure
         self._example_leaves, self._treedef = tree.flatten(example_tree)
         
-        # Create a complete bijector list matching the example structure
-        self._bijector_list = self._create_bijector_list(bijector_tree, example_tree)
+        # Store path-to-bijector mapping
+        self._path_to_bijector = path_to_bijector
         
         # Get the minimum event dimensionality from all bijectors
         # Handle both scalar and dict-valued event ndims
         forward_event_ndims = []
         inverse_event_ndims = []
         
-        for b in self._bijector_list:
+        for b in self._path_to_bijector.values():
             f_ndims = b.forward_min_event_ndims
             i_ndims = b.inverse_min_event_ndims
             
@@ -67,34 +98,6 @@ class PyTreeBijector(tfb.Bijector):
             name=name
         )
     
-    def _create_bijector_list(self, bijector_tree: PyTree, example_tree: PyTree) -> list:
-        """Create a flat list of bijectors matching the example tree structure."""
-        example_with_paths, _ = tree_util.tree_flatten_with_path(example_tree)
-        
-        bijector_list = []
-        for path, _ in example_with_paths:
-            # Try to find a bijector for this path
-            bijector = self._find_bijector_for_path(path, bijector_tree)
-            bijector_list.append(bijector)
-        
-        return bijector_list
-    
-    def _find_bijector_for_path(self, path, bijector_tree):
-        """Find a bijector for a given path, defaulting to Identity."""
-        try:
-            # Navigate through the bijector tree following the path
-            current = bijector_tree
-            for key in path:
-                if hasattr(key, 'key'):
-                    # Dictionary key
-                    current = current[key.key]
-                else:
-                    # List/tuple index
-                    current = current[key]
-            return current
-        except (KeyError, IndexError, TypeError):
-            # Path not found, use Identity
-            return tfb.Identity()
     
     def forward(self, x: PyTree, name: str = 'forward', **kwargs) -> PyTree:
         """Apply forward transformation to PyTree, bypassing tensor conversion."""
@@ -135,28 +138,30 @@ class PyTreeBijector(tfb.Bijector):
     
     def _forward(self, x: PyTree) -> PyTree:
         """Apply forward transformation to PyTree."""
-        # Flatten the input tree
-        x_leaves, x_treedef = tree.flatten(x)
+        # Get input tree with paths
+        x_with_paths, x_treedef = tree_util.tree_flatten_with_path(x)
         
         # Apply bijectors to corresponding leaves
         transformed_leaves = [
-            bij.forward(val) for bij, val in zip(self._bijector_list, x_leaves)
+            self._path_to_bijector[path].forward(value) 
+            for path, value in x_with_paths
         ]
         
-        # Reconstruct the tree structure
+        # Reconstruct the tree structure using input tree's structure
         return tree.unflatten(x_treedef, transformed_leaves)
     
     def _inverse(self, y: PyTree) -> PyTree:
         """Apply inverse transformation to PyTree."""
-        # Flatten the input tree
-        y_leaves, y_treedef = tree.flatten(y)
+        # Get input tree with paths
+        y_with_paths, y_treedef = tree_util.tree_flatten_with_path(y)
         
         # Apply inverse bijectors to corresponding leaves
         transformed_leaves = [
-            bij.inverse(val) for bij, val in zip(self._bijector_list, y_leaves)
+            self._path_to_bijector[path].inverse(value)
+            for path, value in y_with_paths
         ]
         
-        # Reconstruct the tree structure
+        # Reconstruct the tree structure using input tree's structure
         return tree.unflatten(y_treedef, transformed_leaves)
     
     def _forward_log_det_jacobian(
@@ -165,14 +170,14 @@ class PyTreeBijector(tfb.Bijector):
         event_ndims: PyTree
     ) -> Array:
         """Compute forward log determinant Jacobian."""
-        # Flatten all trees to get corresponding leaves
-        x_leaves, _ = tree.flatten(x)
-        event_ndims_leaves, _ = tree.flatten(event_ndims)
+        # Get input trees with paths
+        x_with_paths, _ = tree_util.tree_flatten_with_path(x)
+        event_ndims_with_paths, _ = tree_util.tree_flatten_with_path(event_ndims)
         
         # Apply forward_log_det_jacobian to each element
         log_dets = [
-            jnp.sum(bij.forward_log_det_jacobian(val, ndims))
-            for bij, val, ndims in zip(self._bijector_list, x_leaves, event_ndims_leaves)
+            jnp.sum(self._path_to_bijector[x_path].forward_log_det_jacobian(x_val, ndims_val))
+            for (x_path, x_val), (_, ndims_val) in zip(x_with_paths, event_ndims_with_paths)
         ]
         
         # Sum all log determinants
@@ -184,14 +189,14 @@ class PyTreeBijector(tfb.Bijector):
         event_ndims: PyTree
     ) -> Array:
         """Compute inverse log determinant Jacobian."""
-        # Flatten all trees to get corresponding leaves
-        y_leaves, _ = tree.flatten(y)
-        event_ndims_leaves, _ = tree.flatten(event_ndims)
+        # Get input trees with paths
+        y_with_paths, _ = tree_util.tree_flatten_with_path(y)
+        event_ndims_with_paths, _ = tree_util.tree_flatten_with_path(event_ndims)
         
         # Apply inverse_log_det_jacobian to each element
         log_dets = [
-            jnp.sum(bij.inverse_log_det_jacobian(val, ndims))
-            for bij, val, ndims in zip(self._bijector_list, y_leaves, event_ndims_leaves)
+            jnp.sum(self._path_to_bijector[y_path].inverse_log_det_jacobian(y_val, ndims_val))
+            for (y_path, y_val), (_, ndims_val) in zip(y_with_paths, event_ndims_with_paths)
         ]
         
         # Sum all log determinants
@@ -201,22 +206,28 @@ class PyTreeBijector(tfb.Bijector):
         """Returns the dtype returned by forward for the provided input."""
         if dtype is None:
             # Use the bijector's default dtype structure based on example tree
-            dtype_leaves = [bij.forward_dtype() for bij in self._bijector_list]
+            # Create a tree with bijector dtypes using path-to-bijector mapping
+            example_with_paths, _ = tree_util.tree_flatten_with_path(tree.unflatten(self._treedef, self._example_leaves))
+            dtype_leaves = [
+                self._path_to_bijector[path].forward_dtype() 
+                for path, _ in example_with_paths
+            ]
             return tree.unflatten(self._treedef, dtype_leaves)
         else:
             # Handle PyTree dtype input
-            dtype_leaves, dtype_treedef = tree.flatten(dtype)
+            dtype_with_paths, dtype_treedef = tree_util.tree_flatten_with_path(dtype)
             output_dtype_leaves = [
-                bij.forward_dtype(dt) for bij, dt in zip(self._bijector_list, dtype_leaves)
+                self._path_to_bijector[path].forward_dtype(dt) 
+                for (path, dt) in dtype_with_paths
             ]
             return tree.unflatten(dtype_treedef, output_dtype_leaves)
 
 
-def create_bijector_tree(
+def create_bijector_map(
     sample_tree: PyTree,
     bijector_specs: Optional[Mapping[str, tfb.Bijector]] = None
-) -> PyTreeBijector:
-    """Create a PyTreeBijector with manually specified bijectors.
+) -> dict:
+    """Create a path-to-bijector mapping with manually specified bijectors.
     
     Args:
         sample_tree: A sample PyTree to infer structure from.
@@ -224,16 +235,16 @@ def create_bijector_tree(
                        Missing keys will use Identity bijector.
         
     Returns:
-        A PyTreeBijector with specified transformations.
+        Dictionary mapping tree paths to bijectors.
     """
     if bijector_specs is None:
         bijector_specs = {}
     
     # Flatten the sample tree to get structure and paths
-    sample_leaves_with_path, treedef = tree_util.tree_flatten_with_path(sample_tree)
+    sample_leaves_with_path, _ = tree_util.tree_flatten_with_path(sample_tree)
     
-    # Create bijector leaves based on path information
-    bijector_leaves = []
+    # Create path-to-bijector mapping
+    path_to_bijector = {}
     for path, value in sample_leaves_with_path:
         # Extract key from path - handle both dict keys and list indices
         if path:
@@ -245,65 +256,61 @@ def create_bijector_tree(
             key = ''
             
         if key in bijector_specs:
-            bijector_leaves.append(bijector_specs[key])
+            path_to_bijector[path] = bijector_specs[key]
         else:
             # Default to Identity bijector
-            bijector_leaves.append(tfb.Identity())
+            path_to_bijector[path] = tfb.Identity()
     
-    # Create bijector tree with same structure as sample
-    bijector_tree = tree.unflatten(treedef, bijector_leaves)
-    
-    return PyTreeBijector(bijector_tree, sample_tree)
+    return path_to_bijector
 
 
-def _chain_with_zscale(base_bijector: PyTreeBijector, data: PyTree) -> PyTreeBijector:
-    """Chain base bijector with Z-scaling based on data statistics.
+def _chain_with_zscale(base_bijector_map: dict, data: PyTree) -> dict:
+    """Chain base bijectors with Z-scaling based on data statistics.
     
     Args:
-        base_bijector: Base PyTreeBijector to chain with Z-scaling.
+        base_bijector_map: Dictionary mapping paths to bijectors.
         data: Representative data to compute Z-scaling statistics from.
         
     Returns:
-        PyTreeBijector with Z-scaling chained after base transformations.
+        Dictionary mapping paths to chained bijectors with Z-scaling.
     """
-    # Transform data to unconstrained space
-    unconstrained_data = base_bijector.forward(data)
+    # Flatten data with paths
+    data_with_paths, _ = tree_util.tree_flatten_with_path(data)
     
-    # Compute mean and std in unconstrained space, collapsing batch and event dimensions
-    # This allows the statistics to broadcast across different event sizes
-    mean_leaves = [jnp.mean(leaf, axis=tuple(range(leaf.ndim - 1))) for leaf in tree.flatten(unconstrained_data)[0]]
-    std_leaves = [jnp.std(leaf, axis=tuple(range(leaf.ndim - 1))) for leaf in tree.flatten(unconstrained_data)[0]]
-    
-    # Create Z-scaling bijectors: Chain([Scale(1/std), Shift(-mean)]) = (x - mean) / std
-    zscaling_bijectors = [
-        tfb.Chain([
-            tfb.Scale(1.0 / jnp.maximum(std, 1e-8)),
-            tfb.Shift(-mean)
-        ])
-        for mean, std in zip(mean_leaves, std_leaves)
-    ]
+    # Compute statistics for each path
+    stats = {
+        path: (
+            jnp.mean(
+                base_bijector_map[path].forward(leaf),
+                axis=tuple(range(leaf.ndim - 1))
+            ),
+            jnp.std(
+                base_bijector_map[path].forward(leaf),
+                axis=tuple(range(leaf.ndim - 1))
+            )
+        )
+        for path, leaf in data_with_paths
+    }
     
     # Chain Z-scaling with base bijectors
-    chained_bijectors = [
-        tfb.Chain([zscale_bij, base_bij])
-        for zscale_bij, base_bij in zip(zscaling_bijectors, base_bijector._bijector_list)
-    ]
-    
-    # Reconstruct bijector tree structure
-    bijector_tree = tree.unflatten(base_bijector._treedef, chained_bijectors)
-    
-    # Reconstruct example tree from base bijector
-    example_tree = tree.unflatten(base_bijector._treedef, base_bijector._example_leaves)
-    
-    return PyTreeBijector(bijector_tree, example_tree)
+    return {
+        path: tfb.Chain([
+            tfb.Chain([
+                tfb.Scale(1.0 / jnp.maximum(stats[path][1], 1e-8)),
+                tfb.Shift(-stats[path][0])
+            ]),
+            bijector
+        ])
+        for path, bijector in base_bijector_map.items()
+    }
 
 
 def create_zscaling_bijector_tree(
     sample_tree: PyTree,
     representative_data: PyTree,
     bijector_specs: Optional[Mapping[str, tfb.Bijector]] = None
-) -> PyTreeBijector:
-    """Create a PyTreeBijector with Z-scaling and manually specified bijectors.
+) -> dict:
+    """Create a path-to-bijector mapping with Z-scaling and manually specified bijectors.
     
     Args:
         sample_tree: A sample PyTree to infer structure from.
@@ -313,7 +320,7 @@ def create_zscaling_bijector_tree(
                        Missing keys will use Identity bijector.
         
     Returns:
-        A PyTreeBijector with Z-scaling applied after specified transformations.
+        Dictionary mapping paths to bijectors with Z-scaling applied after specified transformations.
     """
-    base_bijector = create_bijector_tree(sample_tree, bijector_specs)
-    return _chain_with_zscale(base_bijector, representative_data)
+    base_bijector_map = create_bijector_map(sample_tree, bijector_specs)
+    return _chain_with_zscale(base_bijector_map, representative_data)

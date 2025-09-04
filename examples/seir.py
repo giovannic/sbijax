@@ -353,6 +353,7 @@ def run(cfg: DictConfig) -> None:
     # Create wrapped functions for train_bottom_up
     def wrapped_prior_fn(n):
         """Prior function that returns TransformedDistribution."""
+        return prior_fn(n)
         base_prior = prior_fn(n)
         bijector = create_prior_bijector(n)
         return tfd.TransformedDistribution(
@@ -363,6 +364,7 @@ def run(cfg: DictConfig) -> None:
     
     def wrapped_p_local(g, n):
         """Local prior function that returns TransformedDistribution."""
+        return p_local(g, n)
         base_local = p_local(g, n)
         bijector = create_local_bijector(n)
         return tfd.TransformedDistribution(
@@ -373,6 +375,8 @@ def run(cfg: DictConfig) -> None:
     
     def wrapped_simulator_fn(seed, theta, f_in_sample):
         """Simulator function that handles bijector transformations."""
+        output = simulator_fn(seed, theta, f_in_sample)
+        return apply_dequantization(output, seed)
         # Transform parameters back to constrained space
         n_sites = theta['A'].shape[-2]
         prior_bijector = create_prior_bijector(n_sites)
@@ -456,6 +460,10 @@ def run(cfg: DictConfig) -> None:
         n_samples=n_post_samples,
         index=f_in_flattened
     )
+
+    print('posterior shapes:')
+    print(tree.map(lambda x: x.shape, posterior))
+    print(tree.map(lambda x: x[:10], posterior))
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
     logger.info('Starting FMPE training')
@@ -641,7 +649,7 @@ def run(cfg: DictConfig) -> None:
     save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe')
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
-    logger.info("SVEIR experiment completed successfully!")
+    logger.info("SEIR experiment completed successfully!")
 
 
 def apply_lc2st(

@@ -267,8 +267,6 @@ def run(cfg: DictConfig):
         n_samples=n_post_samples
     )
 
-    print(f'truth: {fmpe_y_observed}')
-    print(f'posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
     logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
     n_cal = cfg.analysis.n_cal
