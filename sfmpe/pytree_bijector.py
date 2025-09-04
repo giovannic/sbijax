@@ -285,3 +285,83 @@ def create_manual_bijector_tree(
     bijector_tree = tree.unflatten(treedef, bijector_leaves)
     
     return PyTreeBijector(bijector_tree, sample_tree)
+
+
+def _chain_with_zscale(base_bijector: PyTreeBijector, data: PyTree) -> PyTreeBijector:
+    """Chain base bijector with Z-scaling based on data statistics.
+    
+    Args:
+        base_bijector: Base PyTreeBijector to chain with Z-scaling.
+        data: Representative data to compute Z-scaling statistics from.
+        
+    Returns:
+        PyTreeBijector with Z-scaling chained after base transformations.
+    """
+    # Transform data to unconstrained space
+    unconstrained_data = base_bijector.forward(data)
+    
+    # Compute mean and std in unconstrained space
+    mean_leaves = [jnp.mean(leaf, axis=0) for leaf in tree.flatten(unconstrained_data)[0]]
+    std_leaves = [jnp.std(leaf, axis=0) for leaf in tree.flatten(unconstrained_data)[0]]
+    
+    # Create Z-scaling bijectors: Chain([Scale(1/std), Shift(-mean)]) = (x - mean) / std
+    zscaling_bijectors = [
+        tfb.Chain([
+            tfb.Scale(1.0 / jnp.maximum(std, 1e-8)),
+            tfb.Shift(-mean)
+        ])
+        for mean, std in zip(mean_leaves, std_leaves)
+    ]
+    
+    # Chain Z-scaling with base bijectors
+    chained_bijectors = [
+        tfb.Chain([zscale_bij, base_bij])
+        for zscale_bij, base_bij in zip(zscaling_bijectors, base_bijector._bijector_list)
+    ]
+    
+    # Reconstruct bijector tree structure
+    bijector_tree = tree.unflatten(base_bijector._treedef, chained_bijectors)
+    
+    # Reconstruct example tree from base bijector
+    example_tree = tree.unflatten(base_bijector._treedef, base_bijector._example_leaves)
+    
+    return PyTreeBijector(bijector_tree, example_tree)
+
+
+def create_zscaling_bijector_from_distribution(
+    distribution: tfd.JointDistributionNamed,
+    representative_data: PyTree
+) -> PyTreeBijector:
+    """Create a PyTreeBijector with Z-scaling from a JointDistributionNamed.
+    
+    Args:
+        distribution: A JointDistributionNamed distribution.
+        representative_data: Representative data samples from the distribution
+                            used to compute Z-scaling statistics.
+        
+    Returns:
+        A PyTreeBijector that transforms from constrained to Z-scaled unconstrained space.
+    """
+    base_bijector = create_bijector_from_distribution(distribution)
+    return _chain_with_zscale(base_bijector, representative_data)
+
+
+def create_manual_zscaling_bijector_tree(
+    sample_tree: PyTree,
+    representative_data: PyTree,
+    bijector_specs: Optional[Mapping[str, tfb.Bijector]] = None
+) -> PyTreeBijector:
+    """Create a PyTreeBijector with Z-scaling and manually specified bijectors.
+    
+    Args:
+        sample_tree: A sample PyTree to infer structure from.
+        representative_data: Representative data samples used to compute 
+                            Z-scaling statistics in unconstrained space.
+        bijector_specs: Dictionary mapping tree keys to bijectors.
+                       Missing keys will use Identity bijector.
+        
+    Returns:
+        A PyTreeBijector with Z-scaling applied after specified transformations.
+    """
+    base_bijector = create_manual_bijector_tree(sample_tree, bijector_specs)
+    return _chain_with_zscale(base_bijector, representative_data)

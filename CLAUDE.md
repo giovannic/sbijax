@@ -42,3 +42,8 @@ I will ask you to make debugging code to log outputs or make plots. Experiments 
 ## Coding style
 
  * Please add type annotations to your function signatures. You can use jax types from `jaxtyping`.
+
+## Planning
+
+ * Please plan to write tests *before* you make implementations. That helps me confirm that you understand, then I can leave you to it.
+ * Once I have confirmed the tests, do not change them.
