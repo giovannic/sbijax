@@ -1,7 +1,7 @@
 """
 PyTreeBijector: A TFP Bijector that applies transformations to PyTree structures.
 """
-from typing import Dict, Any, Optional, Mapping
+from typing import Optional, Mapping
 import jax.numpy as jnp
 from jax import tree
 import jax.tree_util as tree_util
@@ -212,38 +212,7 @@ class PyTreeBijector(tfb.Bijector):
             return tree.unflatten(dtype_treedef, output_dtype_leaves)
 
 
-def create_bijector_from_distribution(
-    distribution: tfd.JointDistributionNamed
-) -> PyTreeBijector:
-    """Create a PyTreeBijector from a JointDistributionNamed using default bijectors.
-    
-    Args:
-        distribution: A JointDistributionNamed distribution.
-        
-    Returns:
-        A PyTreeBijector that transforms from constrained to unconstrained space.
-    """
-    # Sample from the distribution to get the structure
-    import jax.random as jr
-    key = jr.PRNGKey(0)
-    example_sample = distribution.sample(seed=key)
-    
-    # Get default bijectors for the distribution
-    default_bijector = distribution.experimental_default_event_space_bijector()
-    
-    # Create bijector tree by mapping model keys to individual bijectors
-    if hasattr(default_bijector, 'bijectors'):
-        # Map model keys to individual bijectors
-        model_keys = list(distribution.model.keys())
-        bijector_tree = dict(zip(model_keys, default_bijector.bijectors))
-    else:
-        # Fallback: create identity bijectors for all keys
-        bijector_tree = {key: tfb.Identity() for key in example_sample.keys()}
-    
-    return PyTreeBijector(bijector_tree, example_sample)
-
-
-def create_manual_bijector_tree(
+def create_bijector_tree(
     sample_tree: PyTree,
     bijector_specs: Optional[Mapping[str, tfb.Bijector]] = None
 ) -> PyTreeBijector:
@@ -300,9 +269,10 @@ def _chain_with_zscale(base_bijector: PyTreeBijector, data: PyTree) -> PyTreeBij
     # Transform data to unconstrained space
     unconstrained_data = base_bijector.forward(data)
     
-    # Compute mean and std in unconstrained space
-    mean_leaves = [jnp.mean(leaf, axis=0) for leaf in tree.flatten(unconstrained_data)[0]]
-    std_leaves = [jnp.std(leaf, axis=0) for leaf in tree.flatten(unconstrained_data)[0]]
+    # Compute mean and std in unconstrained space, collapsing batch and event dimensions
+    # This allows the statistics to broadcast across different event sizes
+    mean_leaves = [jnp.mean(leaf, axis=tuple(range(leaf.ndim - 1))) for leaf in tree.flatten(unconstrained_data)[0]]
+    std_leaves = [jnp.std(leaf, axis=tuple(range(leaf.ndim - 1))) for leaf in tree.flatten(unconstrained_data)[0]]
     
     # Create Z-scaling bijectors: Chain([Scale(1/std), Shift(-mean)]) = (x - mean) / std
     zscaling_bijectors = [
@@ -328,25 +298,7 @@ def _chain_with_zscale(base_bijector: PyTreeBijector, data: PyTree) -> PyTreeBij
     return PyTreeBijector(bijector_tree, example_tree)
 
 
-def create_zscaling_bijector_from_distribution(
-    distribution: tfd.JointDistributionNamed,
-    representative_data: PyTree
-) -> PyTreeBijector:
-    """Create a PyTreeBijector with Z-scaling from a JointDistributionNamed.
-    
-    Args:
-        distribution: A JointDistributionNamed distribution.
-        representative_data: Representative data samples from the distribution
-                            used to compute Z-scaling statistics.
-        
-    Returns:
-        A PyTreeBijector that transforms from constrained to Z-scaled unconstrained space.
-    """
-    base_bijector = create_bijector_from_distribution(distribution)
-    return _chain_with_zscale(base_bijector, representative_data)
-
-
-def create_manual_zscaling_bijector_tree(
+def create_zscaling_bijector_tree(
     sample_tree: PyTree,
     representative_data: PyTree,
     bijector_specs: Optional[Mapping[str, tfb.Bijector]] = None
@@ -363,5 +315,5 @@ def create_manual_zscaling_bijector_tree(
     Returns:
         A PyTreeBijector with Z-scaling applied after specified transformations.
     """
-    base_bijector = create_manual_bijector_tree(sample_tree, bijector_specs)
+    base_bijector = create_bijector_tree(sample_tree, bijector_specs)
     return _chain_with_zscale(base_bijector, representative_data)
