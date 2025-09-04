@@ -111,7 +111,6 @@ def p_local(g, n):
         batch_ndims=1,
     )
 
-
 def prior_fn(n):
     """Global prior distribution."""
     return tfd.JointDistributionNamed(
@@ -134,7 +133,6 @@ def prior_fn(n):
         ),
         batch_ndims=1,
     )
-
 
 def create_simulator_fn(
     n_timesteps: int,
@@ -225,30 +223,6 @@ def create_simulator_fn(
     
     return simulator_fn
 
-
-def f_in_fn(n_obs, n_sites):
-    """Function input sampler for observation indices."""
-    return tfd.JointDistributionNamed(
-        dict(
-            # Global parameters - dummy entries for structure
-            beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
-            alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
-            sigma = tfd.Deterministic(jnp.zeros((1, 1))),
-            
-            # Local parameters - dummy entries for structure  
-            A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
-            T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
-            phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
-            
-            # Functional observation times - Exponential(1) distributed per site
-            obs = tfd.Exponential(
-                jnp.ones((n_sites, n_obs, 1))  # Exponential(1) for observation times
-            )
-        ),
-        batch_ndims=1
-    )
-
-
 def apply_dequantization(
     obs_data: Dict[str, Array], 
     key: Array
@@ -272,9 +246,6 @@ def apply_dequantization(
     
     return obs_dequant
 
-
-
-
 def run(cfg: DictConfig) -> None:
     """Main execution function."""
     logger = logging.getLogger(__name__)
@@ -289,6 +260,30 @@ def run(cfg: DictConfig) -> None:
     n_rounds = cfg.n_rounds
     n_epochs = cfg.n_epochs
     n_post_samples = cfg.n_post_samples
+
+    def f_in_fn(n_obs, n_sites):
+        """Function input sampler for observation indices."""
+        return tfd.JointDistributionNamed(
+            dict(
+                # Global parameters - dummy entries for structure
+                beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
+                alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
+                sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                
+                # Local parameters - dummy entries for structure  
+                A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                
+                # Functional observation times - Exponential(1) distributed per site
+                obs = tfd.Uniform(
+                    jnp.zeros((n_sites, n_obs, 1), dtype=float),
+                    jnp.full((n_sites, n_obs, 1), float(n_timesteps))
+                )
+            ),
+            batch_ndims=1
+        )
+
     
     # Independence structure for structured inference
     independence = {
