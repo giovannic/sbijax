@@ -1,6 +1,6 @@
 """Round-based training for FMPE models."""
 
-from typing import Callable, Optional
+from typing import Callable
 import logging
 import time
 from jax import numpy as jnp, random as jr, tree
@@ -8,7 +8,6 @@ from jaxtyping import Array
 import optax
 from .fmpe import FMPE
 from .utils import split_data
-from .bijections import FittableBijection, Bijection
 
 def train_fmpe_rounds(
     key: Array,
@@ -22,7 +21,6 @@ def train_fmpe_rounds(
     n_epochs: int,
     optimizer: optax.GradientTransformation = optax.adam(3e-4),
     batch_size: int = 100,
-    bijection: Optional[Bijection] = None,
 ) -> FMPE:
     """Train FMPE model using round-based approach.
     
@@ -101,28 +99,16 @@ def train_fmpe_rounds(
                 round_data
             )
 
-        if isinstance(bijection, FittableBijection):
-            logger.info(f"Fitting bijection for round {round_idx + 1}")
-            bijection.fit(all_data)
-
         # Split data for training
         split_key, key = jr.split(key)
         total_samples = all_data['data']['theta'].shape[0]
 
-        if bijection is not None:
-            train_data, val_data = split_data(
-                bijection(all_data),
-                total_samples, 
-                split=0.8, 
-                shuffle_rng=split_key
-            )
-        else:
-            train_data, val_data = split_data(
-                all_data,
-                total_samples, 
-                split=0.8, 
-                shuffle_rng=split_key
-            )
+        train_data, val_data = split_data(
+            all_data,
+            total_samples, 
+            split=0.8, 
+            shuffle_rng=split_key
+        )
         
         # Train model on accumulated data
         logger.info(f"Training FMPE round {round_idx + 1} on {total_samples} samples")

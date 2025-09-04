@@ -39,8 +39,7 @@ from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.train_rounds import train_fmpe_rounds
 from sfmpe.pytree_bijector import (
     PyTreeBijector, 
-    create_bijector_from_distribution, 
-    create_manual_bijector_tree
+    create_zscaling_bijector_tree
 )
 from tensorflow_probability.substrates.jax import bijectors as tfb
 from sfmpe.metrics.lc2st import (
@@ -169,13 +168,10 @@ def create_simulator_fn(
         
         def solve_single_site(site_idx: int, params_single: Dict[str, Array], obs_times_single: Array) -> Array:
             """Solve ODE for single site and parameter set."""
-            # Keep as JAX arrays - don't convert to Python floats
             params_dict = {
-                # Global parameters  
                 'beta_0': params_single['beta_0'][0, 0],
                 'alpha': params_single['alpha'][0, 0],
                 'sigma': params_single['sigma'][0, 0],
-                # Site-specific parameters
                 'A': params_single['A'][site_idx, 0],
                 'T_season': params_single['T_season'][site_idx, 0],
                 'phi': params_single['phi'][site_idx, 0]
@@ -277,27 +273,6 @@ def apply_dequantization(
     return obs_dequant
 
 
-def create_prior_bijector(n_sites: int) -> PyTreeBijector:
-    """Create bijector for transforming prior samples to unconstrained space."""
-    # Create bijector from distribution default bijectors
-    return create_bijector_from_distribution(prior_fn(n_sites))
-
-
-def create_local_bijector(n_sites: int) -> PyTreeBijector:
-    """Create bijector for transforming local prior samples to unconstrained space."""
-    # Create bijector from p_local distribution default bijectors
-    dummy_global = { 'beta_0': jnp.zeros((1, 1, 1)) }  # p_local doesn't depend on global parameters in our case
-    return create_bijector_from_distribution(p_local(dummy_global, n_sites))
-
-
-def create_simulator_bijector(obs_sample: Dict[str, Array]) -> PyTreeBijector:
-    """Create bijector for transforming simulator outputs to unconstrained space."""
-    # For incidence data (positive values), use Softplus transformation
-    bijector_specs = {
-        'obs': tfb.Softplus()  # Maps R -> R+ for positive incidence values
-    }
-    
-    return create_manual_bijector_tree(obs_sample, bijector_specs)
 
 
 def run(cfg: DictConfig) -> None:
@@ -346,55 +321,76 @@ def run(cfg: DictConfig) -> None:
     deq_key, key = jr.split(key)
     y_processed = apply_dequantization(y_observed, deq_key)
     
-    # Transform prior samples and observations to unconstrained space
-    simulator_bijector = create_simulator_bijector(y_processed)
-    y_unconstrained = simulator_bijector.forward(y_processed)
+    # Generate representative data for consistent Z-scaling across all bijectors
+    repr_key, key = jr.split(key)
+    repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
+    
+    # For representative data, we can use the same f_in for all samples
+    # since we just need diverse parameter samples, not diverse observation times
+    repr_f_in = tree.map(lambda leaf: jnp.repeat(leaf, 1000, axis=0), f_in)
+    repr_y_raw = simulator_fn(repr_key, repr_theta, repr_f_in)
+    repr_y = apply_dequantization(repr_y_raw, deq_key)
+    
+    # Define bijector specifications for constrained -> unconstrained transformation
+    bijector_specs = {
+        'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
+        'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
+        'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
+        'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=1.0)),
+        'T_season': tfb.Identity(),  # Normal distribution is already unconstrained
+        'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
+    }
+    
+    y_bijector_specs = {
+        'obs': tfb.Invert(tfb.Softplus())  # Positive observations to unconstrained
+    }
+    
+    # Create Z-scaled bijector maps and PyTreeBijectors
+    theta_bijector_map = create_zscaling_bijector_tree(repr_theta, repr_theta, bijector_specs)
+    sfmpe_theta_bijector = PyTreeBijector(theta_bijector_map, repr_theta)
+    
+    y_bijector_map = create_zscaling_bijector_tree(repr_y, repr_y, y_bijector_specs)
+    sfmpe_y_bijector = PyTreeBijector(y_bijector_map, repr_y)
+    
+    # Transform observations to unconstrained space
+    y_unconstrained = sfmpe_y_bijector.forward(y_processed)
     
     # Create wrapped functions for train_bottom_up
     def wrapped_prior_fn(n):
         """Prior function that returns TransformedDistribution."""
-        return prior_fn(n)
         base_prior = prior_fn(n)
-        bijector = create_prior_bijector(n)
         return tfd.TransformedDistribution(
             base_prior, 
-            bijector,
+            sfmpe_theta_bijector,
             name="transformed_prior"
         )
     
     def wrapped_p_local(g, n):
         """Local prior function that returns TransformedDistribution."""
-        return p_local(g, n)
         base_local = p_local(g, n)
-        bijector = create_local_bijector(n)
         return tfd.TransformedDistribution(
             base_local,
-            bijector, 
+            sfmpe_theta_bijector,  # Can handle sub-PyTrees
             name="transformed_local"
         )
     
     def wrapped_simulator_fn(seed, theta, f_in_sample):
         """Simulator function that handles bijector transformations."""
-        output = simulator_fn(seed, theta, f_in_sample)
-        return apply_dequantization(output, seed)
         # Transform parameters back to constrained space
-        n_sites = theta['A'].shape[-2]
-        prior_bijector = create_prior_bijector(n_sites)
-        theta_constrained = prior_bijector.inverse(theta)
+        theta_constrained = sfmpe_theta_bijector.inverse(theta)
         
         # Apply original simulator
         y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
-        simulator_bijector = create_simulator_bijector(y_constrained)
+        y_deq = apply_dequantization(y_constrained, seed)
         
         # Transform outputs to unconstrained space
-        y_unconstrained_sim = simulator_bijector.forward(y_constrained)
-        
-        return y_unconstrained_sim
+        return sfmpe_y_bijector.forward(y_deq)
     
     logger.info("Generated ground truth and processed observations")
     logger.info(f"Observation times shape: {f_in['obs'].shape}")
     logger.info(f"Truth incidence shape: {y_observed['obs'].shape}")
     logger.info(f"Processed incidence range: {jnp.min(y_processed['obs'])} to {jnp.max(y_processed['obs'])}")
+    logger.info(f"Transformed incidence range: {jnp.min(y_unconstrained['obs'])} to {jnp.max(y_unconstrained['obs'])}")
     
     # SFMPE Implementation
     rngs = nnx.Rngs(key)
@@ -461,43 +457,94 @@ def run(cfg: DictConfig) -> None:
         index=f_in_flattened
     )
 
-    print('posterior shapes:')
-    print(tree.map(lambda x: x.shape, posterior))
-    print(tree.map(lambda x: x[:10], posterior))
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
-    logger.info('Starting FMPE training')
-    
-    # Create proxy functions for FMPE training
-    def fmpe_prior_fn(key: Array, n_samples: int) -> Array:
-        """Prior function compatible with FMPE interface"""
-        theta_samples = prior_fn(n_sites).sample((n_samples,), seed=key)
-        # Flatten: combine all parameters
+    # Helper functions for FMPE bijector integration
+    def flatten_theta_dict(theta_dict: Dict[str, Array]) -> Array:
+        """Flatten theta dictionary to 1D array for FMPE."""
         flattened_parts = []
         for param_name in ['beta_0', 'alpha', 'sigma']:
-            flattened_parts.append(theta_samples[param_name].reshape((n_samples, 1)))
+            flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], 1))
         for param_name in ['A', 'T_season', 'phi']:
-            flattened_parts.append(theta_samples[param_name].reshape((n_samples, n_sites)))
+            flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], n_sites))
         return jnp.concatenate(flattened_parts, axis=1)
-
-    def fmpe_simulator_fn(key: Array, theta_flat: Array) -> Array:
-        """Simulator function compatible with FMPE interface"""
-        # Reconstruct structured theta from flat representation
+    
+    def reconstruct_theta_dict(theta_flat: Array) -> Dict[str, Array]:
+        """Reconstruct structured theta from flattened array."""
         theta_dict = {}
         idx = 0
         
         # Global parameters (3 parameters, 1 each)
-        theta_dict['beta_0'] = theta_flat[:, idx:idx+1, None]  # Add singleton for batch
+        theta_dict['beta_0'] = theta_flat[:, idx:idx+1, None]
         idx += 1
         theta_dict['alpha'] = theta_flat[:, idx:idx+1, None]
         idx += 1
         theta_dict['sigma'] = theta_flat[:, idx:idx+1, None]
         idx += 1
         
-        # Site-specific parameters (3 parameters, n_sites each for SEIR)
+        # Site-specific parameters (3 parameters, n_sites each)
         for param_name in ['A', 'T_season', 'phi']:
             theta_dict[param_name] = theta_flat[:, idx:idx+n_sites, None]
             idx += n_sites
+            
+        return theta_dict
+    
+    def create_fmpe_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs: Dict[str, tfb.Bijector], n_sites: int) -> tfb.Bijector:
+        """Create blockwise bijector for FMPE using same Z-scaling as SFMPE."""
+        individual_bijectors = []
+        
+        # Global parameters (3 parameters, 1 each)
+        for param in ['beta_0', 'alpha', 'sigma']:
+            base_bij = bijector_specs[param]
+            param_data = repr_theta[param].reshape(-1, 1)
+            mean_val = jnp.mean(base_bij.forward(param_data))
+            std_val = jnp.std(base_bij.forward(param_data))
+            z_scaled_bij = tfb.Chain([
+                tfb.Scale(1.0 / jnp.maximum(std_val, 1e-8)),
+                tfb.Shift(-mean_val),
+                base_bij
+            ])
+            individual_bijectors.append(z_scaled_bij)
+        
+        # Site-specific parameters (3 parameters, n_sites each)
+        for param in ['A', 'T_season', 'phi']:
+            base_bij = bijector_specs[param]
+            param_data = repr_theta[param].reshape(-1, n_sites)
+            mean_val = jnp.mean(base_bij.forward(param_data), axis=0)
+            std_val = jnp.std(base_bij.forward(param_data), axis=0)
+            z_scaled_bij = tfb.Chain([
+                tfb.Scale(1.0 / jnp.maximum(std_val, 1e-8)),
+                tfb.Shift(-mean_val),
+                base_bij
+            ])
+            individual_bijectors.append(z_scaled_bij)
+        
+        # Create blockwise bijector
+        return tfb.Blockwise(
+            bijectors=individual_bijectors,
+            block_sizes=[1, 1, 1, n_sites, n_sites, n_sites]
+        )
+    
+    # Create FMPE bijector
+    fmpe_theta_bijector = create_fmpe_blockwise_bijector(repr_theta, bijector_specs, n_sites)
+    
+    logger.info('Starting FMPE training')
+    
+    # Create proxy functions for FMPE training
+    def fmpe_prior_fn(key: Array, n_samples: int) -> Array:
+        """Prior function compatible with FMPE interface"""
+        theta_samples = prior_fn(n_sites).sample((n_samples,), seed=key)
+        # Flatten and transform to unconstrained space
+        theta_flat = flatten_theta_dict(theta_samples)
+        return fmpe_theta_bijector.forward(theta_flat)
+
+    def fmpe_simulator_fn(key: Array, theta_flat: Array) -> Array:
+        """Simulator function compatible with FMPE interface"""
+        # Inverse transform to constrained space
+        theta_constrained_flat = fmpe_theta_bijector.inverse(theta_flat)
+        
+        # Reconstruct structured theta from flat representation
+        theta_dict = reconstruct_theta_dict(theta_constrained_flat)
         
         # Run simulator
         n_simulations = theta_flat.shape[0]
@@ -506,9 +553,11 @@ def run(cfg: DictConfig) -> None:
             f_in
         )
         y_samples = simulator_fn(key, theta_dict, f_in_matched)
-        # Apply same dequantization as observations
         y_deq = apply_dequantization(y_samples, key)
-        return y_deq['obs'].reshape((theta_flat.shape[0], -1))
+        
+        # Transform observations to unconstrained space (consistent with SFMPE)
+        y_transformed = sfmpe_y_bijector.forward(y_deq)
+        return y_transformed['obs'].reshape((theta_flat.shape[0], -1))
 
     # Create FMPE model
     total_params = 3 + 3 * n_sites  # 3 global + 3 * n_sites local parameters (SEIR model)
@@ -524,8 +573,8 @@ def run(cfg: DictConfig) -> None:
     fmpe_model = CNF(fmpe_nn)
     fmpe_estim = FMPE(fmpe_model, rngs=rngs)
     
-    # Flatten observed data for FMPE
-    fmpe_y_observed = y_processed['obs'].reshape(-1)
+    # Flatten observed data for FMPE (use transformed observations)
+    fmpe_y_observed = y_unconstrained['obs'].reshape(-1)
     
     # Train using round-based approach
     train_key, key = jr.split(key)
@@ -612,12 +661,9 @@ def run(cfg: DictConfig) -> None:
         analyse_key,
         create_sfmpe_calibration_dataset,
         sample_single_sfmpe_posterior,
-        lambda: prior_fn(n_sites),
-        lambda seed, theta: apply_dequantization(
-            simulator_fn(seed, theta, cal_f_in),
-            seed
-        ),
-        y_processed['obs'].reshape(-1),
+        lambda: wrapped_prior_fn(n_sites),  # Use wrapped (transformed) function
+        lambda seed, theta: wrapped_simulator_fn(seed, theta, cal_f_in),  # Partial apply cal_f_in
+        y_unconstrained['obs'].reshape(-1), # Use transformed observations
         sfmpe_posterior_flat,
         n_cal_epochs,
         n_cal,
@@ -635,9 +681,9 @@ def run(cfg: DictConfig) -> None:
         analyse_key,
         create_fmpe_calibration_dataset,
         sample_single_fmpe_posterior,
-        fmpe_prior_fn,
-        fmpe_simulator_fn,
-        y_processed['obs'].reshape(-1),
+        fmpe_prior_fn,        # Already transformed
+        fmpe_simulator_fn,    # Already transformed
+        fmpe_y_observed,      # Use same transformed observations as training
         fmpe_posterior_samples,
         n_cal_epochs,
         n_cal,
