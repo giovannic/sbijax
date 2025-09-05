@@ -8,8 +8,8 @@ defaults:
 
 # SVEIR model parameters
 n_timesteps: 200    # Total simulation timesteps
-n_obs: 20            # Number of observations to sample
-n_sites: 20          # Number of observation sites
+n_obs: 5            # Number of observations to sample
+n_sites: 50
 
 # ODE simulation parameters
 dt: 1.0            # Time step size (days)
@@ -38,8 +38,17 @@ analysis:
   n_cal_epochs: 100  # Number of calibration epochs
   n_null: 100        # Number of null classifiers
   classifier:
-    latent_dim: 16
+    latent_dim: 128
     n_layers: 2
 
 # Random seed
 seed: 42
+
+# Increase estimator capacity for big inference problem
+sfmpe:
+  transformer:
+    latent_dim: 128
+
+fmpe:
+  nn:
+    latent_dim: 128
