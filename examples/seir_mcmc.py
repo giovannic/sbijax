@@ -1,0 +1,510 @@
+"""
+SEIR (Susceptible-Exposed-Infectious-Recovered) model implementation
+using Flow Matching for Posterior Estimation.
+
+This script implements a modern epidemiological model with:
+- Functional random variables (obs) with temporal indexing
+- PyTree bijectors for continuous data transformation  
+- Both structured (SFMPE) and flat (FMPE) inference approaches
+- Hydra configuration management
+- LC2ST evaluation framework
+
+Updated to use latest package interfaces following hierarchical_brownian.py pattern.
+"""
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Callable, Dict
+from jaxtyping import PyTree, Array
+import hydra
+from omegaconf import DictConfig
+from hydra.core.hydra_config import HydraConfig
+
+from jax import numpy as jnp, random as jr, tree, vmap
+from jax.experimental.ode import odeint
+import tensorflow_probability.substrates.jax as tfp
+from tensorflow_probability.substrates.jax import distributions as tfd
+from tensorflow_probability.substrates.jax import bijectors as tfb
+
+from tensorflow_probability.substrates.jax import bijectors as tfb
+import arviz as az
+
+def seir_dynamics(
+    state: Array, 
+    t: float, 
+    params: Dict[str, float]
+) -> Array:
+    """
+    SEIR differential equation system for single age group.
+    
+    Args:
+        state: [S, E, I, R] compartment sizes
+        t: Current time
+        params: Model parameters
+        
+    Returns:
+        Derivatives [dS/dt, dE/dt, dI/dt, dR/dt]
+    """
+    S, E, I, R = state
+    N = S + E + I + R
+    
+    # Seasonal transmission rate
+    beta = params['beta_0'] * (
+        1 + params['A'] * jnp.sin(
+            2 * jnp.pi * t / params['T_season'] - params['phi']
+        )
+    )
+    
+    # Force of infection
+    lambda_force = beta * I / N
+    
+    # Transitions
+    s_to_e = lambda_force * S
+    e_to_i = params['alpha'] * E
+    i_to_r = params['sigma'] * I
+    
+    # Derivatives
+    dS = -s_to_e
+    dE = s_to_e - e_to_i
+    dI = e_to_i - i_to_r
+    dR = i_to_r
+    
+    return jnp.array([dS, dE, dI, dR])
+
+def prior_fn(n):
+    """Global prior distribution."""
+    return tfd.JointDistributionNamed(
+        dict(
+            # Global parameters (independent of obs by exchangeability)
+            beta_0 = tfd.Uniform(jnp.full((1, 1), 0.1), jnp.full((1, 1), 2.0)),
+            alpha = tfd.Uniform(jnp.full((1, 1), 1/30), jnp.full((1, 1), 1/7)),
+            sigma = tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
+            
+            # Local parameters are independent of global parameters
+            A = tfd.Uniform(jnp.zeros((n, 1)), jnp.ones((n, 1))),
+            T_season = tfd.Normal(
+                jnp.full((n, 1), 365.0), 
+                jnp.full((n, 1), 50.0)
+            ),
+            phi = tfd.Uniform(
+                jnp.zeros((n, 1)), 
+                jnp.full((n, 1), 2*jnp.pi)
+            )
+        ),
+        batch_ndims=1,
+    )
+
+def create_simulator_fn(simulator_dist: Callable) -> Callable:
+    def simulator_fn(key: Array, theta: Dict[str, Array], f_in: dict) -> Dict[str, Array]:
+        return simulator_dist(theta, f_in).sample(seed=key)
+    return simulator_fn
+
+def create_simulator_dist(
+    n_timesteps: int,
+    dt: float = 1.0,
+    population: int = 10000,
+    I0_prop: float = 0.001
+) -> Callable:
+    """Create simulator function for SVEIR dynamics."""
+    
+    def simulator_dist(theta: Dict[str, Array], f_in: dict) -> tfd.Distribution:
+        """
+        Simulate SVEIR dynamics and return indexed observations.
+        
+        Args:
+            key: Random key
+            theta: Parameters
+            f_in: Functional input data containing observation indices
+            
+        Returns:
+            Dictionary with 'obs' key containing observations at specified indices
+        """
+        batch_size = theta['beta_0'].shape[0]
+        obs_times = f_in['obs']  # Extract observation times from f_in
+        # obs_times shape: (batch_size, n_sites, n_obs, 1)
+        n_sites = obs_times.shape[1] 
+        
+        # Initial conditions for SEIR
+        I0 = population * I0_prop
+        S0 = population - I0
+        initial_state = jnp.array([S0, 0.0, I0, 0.0])  # [S, E, I, R]
+        
+        def solve_single_site(site_idx: int, params_single: Dict[str, Array], obs_times_single: Array) -> Array:
+            """Solve ODE for single site and parameter set."""
+            params_dict = {
+                'beta_0': params_single['beta_0'][0, 0],
+                'alpha': params_single['alpha'][0, 0],
+                'sigma': params_single['sigma'][0, 0],
+                'A': params_single['A'][site_idx, 0],
+                'T_season': params_single['T_season'][site_idx, 0],
+                'phi': params_single['phi'][site_idx, 0]
+            }
+            
+            def ode_func(state, t):
+                return seir_dynamics(state, t, params_dict)
+            
+            # Solve ODE at observation times for this site
+            # Sort times for ODE solver, then reorder results
+            t_eval = obs_times_single[:, 0]  # Extract times (n_obs,)
+            sort_indices = jnp.argsort(t_eval)
+            t_eval_sorted = t_eval[sort_indices]
+            solution = odeint(ode_func, initial_state, t_eval_sorted)
+            
+            # Reorder solution to match original time sequence
+            reorder_indices = jnp.argsort(sort_indices)
+            solution_reordered = solution[reorder_indices]
+            
+            # Extract incidence - since we're solving at the observation times directly,
+            # we return the infection rate (new infections per day) at those times
+            # For incidence, we use the infection rate α*E at observation times  
+            exposed = solution_reordered[:, 1]  # E compartment (index 1 in SEIR)
+            incidence = params_dict['alpha'] * exposed
+            incidence = jnp.maximum(incidence, 1e-8)  # Ensure positive with small delta
+            
+            return incidence
+        
+        # Vectorize over batch and sites  
+        solve_batch_sites = vmap(
+            vmap(solve_single_site, in_axes=(0, None, 0)),  # site_idx, params, obs_times_per_site
+            in_axes=(None, 0, 0)  # site_indices, theta_batch, obs_times_batch
+        )
+        
+        # Generate incidence for all sites
+        site_indices = jnp.arange(n_sites)
+        incidence_batch = solve_batch_sites(site_indices, theta, obs_times)
+        
+        return tfd.JointDistributionNamed(
+            dict(
+                obs = tfd.Independent(
+                    tfd.Poisson(jnp.maximum(incidence_batch, 0.1)[..., None]), 
+                    reinterpreted_batch_ndims=1
+                )
+            )
+        )
+
+    return simulator_dist
+
+def apply_dequantization(
+    obs_data: Dict[str, Array], 
+    key: Array
+) -> Dict[str, Array]:
+    """
+    Apply uniform dequantization to discrete observations while preserving positivity.
+    
+    Args:
+        obs_data: Observation data (discrete, non-negative)
+        key: Random key
+        
+    Returns:
+        Dequantized observation data (continuous, positive)
+    """
+    # Dequantize with uniform [0, 1) noise to preserve positivity
+    obs_dequant = {}
+    for name, data in obs_data.items():
+        key, subkey = jr.split(key)
+        noise = jr.uniform(subkey, data.shape, minval=0.0, maxval=1.0)
+        obs_dequant[name] = data.astype(float) + noise
+    
+    return obs_dequant
+
+def run(cfg: DictConfig) -> None:
+    """Main execution function."""
+    logger = logging.getLogger(__name__)
+    logger.info(f"Running SEIR with n_simulations={cfg.n_simulations}, "
+                f"n_rounds={cfg.n_rounds}, n_epochs={cfg.n_epochs}")
+    
+    # Extract parameters
+    n_timesteps = cfg.n_timesteps
+    n_obs = cfg.n_obs
+    n_sites = cfg.n_sites
+    n_simulations = cfg.n_simulations
+    n_rounds = cfg.n_rounds
+    n_epochs = cfg.n_epochs
+    n_post_samples = cfg.n_post_samples
+
+    def f_in_fn(n_obs, n_sites):
+        """Function input sampler for observation indices."""
+        return tfd.JointDistributionNamed(
+            dict(
+                # Global parameters - dummy entries for structure
+                beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
+                alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
+                sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                
+                # Local parameters - dummy entries for structure  
+                A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                
+                # Functional observation times
+                obs = tfd.Uniform(
+                    jnp.zeros((n_sites, n_obs, 1), dtype=float),
+                    jnp.full((n_sites, n_obs, 1), float(n_timesteps))
+                )
+            ),
+            batch_ndims=1
+        )
+
+    def f_in_fn_observed(n_obs, n_sites, f_in):
+        """Function input sampler for observation indices."""
+        if n_sites == 1:
+            return tfd.JointDistributionNamed(
+                dict(
+                    # Global parameters - dummy entries for structure
+                    beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
+                    alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
+                    sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                    
+                    # Local parameters - dummy entries for structure  
+                    A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    
+                    # Functional observation times
+                    obs_index = tfd.FiniteDiscrete(
+                        jnp.arange(n_sites),
+                        logits=jnp.ones((n_sites,))
+                    ),
+                    obs = lambda obs_index: tfd.Deterministic(
+                        jnp.expand_dims(f_in['obs'][0, obs_index, ...], 1)
+                    )
+                ),
+                batch_ndims=1
+            )
+        elif n_sites == f_in['obs'].shape[1]:
+            return tfd.JointDistributionNamed(
+                dict(
+                    # Global parameters - dummy entries for structure
+                    beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
+                    alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
+                    sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                    
+                    # Local parameters - dummy entries for structure  
+                    A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    obs = tfd.Deterministic(f_in['obs'][0])
+                ),
+                batch_ndims=1
+            )
+
+    key = jr.PRNGKey(cfg.seed)
+    
+    # Create functions
+    simulator_dist = create_simulator_dist(n_timesteps, cfg.dt, cfg.population, cfg.I0_prop)
+    simulator_fn = create_simulator_fn(simulator_dist)
+    
+    # Generate ground truth and observations
+    theta_key, obs_key, f_in_key, key = jr.split(key, 4)
+    
+    theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
+    f_in = f_in_fn(n_obs, n_sites).sample((1,), seed=f_in_key)
+    y_observed = simulator_fn(obs_key, theta_truth, f_in)
+    
+    # Generate representative data for consistent Z-scaling across all bijectors
+    repr_key, key = jr.split(key)
+    repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
+    
+    # Define bijector specifications for constrained -> unconstrained transformation
+    bijector_specs = {
+        'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
+        'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
+        'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
+        'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=1.0)),
+        'T_season': tfb.Identity(),  # Normal distribution is already unconstrained
+        'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
+    }
+    
+    # Helper functions for FMPE bijector integration
+    def flatten_theta_dict(theta_dict: Dict[str, Array]) -> Array:
+        """Flatten theta dictionary to 1D array for FMPE."""
+        flattened_parts = []
+        for param_name in ['beta_0', 'alpha', 'sigma']:
+            flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], 1))
+        for param_name in ['A', 'T_season', 'phi']:
+            flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], n_sites))
+        return jnp.concatenate(flattened_parts, axis=1)
+    
+    def reconstruct_theta_dict(theta_flat: Array) -> Dict[str, Array]:
+        """Reconstruct structured theta from flattened array."""
+        theta_dict = {}
+        idx = 0
+        
+        # Global parameters (3 parameters, 1 each)
+        theta_dict['beta_0'] = theta_flat[..., idx:idx+1, None]
+        idx += 1
+        theta_dict['alpha'] = theta_flat[..., idx:idx+1, None]
+        idx += 1
+        theta_dict['sigma'] = theta_flat[..., idx:idx+1, None]
+        idx += 1
+        
+        # Site-specific parameters (3 parameters, n_sites each)
+        for param_name in ['A', 'T_season', 'phi']:
+            theta_dict[param_name] = theta_flat[..., idx:idx+n_sites, None]
+            idx += n_sites
+            
+        return theta_dict
+    
+    def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs: Dict[str, tfb.Bijector], n_sites: int) -> tfb.Bijector:
+        """Create blockwise bijector for FMPE using same Z-scaling as SFMPE."""
+        individual_bijectors = []
+        
+        # Global parameters (3 parameters, 1 each)
+        for param in ['beta_0', 'alpha', 'sigma']:
+            base_bij = bijector_specs[param]
+            param_data = repr_theta[param].reshape(-1, 1)
+            mean_val = jnp.mean(base_bij.forward(param_data))
+            std_val = jnp.std(base_bij.forward(param_data))
+            z_scaled_bij = tfb.Chain([
+                tfb.Scale(1.0 / jnp.maximum(std_val, 1e-8)),
+                tfb.Shift(-mean_val),
+                base_bij
+            ])
+            individual_bijectors.append(z_scaled_bij)
+        
+        # Site-specific parameters (3 parameters, n_sites each)
+        for param in ['A', 'T_season', 'phi']:
+            base_bij = bijector_specs[param]
+            param_data = repr_theta[param].reshape(-1, n_sites)
+            mean_val = jnp.mean(base_bij.forward(param_data), axis=0)
+            std_val = jnp.std(base_bij.forward(param_data), axis=0)
+            z_scaled_bij = tfb.Chain([
+                tfb.Scale(1.0 / jnp.maximum(std_val, 1e-8)),
+                tfb.Shift(-mean_val),
+                base_bij
+            ])
+            individual_bijectors.append(z_scaled_bij)
+        
+        # Create blockwise bijector
+        return tfb.Blockwise(
+            bijectors=individual_bijectors,
+            block_sizes=[1, 1, 1, n_sites, n_sites, n_sites]
+        )
+    
+    # Create MCMC bijector
+    flat_theta_bijector = create_flat_blockwise_bijector(repr_theta, bijector_specs, n_sites)
+    
+    # Create proxy functions for MCMC sampling
+    def flat_prior_fn(key: Array, n_samples: int) -> Array:
+        """Prior function compatible with FMPE interface"""
+        theta_samples = prior_fn(n_sites).sample((n_samples,), seed=key)
+        # Flatten and transform to unconstrained space
+        return flatten_theta_dict(theta_samples)
+
+    def flat_simulator_log_prob(theta_flat: Array) -> Array:
+        """Simulator function compatible with FMPE interface"""
+        # Reconstruct structured theta from flat representation
+        theta_dict = reconstruct_theta_dict(theta_flat)
+        
+        # Run simulator
+        n_simulations = theta_flat.shape[0]
+        f_in_matched = tree.map(
+            lambda leaf: jnp.repeat(leaf, n_simulations, axis=0),
+            f_in
+        )
+        sim_dist = simulator_dist(theta_dict, f_in_matched)
+        return jnp.sum(sim_dist.log_prob(y_observed), axis=(1, 2))
+
+
+    # Train using round-based approach
+    logger.info("Starting MCMC sampling")
+    start_time = time.time()
+
+    # Sample from MCMC
+    n_burnin = cfg.mcmc.n_burnin
+    sample_key, init_key, key = jr.split(key, 3)
+
+    init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+
+    kernel = tfp.mcmc.TransformedTransitionKernel(
+        inner_kernel=tfp.mcmc.SliceSampler(
+            target_log_prob_fn=flat_simulator_log_prob,
+            step_size=cfg.mcmc.step_size,
+            max_doublings=cfg.mcmc.max_doublings
+        ),
+        bijector=flat_theta_bijector
+    )
+
+    mcmc_posterior_samples = tfp.mcmc.sample_chain(
+        num_results=n_post_samples,
+        num_burnin_steps=n_burnin,
+        current_state=init_state,
+        kernel=kernel,
+        seed=sample_key
+    )
+    logger.info(f'MCMC posterior mean: {jnp.mean(mcmc_posterior_samples.all_states, axis=(0, 1))}')
+    logger.info(f"MCMC posterior sampling completed in {time.time() - start_time:.2f} seconds")
+
+    logger.info(f'Analysing MCMC')
+    start_time = time.time()
+    logger.info(f"Converting MCMC posterior to az format")
+    post_dict = reconstruct_theta_dict(
+        jnp.swapaxes(
+            mcmc_posterior_samples.all_states,
+            0,
+            1
+        )
+    )
+    posterior = az.from_dict(posterior=post_dict)
+    logger.info(f"Summarising MCMC posterior")
+    print(az.summary(posterior))
+    logger.info(f"MCMC summarisation completed in {time.time() - start_time:.2f} seconds")
+    logger.info(f'Summarising MCMC')
+
+   
+    logger.info("SEIR MCMC experiment completed successfully!")
+
+
+def _flatten(x: PyTree) -> jnp.ndarray:
+    """Flatten a batched SFMPE PyTree into a 2D array."""
+    return jnp.concatenate(
+        [v.reshape(v.shape[0], -1) for v in x.values()],
+        axis=-1
+    )
+
+def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8, 
+                 data_sample_ndims: int = 1) -> PyTree:
+    """
+    Flatten f_in data for use as index in SFMPE posterior sampling.
+    
+    Uses the same methodology as flatten_structured: splits f_in into 
+    'theta' and 'y' blocks based on parameter structure, then applies
+    _flatten_index to each block.
+    """
+    from sfmpe.util.dataloader import _flatten_index
+    
+    # Define which keys go to which block (matching the data structure)
+    theta_keys = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']  # all parameters
+    y_keys = ['obs']              # observations
+    
+    # Split f_in_data into theta and y components
+    theta_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in theta_keys}
+    y_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in y_keys}
+    
+    # Apply _flatten_index to each block
+    flattened_index = {
+        'theta': _flatten_index(theta_f_in, pad_value, data_sample_ndims),
+        'y': _flatten_index(y_f_in, pad_value, data_sample_ndims)
+    }
+    
+    return flattened_index
+
+@hydra.main(version_base=None, config_path="conf", config_name="seir_mcmc_config")
+def main(cfg: DictConfig) -> None:
+    """Main function with Hydra configuration management."""
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
+    logger.info("Starting SEIR experiment")
+    
+    # Run the experiment
+    run(cfg)
+
+if __name__ == "__main__":
+    main()
