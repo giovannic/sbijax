@@ -288,14 +288,7 @@ def run(cfg: DictConfig) -> None:
     # Independence structure for structured inference
     independence = {
         'local': ['obs'],  # Observations independent across time/sites
-        'cross': [
-            ('beta_0', 'obs'),  # Global parameters independent by exchangeability
-            ('alpha', 'obs'),
-            ('sigma', 'obs'),
-            ('obs', 'beta_0'),
-            ('obs', 'alpha'),
-            ('obs', 'sigma')
-        ],
+        'cross': [],
         'cross_local': [  # Site-specific parameters connect to their observations
             ('A', 'obs', (0, 0)),
             ('T_season', 'obs', (0, 0)),
