@@ -275,7 +275,7 @@ def run(cfg: DictConfig) -> None:
                 T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
                 phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
                 
-                # Functional observation times - Exponential(1) distributed per site
+                # Functional observation times
                 obs = tfd.Uniform(
                     jnp.zeros((n_sites, n_obs, 1), dtype=float),
                     jnp.full((n_sites, n_obs, 1), float(n_timesteps))
@@ -283,6 +283,50 @@ def run(cfg: DictConfig) -> None:
             ),
             batch_ndims=1
         )
+
+    def f_in_fn_observed(n_obs, n_sites, f_in):
+        """Function input sampler for observation indices."""
+        if n_sites == 1:
+            return tfd.JointDistributionNamed(
+                dict(
+                    # Global parameters - dummy entries for structure
+                    beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
+                    alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
+                    sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                    
+                    # Local parameters - dummy entries for structure  
+                    A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    
+                    # Functional observation times
+                    obs_index = tfd.FiniteDiscrete(
+                        jnp.arange(n_sites),
+                        logits=jnp.ones((n_sites,))
+                    ),
+                    obs = lambda obs_index: tfd.Deterministic(
+                        jnp.expand_dims(f_in['obs'][0, obs_index, ...], 1)
+                    )
+                ),
+                batch_ndims=1
+            )
+        elif n_sites == f_in['obs'].shape[1]:
+            return tfd.JointDistributionNamed(
+                dict(
+                    # Global parameters - dummy entries for structure
+                    beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
+                    alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
+                    sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                    
+                    # Local parameters - dummy entries for structure  
+                    A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    T_season = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    phi = tfd.Deterministic(jnp.zeros((n_sites, 1))),
+                    obs = tfd.Deterministic(f_in['obs'][0])
+                ),
+                batch_ndims=1
+            )
+
 
     
     # Independence structure for structured inference
@@ -417,8 +461,18 @@ def run(cfg: DictConfig) -> None:
 
     train_key, key = jr.split(key)
     logger.info("Starting SFMPE bottom-up training")
-    start_time = time.time()
+    if cfg.f_in_sample == 'observed':
+        f_in_fn_train = f_in_fn_observed
+        f_in_args = (n_obs, 1, f_in)
+        f_in_args_global = (n_obs, n_sites, f_in)
+    elif cfg.f_in_sample == 'prior':
+        f_in_fn_train = f_in_fn
+        f_in_args = (n_obs, 1)
+        f_in_args_global = (n_obs, n_sites)
+    else:
+        raise ValueError(f"Invalid f_in_sample: {cfg.f_in_sample}")
     
+    start_time = time.time()
     labels, slices, masks = train_bottom_up(
         train_key,
         estim,
@@ -435,9 +489,9 @@ def run(cfg: DictConfig) -> None:
         independence,
         optimiser=optax.adam(cfg.training.learning_rate),
         batch_size=int(n_simulations * cfg.training.batch_size_fraction),
-        f_in=f_in_fn,
-        f_in_args=(n_obs, 1),
-        f_in_args_global=(n_obs, n_sites),
+        f_in=f_in_fn_train,
+        f_in_args=f_in_args,
+        f_in_args_global=f_in_args_global,
         f_in_target=f_in
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")

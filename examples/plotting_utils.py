@@ -166,6 +166,8 @@ def detect_task_type(run_dir: Path, config: Dict[str, Any]) -> Optional[str]:
     # Look for 'var_obs' which is specific to Gaussian
     elif 'var_obs' in config:
         return 'Gaussian'
+    elif 'n_sites' in config:
+        return 'SEIR'
     else:
         # Fallback: check parent directory names
         dir_path = str(run_dir)

@@ -23,6 +23,9 @@ var_mu: 1.0      # Variance for mu parameter
 var_theta: 0.1   # Variance for theta parameter  
 obs_rate: 1.0    # Rate parameter for exponential f_in distribution
 
+# F_in_sample
+f_in_sample: "observed" # Options: "observed", "prior"
+
 # Training configuration
 training:
   learning_rate: 3e-4

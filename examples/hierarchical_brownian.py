@@ -98,7 +98,7 @@ def run(cfg: DictConfig):
         }
 
     # make function input sampler
-    def f_in_fn(n_obs, n_theta):
+    def f_in_fn(n_theta):
         return tfd.JointDistributionNamed(
             dict(
                 mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
@@ -108,27 +108,37 @@ def run(cfg: DictConfig):
             batch_ndims=1
         )
 
-    # def f_in_fn_train(times):
-        # logits = jnp.log(jnp.ones((n_theta,)) / n_theta)
-        # return tfd.JointDistributionNamed(
-            # dict(
-                # mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
-                # theta = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
-                # theta_index = tfd.Categorical(logits=logits),
-                # obs = lambda theta_index: tfd.Deterministic(
-                    # times[0, theta_index, ...].reshape(
-                        # theta_index.shape[:1] + (1, n_obs, 1)
-                    # )
-                # ),
-            # ),
-            # batch_ndims=1
-        # )
+    def f_in_fn_observed(n_theta, times):
+        if n_theta == 1:
+            return tfd.JointDistributionNamed(
+                dict(
+                    mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                    theta = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                    theta_index = tfd.FiniteDiscrete(
+                        jnp.arange(n_theta),
+                        logits=jnp.ones((n_theta,))
+                    ),
+                    obs = lambda theta_index: tfd.Deterministic(
+                        jnp.expand_dims(times[0, theta_index, ...], 1)
+                    ),
+                ),
+                batch_ndims=1
+            )
+        elif n_theta == times.shape[1]:
+            return tfd.JointDistributionNamed(
+                dict(
+                    mu = tfd.Deterministic(jnp.zeros((1, 1))), # dummy f_in for indexing purposes
+                    theta = tfd.Deterministic(jnp.zeros((n_theta, 1))), # dummy f_in for indexing purposes
+                    obs = tfd.Deterministic(times[0]),
+                ),
+                batch_ndims=1
+            )
 
     key = jr.PRNGKey(cfg.seed)
 
     theta_key, y_key, f_in_key, key = jr.split(key, 4)
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
-    f_in: dict = f_in_fn(n_obs, n_theta).sample((1,), seed=f_in_key) #type:ignore
+    f_in: dict = f_in_fn(n_theta).sample((1,), seed=f_in_key) #type:ignore
     y_observed = simulator_fn(y_key, theta_truth, f_in)
 
     rngs = nnx.Rngs(key)
@@ -158,6 +168,18 @@ def run(cfg: DictConfig):
 
     train_key, key = jr.split(key)
     logger.info("Starting SFMPE bottom-up training")
+    if cfg.f_in_sample == 'observed':
+        f_in_fn_train = f_in_fn_observed
+        f_in_args = (1, f_in['obs'])
+        f_in_args_global = (n_theta, f_in['obs'])
+    elif cfg.f_in_sample == 'prior':
+        f_in_fn_train = f_in_fn
+        f_in_args = (1,)
+        f_in_args_global = (n_theta,)
+    else:
+        raise ValueError(f"Invalid f_in_sample: {cfg.f_in_sample}")
+    
+
     start_time = time.time()
     labels, slices, masks = train_bottom_up(
         train_key,
@@ -175,9 +197,9 @@ def run(cfg: DictConfig):
         independence,
         optimiser=optax.adam(cfg.training.learning_rate),
         batch_size=int(n_simulations * cfg.training.batch_size_fraction),
-        f_in=f_in_fn,
-        f_in_args=(n_obs, 1),
-        f_in_args_global=(n_obs, n_theta),
+        f_in=f_in_fn_train,
+        f_in_args=f_in_args,
+        f_in_args_global=f_in_args_global,
         f_in_target=f_in
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")

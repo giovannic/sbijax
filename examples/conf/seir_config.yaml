@@ -8,7 +8,7 @@ defaults:
 
 # SVEIR model parameters
 n_timesteps: 200    # Total simulation timesteps
-n_obs: 10            # Number of observations to sample
+n_obs: 20            # Number of observations to sample
 n_sites: 20          # Number of observation sites
 
 # ODE simulation parameters
@@ -23,6 +23,9 @@ n_epochs: 1        # Number of epochs per round (test setting)
 
 # Model hyperparameters
 n_post_samples: 1000  # Number of posterior samples
+
+# F_in_sample
+f_in_sample: "observed" # Options: "observed", "prior"
 
 # Training configuration
 training:
