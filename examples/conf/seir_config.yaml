@@ -8,7 +8,7 @@ defaults:
 
 # SVEIR model parameters
 n_timesteps: 200    # Total simulation timesteps
-n_obs: 20            # Number of observations to sample
+n_obs: 5            # Number of observations to sample
 n_sites: 20          # Number of observation sites
 
 # ODE simulation parameters
