@@ -21,7 +21,7 @@ n_rounds: 1        # Number of training rounds (test setting)
 n_epochs: 1        # Number of epochs per round (test setting)
 
 # Model hyperparameters
-n_post_samples: 1000  # Number of posterior samples
+n_post_samples: 100  # Number of posterior samples
 
 # F_in_sample
 f_in_sample: "observed" # Options: "observed", "prior"
@@ -34,9 +34,8 @@ training:
 # MCMC configuration
 mcmc:
   n_chains: 4
-  n_burnin: 1000
-  step_size: 0.1
-  max_doublings: 5
+  step_size: 0.001
+  max_doublings: 3
 
 # Random seed
 seed: 42

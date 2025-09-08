@@ -29,6 +29,7 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
 
 from tensorflow_probability.substrates.jax import bijectors as tfb
+import matplotlib.pyplot as plt
 import arviz as az
 
 def seir_dynamics(
@@ -416,7 +417,7 @@ def run(cfg: DictConfig) -> None:
     start_time = time.time()
 
     # Sample from MCMC
-    n_burnin = cfg.mcmc.n_simulations - cfg.mcmc.n_post_samples
+    n_burnin = cfg.n_simulations - cfg.n_post_samples
     sample_key, init_key, key = jr.split(key, 3)
 
     init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
@@ -448,7 +449,22 @@ def run(cfg: DictConfig) -> None:
     logger.info(f"Summarising MCMC posterior")
     print(az.summary(posterior))
     logger.info(f"MCMC summarisation completed in {time.time() - start_time:.2f} seconds")
-    logger.info(f'Summarising MCMC')
+
+    az.plot_posterior(
+        posterior,
+        var_names=['beta_0', 'alpha', 'sigma'],
+        ref_val=[
+            float(theta_truth['beta_0'][0, 0, 0]),
+            float(theta_truth['alpha'][0, 0, 0]),
+            float(theta_truth['sigma'][0, 0, 0])
+        ],
+    )
+
+    # Use Hydra's output directory
+    hydra_cfg = HydraConfig.get()
+    out_dir = Path(hydra_cfg.runtime.output_dir)
+    plt.savefig(out_dir / "seir_mcmc_posterior.png", dpi=300)
+    plt.close()
    
     logger.info("SEIR MCMC experiment completed successfully!")
 
