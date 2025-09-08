@@ -75,6 +75,7 @@ def seir_dynamics(
 
 def prior_fn(n):
     """Global prior distribution."""
+    t_season_spread = 1./50.
     return tfd.JointDistributionNamed(
         dict(
             # Global parameters (independent of obs by exchangeability)
@@ -84,9 +85,9 @@ def prior_fn(n):
             
             # Local parameters are independent of global parameters
             A = tfd.Uniform(jnp.zeros((n, 1)), jnp.ones((n, 1))),
-            T_season = tfd.Normal(
-                jnp.full((n, 1), 365.0), 
-                jnp.full((n, 1), 50.0)
+            T_season = tfd.Gamma(
+                jnp.full((n, 1), 365.0 * t_season_spread), 
+                jnp.full((n, 1), t_season_spread)
             ),
             phi = tfd.Uniform(
                 jnp.zeros((n, 1)), 
@@ -313,7 +314,7 @@ def run(cfg: DictConfig) -> None:
         'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
         'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
         'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=1.0)),
-        'T_season': tfb.Identity(),  # Normal distribution is already unconstrained
+        'T_season': tfb.Invert(tfb.Softplus()),
         'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
     }
     
@@ -385,13 +386,15 @@ def run(cfg: DictConfig) -> None:
     
     # Create MCMC bijector
     flat_theta_bijector = create_flat_blockwise_bijector(repr_theta, bijector_specs, n_sites)
-    
+
     # Create proxy functions for MCMC sampling
     def flat_prior_fn(key: Array, n_samples: int) -> Array:
         """Prior function compatible with FMPE interface"""
         theta_samples = prior_fn(n_sites).sample((n_samples,), seed=key)
         # Flatten and transform to unconstrained space
         return flatten_theta_dict(theta_samples)
+
+    prior = prior_fn(n_sites)
 
     def flat_simulator_log_prob(theta_flat: Array) -> Array:
         """Simulator function compatible with FMPE interface"""
@@ -405,19 +408,18 @@ def run(cfg: DictConfig) -> None:
             f_in
         )
         sim_dist = simulator_dist(theta_dict, f_in_matched)
-        return jnp.sum(sim_dist.log_prob(y_observed), axis=(1, 2))
-
+        prior_p = prior.log_prob(theta_dict)
+        return jnp.sum(prior_p, axis=1) + jnp.sum(sim_dist.log_prob(y_observed), axis=(1, 2))
 
     # Train using round-based approach
     logger.info("Starting MCMC sampling")
     start_time = time.time()
 
     # Sample from MCMC
-    n_burnin = cfg.mcmc.n_burnin
+    n_burnin = cfg.mcmc.n_simulations - cfg.mcmc.n_post_samples
     sample_key, init_key, key = jr.split(key, 3)
 
     init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
-
     kernel = tfp.mcmc.TransformedTransitionKernel(
         inner_kernel=tfp.mcmc.SliceSampler(
             target_log_prob_fn=flat_simulator_log_prob,
@@ -434,25 +436,19 @@ def run(cfg: DictConfig) -> None:
         kernel=kernel,
         seed=sample_key
     )
+
     logger.info(f'MCMC posterior mean: {jnp.mean(mcmc_posterior_samples.all_states, axis=(0, 1))}')
     logger.info(f"MCMC posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
     logger.info(f'Analysing MCMC')
     start_time = time.time()
     logger.info(f"Converting MCMC posterior to az format")
-    post_dict = reconstruct_theta_dict(
-        jnp.swapaxes(
-            mcmc_posterior_samples.all_states,
-            0,
-            1
-        )
-    )
+    post_dict = reconstruct_theta_dict(jnp.swapaxes(mcmc_posterior_samples.all_states, 0, 1))
     posterior = az.from_dict(posterior=post_dict)
     logger.info(f"Summarising MCMC posterior")
     print(az.summary(posterior))
     logger.info(f"MCMC summarisation completed in {time.time() - start_time:.2f} seconds")
     logger.info(f'Summarising MCMC')
-
    
     logger.info("SEIR MCMC experiment completed successfully!")
 
