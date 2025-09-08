@@ -329,26 +329,7 @@ def run(cfg: DictConfig) -> None:
             flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], n_sites))
         return jnp.concatenate(flattened_parts, axis=1)
     
-    def reconstruct_theta_dict(theta_flat: Array) -> Dict[str, Array]:
-        """Reconstruct structured theta from flattened array."""
-        theta_dict = {}
-        idx = 0
-        
-        # Global parameters (3 parameters, 1 each)
-        theta_dict['beta_0'] = theta_flat[..., idx:idx+1, None]
-        idx += 1
-        theta_dict['alpha'] = theta_flat[..., idx:idx+1, None]
-        idx += 1
-        theta_dict['sigma'] = theta_flat[..., idx:idx+1, None]
-        idx += 1
-        
-        # Site-specific parameters (3 parameters, n_sites each)
-        for param_name in ['A', 'T_season', 'phi']:
-            theta_dict[param_name] = theta_flat[..., idx:idx+n_sites, None]
-            idx += n_sites
-            
-        return theta_dict
-    
+   
     def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs: Dict[str, tfb.Bijector], n_sites: int) -> tfb.Bijector:
         """Create blockwise bijector for FMPE using same Z-scaling as SFMPE."""
         individual_bijectors = []
@@ -400,7 +381,7 @@ def run(cfg: DictConfig) -> None:
     def flat_simulator_log_prob(theta_flat: Array) -> Array:
         """Simulator function compatible with FMPE interface"""
         # Reconstruct structured theta from flat representation
-        theta_dict = reconstruct_theta_dict(theta_flat)
+        theta_dict = reconstruct_theta_dict(theta_flat, n_sites)
         
         # Run simulator
         n_simulations = theta_flat.shape[0]
@@ -444,7 +425,10 @@ def run(cfg: DictConfig) -> None:
     logger.info(f'Analysing MCMC')
     start_time = time.time()
     logger.info(f"Converting MCMC posterior to az format")
-    post_dict = reconstruct_theta_dict(jnp.swapaxes(mcmc_posterior_samples.all_states, 0, 1))
+    post_dict = reconstruct_theta_dict(
+        jnp.swapaxes(mcmc_posterior_samples.all_states, 0, 1),
+        n_sites
+    )
     posterior = az.from_dict(posterior=post_dict)
     logger.info(f"Summarising MCMC posterior")
     print(az.summary(posterior))
@@ -466,7 +450,176 @@ def run(cfg: DictConfig) -> None:
     plt.savefig(out_dir / "seir_mcmc_posterior.png", dpi=300)
     plt.close()
    
+    # Generate posterior predictive checks
+    logger.info("Generating posterior predictive check plots")
+    ppc_key, key = jr.split(key)
+    plot_posterior_predictive_checks(
+        mcmc_posterior_samples=mcmc_posterior_samples,
+        theta_truth=theta_truth,
+        y_observed=y_observed,
+        f_in=f_in,
+        cfg=cfg,
+        out_dir=out_dir,
+        key=ppc_key
+    )
+    
     logger.info("SEIR MCMC experiment completed successfully!")
+
+
+def plot_posterior_predictive_checks(
+    mcmc_posterior_samples: Array,
+    theta_truth: Dict[str, Array],
+    y_observed: Dict[str, Array],
+    f_in: Dict[str, Array],
+    cfg: DictConfig,
+    out_dir: Path,
+    key: Array
+) -> None:
+    """
+    Generate posterior predictive check plots showing incidence trajectories.
+    
+    Creates separate plots for each site showing:
+    - True trajectory (solid line) from theta_truth
+    - 95% credible bands from posterior samples (shaded area)
+    - Observed data points (crosses) at observation times
+    
+    Parameters
+    ----------
+    mcmc_posterior_samples : Array
+        MCMC samples from posterior distribution
+    theta_truth : Dict[str, Array]
+        Ground truth parameters used to generate observations
+    y_observed : Dict[str, Array]
+        Observed incidence data
+    f_in : Dict[str, Array]
+        Functional input containing observation times
+    cfg : DictConfig
+        Configuration parameters
+    out_dir : Path
+        Output directory for saving plots
+    key : Array
+        Random key for posterior sampling
+    """
+    n_sites = cfg.n_sites
+    n_timesteps = cfg.n_timesteps
+    population = cfg.population
+    I0_prop = cfg.I0_prop
+    
+    # Create dense time grid for smooth trajectories
+    t_dense = jnp.linspace(0, n_timesteps, n_timesteps * 4)
+    
+    # Initial conditions
+    I0 = population * I0_prop
+    S0 = population - I0
+    initial_state = jnp.array([S0, 0.0, I0, 0.0])  # [S, E, I, R]
+    
+    def solve_trajectory(params_dict: Dict[str, Array], times: Array) -> Array:
+        """Solve SEIR ODE for given parameters and return incidence."""
+        def ode_func(state, t):
+            return seir_dynamics(state, t, params_dict)
+        
+        solution = odeint(ode_func, initial_state, times)
+        exposed = solution[:, 1]  # E compartment
+        incidence = params_dict['alpha'] * exposed
+        return jnp.maximum(incidence, 1e-8)
+    
+    # Generate true trajectories for each site
+    true_trajectories = []
+    for site_idx in range(n_sites):
+        params_dict = {
+            'beta_0': theta_truth['beta_0'][0, 0, 0],
+            'alpha': theta_truth['alpha'][0, 0, 0],
+            'sigma': theta_truth['sigma'][0, 0, 0],
+            'A': theta_truth['A'][0, site_idx, 0],
+            'T_season': theta_truth['T_season'][0, site_idx, 0],
+            'phi': theta_truth['phi'][0, site_idx, 0]
+        }
+        true_traj = solve_trajectory(params_dict, t_dense)
+        true_trajectories.append(true_traj)
+    
+    # Convert MCMC samples to structured format
+    post_dict = reconstruct_theta_dict(
+        mcmc_posterior_samples.all_states,
+        n_sites
+    )
+    
+    # Flatten first two dimensions using tree.map
+    flattened_post = tree.map(
+        lambda x: x.reshape((x.shape[0] * x.shape[1],) + x.shape[2:]),
+        post_dict
+    )
+    
+    n_total_samples = flattened_post['beta_0'].shape[0]
+    n_ensemble = min(100, n_total_samples)
+    ensemble_indices = jr.choice(key, n_total_samples, shape=(n_ensemble,), replace=False)
+    
+    # Sample parameters using tree.map
+    sampled_post = tree.map(
+        lambda x: x[ensemble_indices],
+        flattened_post
+    )
+    
+    # Generate posterior trajectories for each site
+    posterior_trajectories = {site_idx: [] for site_idx in range(n_sites)}
+    
+    for sample_idx in range(n_ensemble):
+        for site_idx in range(n_sites):
+            params_dict = {
+                'beta_0': sampled_post['beta_0'][sample_idx, 0],
+                'alpha': sampled_post['alpha'][sample_idx, 0],
+                'sigma': sampled_post['sigma'][sample_idx, 0],
+                'A': sampled_post['A'][sample_idx, site_idx],
+                'T_season': sampled_post['T_season'][sample_idx, site_idx],
+                'phi': sampled_post['phi'][sample_idx, site_idx]
+            }
+            
+            traj = solve_trajectory(params_dict, t_dense)
+            posterior_trajectories[site_idx].append(traj)
+    
+    # Convert to arrays and compute percentiles
+    for site_idx in range(n_sites):
+        posterior_trajectories[site_idx] = jnp.array(posterior_trajectories[site_idx])
+    
+    # Create plots for each site
+    for site_idx in range(n_sites):
+        plt.figure(figsize=(10, 6))
+        
+        # Convert to cases per 100,000
+        scale_factor = 100000.0 / population
+        
+        # Plot true trajectory
+        true_scaled = true_trajectories[site_idx] * scale_factor
+        plt.plot(t_dense, true_scaled, 'k-', linewidth=2, label='True trajectory')
+        
+        # Plot posterior credible bands
+        post_traj = posterior_trajectories[site_idx]
+        post_scaled = post_traj * scale_factor
+        percentiles = jnp.percentile(
+            post_scaled,
+            jnp.array([2.5, 97.5]),
+            axis=0
+        )
+        plt.fill_between(
+            t_dense, percentiles[0], percentiles[1], 
+            alpha=0.3, color='blue', label='95% Credible interval'
+        )
+        
+        # Plot observed data points
+        obs_times = f_in['obs'][0, site_idx, :, 0]  # Extract times for this site
+        obs_values = y_observed['obs'][0, site_idx, :, 0]  # Extract observations
+        obs_scaled = obs_values * scale_factor
+        plt.scatter(obs_times, obs_scaled, marker='x', s=50, color='red', 
+                   linewidth=2, label='Observations')
+        
+        plt.xlabel('Time (days)')
+        plt.ylabel('Incidence per 100,000')
+        plt.title(f'Posterior Predictive Check - Site {site_idx + 1}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Save plot
+        plt.savefig(out_dir / f"seir_ppc_site_{site_idx + 1}.png", dpi=300, bbox_inches='tight')
+        plt.close()
 
 
 def _flatten(x: PyTree) -> jnp.ndarray:
@@ -502,6 +655,27 @@ def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8,
     }
     
     return flattened_index
+
+def reconstruct_theta_dict(theta_flat: Array, n_sites: int) -> Dict[str, Array]:
+    """Reconstruct structured theta from flattened array."""
+    theta_dict = {}
+    idx = 0
+    
+    # Global parameters (3 parameters, 1 each)
+    theta_dict['beta_0'] = theta_flat[..., idx:idx+1, None]
+    idx += 1
+    theta_dict['alpha'] = theta_flat[..., idx:idx+1, None]
+    idx += 1
+    theta_dict['sigma'] = theta_flat[..., idx:idx+1, None]
+    idx += 1
+    
+    # Site-specific parameters (3 parameters, n_sites each)
+    for param_name in ['A', 'T_season', 'phi']:
+        theta_dict[param_name] = theta_flat[..., idx:idx+n_sites, None]
+        idx += n_sites
+        
+    return theta_dict
+
 
 @hydra.main(version_base=None, config_path="conf", config_name="seir_mcmc_config")
 def main(cfg: DictConfig) -> None:
