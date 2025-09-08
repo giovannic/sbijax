@@ -41,6 +41,21 @@ def main() -> None:
         type=int, 
         help="Filter results by number of epochs"
     )
+    parser.add_argument(
+        "--task-filter",
+        type=str,
+        help="Filter results by task type (Gaussian, Brownian, SEIR)"
+    )
+    parser.add_argument(
+        "--n-theta",
+        type=int,
+        help="Filter results by number of theta parameters (for Gaussian/Brownian tasks)"
+    )
+    parser.add_argument(
+        "--n-sites",
+        type=int,
+        help="Filter results by number of sites (for SEIR tasks)"
+    )
     
     args = parser.parse_args()
     
@@ -51,6 +66,10 @@ def main() -> None:
         filters['n_rounds'] = args.n_rounds
     if args.n_epochs is not None:
         filters['n_epochs'] = args.n_epochs
+    if args.n_theta is not None:
+        filters['n_theta'] = args.n_theta
+    if args.n_sites is not None:
+        filters['n_sites'] = args.n_sites
     
     metrics = collect_metrics(
         args.output_dir, 
@@ -59,14 +78,20 @@ def main() -> None:
     )
     
     if not metrics:
-        print("No metrics found. Make sure to run hierarchical_gaussian.py first.")
+        print("No metrics found.")
+        if args.task_filter:
+            print(f"No data found for task filter: {args.task_filter}")
         return
+    
+    # Apply task filter if specified
+    if args.task_filter:
+        metrics = {k: v for k, v in metrics.items() if k[0].lower() == args.task_filter.lower()}
     
     # Print summary
     print("\nFound metrics for:")
     for (task, method), data in metrics.items():
         n_sims = [x[0] for x in data]
-        total_runs = sum(len(seed_stats) for _, seed_stats in data)
+        total_runs = sum(len(seed_stats) for _, seed_stats, _ in data)
         print(f"  {task} {method}: {len(data)} parameter sets, "
               f"{total_runs} total runs, simulations: {min(n_sims)}-{max(n_sims)}")
     
