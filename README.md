@@ -22,7 +22,7 @@ python examples/hierarchical_gaussian.py n_simulations=5000 n_epochs=500
 
 #### Parameter sweep (equivalent to the old hg_run.sh):
 ```bash
-python examples/hierarchical_gaussian.py -m n_simulations=1000,2000,3000,4000,5000,6000,7000,8000,9000,10000 n_rounds=1 n_epochs=1000
+python examples/hierarchical_gaussian.py -m n_simulations=1000,5000,10000 n_rounds=1 n_epochs=1000
 ```
 
 #### Plot results:
@@ -30,7 +30,14 @@ python examples/hierarchical_gaussian.py -m n_simulations=1000,2000,3000,4000,50
 python examples/plot_metrics.py --output-dir outputs
 ```
 
-Configuration files are located in `examples/conf/` and can be customized as needed.
+## MCMC results
+
+
+```bash
+JAX_ENABLE_X64=1 python examples/seir_mcmc.py n_simulations=1000 n_post_samples=1000 mcmc.n_burnin=1000 mcmc.max_doublings=3 mcmc.step_size=0.001 n_epochs=1 n_rounds=1 n_sites=2 n_obs=5
+```
+
+Configuration files are located in `examples/conf/` and can be customised as needed.
 
 ## Testing
 
@@ -70,3 +77,4 @@ python -m pytest test/ -m ""
 - **Flow diagnostic tests**: Tests for validating flow-based models (marked with `@pytest.mark.flow_diagnostics`)
 
 The default configuration excludes slow and flow diagnostic tests to keep the development feedback loop fast.
+
