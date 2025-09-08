@@ -140,11 +140,11 @@ def create_simulator_fn(
     population: int = 10000,
     I0_prop: float = 0.001
 ) -> Callable:
-    """Create simulator function for SVEIR dynamics."""
+    """Create simulator function for SEIR dynamics."""
     
     def simulator_fn(key: Array, theta: Dict[str, Array], f_in: dict) -> Dict[str, Array]:
         """
-        Simulate SVEIR dynamics and return indexed observations.
+        Simulate SEIR dynamics and return indexed observations.
         
         Args:
             key: Random key

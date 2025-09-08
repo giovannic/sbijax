@@ -7,7 +7,7 @@ configurations, collect metrics, and create plots from Hydra output directories.
 
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 import matplotlib.pyplot as plt
 import numpy as np
 from omegaconf import OmegaConf
@@ -37,7 +37,7 @@ def collect_metrics(
     base_dir: Path, 
     target_variable: str,
     filters: Optional[Dict[str, int]] = None
-) -> Dict[Tuple[str, str], List[Tuple[int, List[float]]]]:
+) -> Dict[Tuple[str, str], List[Tuple[int, List[float], List[List[float]]]]]:
     """
     Collect LC2ST metrics from all Hydra runs, grouped by task and method.
     
@@ -47,14 +47,14 @@ def collect_metrics(
         filters: Dictionary of config filters to apply (e.g., {'n_rounds': 10})
         
     Returns:
-        Dictionary mapping (task, method) tuples to list of (target_value, [seed_stats])
-        where task is 'Gaussian' or 'Brownian' and method is 'FMPE' or 'TFMPE'
+        Dictionary mapping (task, method) tuples to list of (target_value, [seed_stats], [null_stats_per_seed])
+        where task is 'Gaussian', 'Brownian', or 'SEIR' and method is 'FMPE', 'TFMPE (prior)', or 'TFMPE (observed)'
     """
     if filters is None:
         filters = {}
         
-    # Store data grouped by (task, method, target_value, seed)
-    raw_data = {}
+    # Store data grouped by (task, method, target_value)
+    raw_data = {}  # (task, method, target_value) -> [(main_stat, null_stats), ...]
     # Final metrics grouped by (task, method)
     metrics = {}
     
@@ -108,10 +108,17 @@ def collect_metrics(
             if not method_dir.is_dir() or method_dir.name.startswith('.'):
                 continue
                 
-            # Rename SFMPE to TFMPE (Tokenised Flow Matching for Posterior Estimation)
+            # Enhanced method naming with f_in sampling distinction
             method_name = method_dir.name.upper()
             if method_name == 'SFMPE':
-                method_name = 'TFMPE'
+                # Check f_in_sample parameter to distinguish TFMPE variants
+                f_in_sample = config.get('f_in_sample', 'prior')
+                if f_in_sample == 'observed':
+                    method_name = 'TFMPE (observed)'
+                else:
+                    method_name = 'TFMPE (prior)'
+            elif method_name == 'FMPE':
+                method_name = 'FMPE'
                 
             stats_file = method_dir / 'stats.json'
             
@@ -123,23 +130,29 @@ def collect_metrics(
                     stats = json.load(f)
                     
                 main_stat = stats.get('main_stat')
+                null_stats = stats.get('null_stats', [])
                 if main_stat is not None:
                     # Store in raw_data grouped by (task, method, target_value)
                     key = (task, method_name, target_value)
                     if key not in raw_data:
                         raw_data[key] = []
-                    raw_data[key].append(main_stat)
+                    raw_data[key].append((main_stat, null_stats))
                     
             except (json.JSONDecodeError, KeyError) as e:
                 print(f"Warning: Failed to parse {stats_file}: {e}")
                 continue
     
     # Convert raw_data to final metrics format
-    for (task, method, target_value), seed_stats in raw_data.items():
+    for (task, method, target_value), seed_data in raw_data.items():
         task_method_key = (task, method)
         if task_method_key not in metrics:
             metrics[task_method_key] = []
-        metrics[task_method_key].append((target_value, seed_stats))
+        
+        # Separate main stats and null stats
+        main_stats = [data[0] for data in seed_data]
+        null_stats_per_seed = [data[1] for data in seed_data]
+        
+        metrics[task_method_key].append((target_value, main_stats, null_stats_per_seed))
     
     # Sort by target variable value
     for task_method_key in metrics:
@@ -179,7 +192,7 @@ def detect_task_type(run_dir: Path, config: Dict[str, Any]) -> Optional[str]:
 
 
 def plot_metrics(
-    metrics: Dict[Tuple[str, str], List[Tuple[int, List[float]]]], 
+    metrics: Dict[Tuple[str, str], List[Tuple[int, List[float], List[List[float]]]]], 
     output_path: Path,
     x_label: str,
     title: str
@@ -188,15 +201,16 @@ def plot_metrics(
     Create separate plots for each task comparing LC2ST statistics with confidence intervals.
     
     Args:
-        metrics: Dictionary mapping (task, method) to (x_value, [seed_stats]) pairs
+        metrics: Dictionary mapping (task, method) to (x_value, [seed_stats], [null_stats_per_seed]) tuples
         output_path: Base path to save the plots (will be modified for each task)
         x_label: Label for the x-axis
         title: Base title for the plots
     """
     # Color scheme for methods
     method_colors = {
-        'FMPE': '#1f77b4',   # Blue
-        'TFMPE': '#ff7f0e'   # Orange
+        'FMPE': '#1f77b4',           # Blue
+        'TFMPE (prior)': '#ff7f0e',  # Orange
+        'TFMPE (observed)': '#2ca02c' # Green
     }
     
     # Group metrics by task
@@ -208,9 +222,6 @@ def plot_metrics(
     
     # Create separate plot for each task
     for task, task_metrics in tasks_data.items():
-        if not task_metrics:
-            continue
-            
         plt.figure(figsize=(10, 6))
         
         # Get all x_values for this task to set consistent axis
@@ -219,14 +230,12 @@ def plot_metrics(
         all_stds = []
         
         for method, data in task_metrics.items():
-            if not data:
-                continue
                 
             x_values = []
             y_means = []
             y_stds = []
             
-            for x_value, seed_stats in data:
+            for x_value, seed_stats, null_stats_per_seed in data:
                 x_values.append(x_value)
                 y_means.append(np.mean(seed_stats))
                 y_stds.append(np.std(seed_stats))
@@ -248,6 +257,17 @@ def plot_metrics(
             # Plot confidence interval (mean ± std)
             plt.fill_between(x_values, y_means - y_stds, y_means + y_stds, 
                             color=color, alpha=0.2)
+            
+            # Plot 95% quantile of null statistics as dotted line
+            null_95_quantiles = []
+            for x_value, seed_stats, null_stats_per_seed in data:
+                # Flatten all null stats for this parameter value across all seeds
+                all_null_stats = [stat for seed_null_stats in null_stats_per_seed 
+                                for stat in seed_null_stats]
+                null_95_quantiles.append(np.percentile(all_null_stats, 95))
+            
+            plt.plot(x_values, null_95_quantiles, '--', color=color, 
+                    linewidth=1.5, alpha=0.7, label=f'{method} (95% null)')
         
         plt.xlabel(x_label)
         plt.ylabel('LC2ST Statistic')
@@ -256,14 +276,12 @@ def plot_metrics(
         plt.grid(True, alpha=0.3)
         
         # Set discrete x-axis ticks
-        if all_x_values:
-            sorted_x_values = sorted(all_x_values)
-            plt.xticks(sorted_x_values)
+        sorted_x_values = sorted(all_x_values)
+        plt.xticks(sorted_x_values)
         
         # Set reasonable axis limits
-        if all_means:
-            max_val = max(np.array(all_means) + np.array(all_stds))
-            plt.ylim(0, max_val * 1.1)
+        max_val = max(np.array(all_means) + np.array(all_stds))
+        plt.ylim(0, max_val * 1.1)
         
         plt.tight_layout()
         
