@@ -34,9 +34,11 @@ training:
 
 # MCMC configuration
 mcmc:
+  sampler: "slice"
   n_chains: 4
   step_size: 0.001
   max_doublings: 3
+  max_tree_depth: 2
 
 # Random seed
 seed: 42

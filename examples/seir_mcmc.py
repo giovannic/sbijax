@@ -17,23 +17,20 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Callable, Dict
-from jaxtyping import PyTree, Array
+from jaxtyping import Array
 import hydra
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 
-from jax import numpy as jnp, random as jr, tree, vmap, jit
+from jax import numpy as jnp, random as jr, tree, jit
 import tensorflow_probability.substrates.jax as tfp
-from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
 
 import arviz as az
 from seir_utils import (
-    seir_dynamics, prior_fn, create_simulator_dist, create_simulator_fn,
-    apply_dequantization, f_in_fn, f_in_fn_observed, flatten_theta_dict,
-    create_flat_blockwise_bijector, reconstruct_theta_dict, _flatten,
-    flatten_f_in
+    prior_fn, create_simulator_dist, create_simulator_fn,
+    f_in_fn, flatten_theta_dict,
+    create_flat_blockwise_bijector, reconstruct_theta_dict
 )
 
 
@@ -118,25 +115,50 @@ def run(cfg: DictConfig) -> None:
     n_burnin = cfg.n_simulations - cfg.n_post_samples
     sample_key, init_key, key = jr.split(key, 3)
 
-    init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
-    kernel = tfp.mcmc.TransformedTransitionKernel(
-        inner_kernel=tfp.mcmc.SliceSampler(
-            target_log_prob_fn=flat_simulator_log_prob,
-            step_size=cfg.mcmc.step_size,
-            max_doublings=cfg.mcmc.max_doublings
-        ),
-        bijector=flat_theta_bijector
-    )
+    if cfg.mcmc.sampler == "slice":
+        init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+        kernel = tfp.mcmc.TransformedTransitionKernel(
+            inner_kernel=tfp.mcmc.SliceSampler(
+                target_log_prob_fn=flat_simulator_log_prob,
+                step_size=cfg.mcmc.step_size,
+                max_doublings=cfg.mcmc.max_doublings
+            ),
+            bijector=flat_theta_bijector
+        )
 
-    mcmc_posterior_samples = tfp.mcmc.sample_chain(
-        num_results=n_post_samples,
-        num_burnin_steps=n_burnin,
-        current_state=init_state,
-        kernel=kernel,
-        seed=sample_key
-    )
+        mcmc_posterior_samples = tfp.mcmc.sample_chain(
+            num_results=n_post_samples,
+            num_burnin_steps=n_burnin,
+            current_state=init_state,
+            kernel=kernel,
+            seed=sample_key
+        )
+        mcmc_posterior_samples = mcmc_posterior_samples.all_states
+    elif cfg.mcmc.sampler == "nuts":
+        from numpyro.infer import MCMC, NUTS
+        init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
 
-    logger.info(f'MCMC posterior mean: {jnp.mean(mcmc_posterior_samples.all_states, axis=(0, 1))}')
+        mcmc = MCMC(
+            NUTS(
+                potential_fn=lambda theta: flat_simulator_log_prob(
+                    theta[None, ...]
+                )[0],
+                step_size=cfg.mcmc.step_size,
+                max_tree_depth=cfg.mcmc.max_tree_depth,
+                adapt_step_size=True
+            ),
+            num_warmup=n_burnin,
+            num_samples=n_post_samples,
+            # chain_method='vectorized',
+            num_chains=cfg.mcmc.n_chains,
+            jit_model_args=True
+        )
+        mcmc.run(sample_key, init_params=init_state)
+        mcmc_posterior_samples = mcmc.get_samples(group_by_chain=True)
+    else:
+        raise ValueError(f"Unknown MCMC sampler: {cfg.mcmc.sampler}")
+
+    logger.info(f'MCMC posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
     logger.info(f"MCMC posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
     logger.info(f'Analysing MCMC')
@@ -177,8 +199,6 @@ def run(cfg: DictConfig) -> None:
         json.dump(plot_config, f, indent=2)
     
     logger.info("SEIR MCMC estimation completed successfully!")
-
-
 
 @hydra.main(version_base=None, config_path="conf", config_name="seir_mcmc_config")
 def main(cfg: DictConfig) -> None:
