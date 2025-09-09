@@ -24,13 +24,27 @@ from hydra.core.hydra_config import HydraConfig
 
 from jax import numpy as jnp, random as jr, tree, jit
 import tensorflow_probability.substrates.jax as tfp
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
 
 import arviz as az
+import optax
+from flax import nnx
+
+from sfmpe.sfmpe import SFMPE
+from sfmpe.bottom_up import train_bottom_up
+from sfmpe.structured_cnf import StructuredCNF
+from sfmpe.nn.transformer.transformer import Transformer
+from sfmpe.pytree_bijector import (
+    PyTreeBijector, 
+    create_zscaling_bijector_tree
+)
+
 from seir_utils import (
     prior_fn, create_simulator_dist, create_simulator_fn,
-    f_in_fn, flatten_theta_dict,
-    create_flat_blockwise_bijector, reconstruct_theta_dict
+    f_in_fn, flatten_theta_dict, apply_dequantization,
+    create_flat_blockwise_bijector, reconstruct_theta_dict,
+    f_in_fn_observed, _flatten, flatten_f_in
 )
 
 
@@ -107,65 +121,264 @@ def run(cfg: DictConfig) -> None:
         prior_p = prior.log_prob(theta_dict)
         return jnp.sum(prior_p, axis=1) + jnp.sum(sim_dist.log_prob(y_observed), axis=(1, 2))
 
-    # Train using round-based approach
-    logger.info("Starting MCMC sampling")
-    start_time = time.time()
+    if cfg.method == "MCMC":
+        # Train using round-based approach
+        logger.info("Starting MCMC sampling")
+        start_time = time.time()
 
-    # Sample from MCMC
-    n_burnin = cfg.n_simulations - cfg.n_post_samples
-    sample_key, init_key, key = jr.split(key, 3)
+        # Sample from MCMC
+        n_burnin = cfg.n_simulations - cfg.n_post_samples
+        sample_key, init_key, key = jr.split(key, 3)
 
-    if cfg.mcmc.sampler == "slice":
-        init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
-        kernel = tfp.mcmc.TransformedTransitionKernel(
-            inner_kernel=tfp.mcmc.SliceSampler(
-                target_log_prob_fn=flat_simulator_log_prob,
-                step_size=cfg.mcmc.step_size,
-                max_doublings=cfg.mcmc.max_doublings
-            ),
-            bijector=flat_theta_bijector
+        if cfg.mcmc.sampler == "slice":
+            init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+            kernel = tfp.mcmc.TransformedTransitionKernel(
+                inner_kernel=tfp.mcmc.SliceSampler(
+                    target_log_prob_fn=flat_simulator_log_prob,
+                    step_size=cfg.mcmc.step_size,
+                    max_doublings=cfg.mcmc.max_doublings
+                ),
+                bijector=flat_theta_bijector
+            )
+
+            mcmc_posterior_samples = tfp.mcmc.sample_chain(
+                num_results=n_post_samples,
+                num_burnin_steps=n_burnin,
+                current_state=init_state,
+                kernel=kernel,
+                seed=sample_key
+            )
+            mcmc_posterior_samples = mcmc_posterior_samples.all_states
+        elif cfg.mcmc.sampler == "nuts":
+            from numpyro.infer import MCMC, NUTS
+            init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+
+            mcmc = MCMC(
+                NUTS(
+                    potential_fn=lambda theta: flat_simulator_log_prob(
+                        theta[None, ...]
+                    )[0],
+                    step_size=cfg.mcmc.step_size,
+                    max_tree_depth=cfg.mcmc.max_tree_depth,
+                    adapt_step_size=True
+                ),
+                num_warmup=n_burnin,
+                num_samples=n_post_samples,
+                # chain_method='vectorized',
+                num_chains=cfg.mcmc.n_chains,
+                jit_model_args=True
+            )
+            mcmc.run(sample_key, init_params=init_state)
+            mcmc_posterior_samples = mcmc.get_samples(group_by_chain=True)
+
+            # change axes so that it's [chain, sample, param]
+            mcmc_posterior_samples = jnp.swapaxes(mcmc_posterior_samples, 0, 1),
+        else:
+            raise ValueError(f"Unknown MCMC sampler: {cfg.mcmc.sampler}")
+
+        logger.info(f'MCMC posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
+        logger.info(f"MCMC posterior sampling completed in {time.time() - start_time:.2f} seconds")
+
+    elif cfg.method == "SFMPE":
+        # SFMPE implementation
+        logger.info("Starting SFMPE training")
+        start_time = time.time()
+        
+        # Apply dequantization to observed data
+        deq_key, key = jr.split(key)
+        y_processed = apply_dequantization(y_observed, deq_key)
+        
+        # Generate representative data for consistent Z-scaling across all bijectors
+        repr_key, key = jr.split(key)
+        repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
+        
+        # For representative data, use the same f_in for all samples
+        repr_f_in = tree.map(lambda leaf: jnp.repeat(leaf, 1000, axis=0), f_in)
+        repr_y_raw = simulator_fn(repr_key, repr_theta, repr_f_in)
+        repr_y = apply_dequantization(repr_y_raw, deq_key)
+        
+        # Define bijector specifications for constrained -> unconstrained transformation
+        bijector_specs = {
+            'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
+            'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
+            'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
+            'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=1.0)),
+            'T_season': tfb.Invert(tfb.Softplus()),
+            'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
+        }
+        
+        y_bijector_specs = {
+            'obs': tfb.Invert(tfb.Softplus())  # Positive observations to unconstrained
+        }
+        
+        # Create Z-scaled bijector maps and PyTreeBijectors
+        theta_bijector_map = create_zscaling_bijector_tree(repr_theta, repr_theta, bijector_specs)
+        sfmpe_theta_bijector = PyTreeBijector(theta_bijector_map, repr_theta)
+        
+        y_bijector_map = create_zscaling_bijector_tree(repr_y, repr_y, y_bijector_specs)
+        sfmpe_y_bijector = PyTreeBijector(y_bijector_map, repr_y)
+        
+        # Transform observations to unconstrained space
+        y_unconstrained = sfmpe_y_bijector.forward(y_processed)
+        
+        # Create wrapped functions for train_bottom_up
+        def wrapped_prior_fn(n):
+            """Prior function that returns TransformedDistribution."""
+            base_prior = prior_fn(n)
+            return tfd.TransformedDistribution(
+                base_prior, 
+                sfmpe_theta_bijector,
+                name="transformed_prior"
+            )
+        
+        def p_local(g, n):
+            """Local prior distribution for site-specific parameters (independent of global)."""
+            n_sims = g['beta_0'].shape[0]
+            t_season_spread = 1./50.
+            return tfd.JointDistributionNamed(
+                dict(
+                    # Site-specific seasonal parameters  
+                    A = tfd.Uniform(jnp.zeros((n_sims, n, 1)), jnp.ones((n_sims, n, 1))),
+                    T_season = tfd.Gamma(
+                        jnp.full((n_sims, n, 1), 365.0 * t_season_spread), 
+                        jnp.full((n_sims, n, 1), t_season_spread)
+                    ),
+                    phi = tfd.Uniform(
+                        jnp.zeros((n_sims, n, 1)), 
+                        jnp.full((n_sims, n, 1), 2*jnp.pi)
+                    )
+                ),
+                batch_ndims=1,
+            )
+        
+        def wrapped_p_local(g, n):
+            """Local prior function that returns TransformedDistribution."""
+            base_local = p_local(g, n)
+            return tfd.TransformedDistribution(
+                base_local,
+                sfmpe_theta_bijector,  # Same bijector as wrapped_prior_fn
+                name="transformed_local"
+            )
+        
+        def wrapped_simulator_fn(seed, theta, f_in_sample):
+            """Simulator function that handles bijector transformations."""
+            # Transform parameters back to constrained space
+            theta_constrained = sfmpe_theta_bijector.inverse(theta)
+            
+            # Apply original simulator
+            y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
+            y_deq = apply_dequantization(y_constrained, seed)
+            
+            # Transform outputs to unconstrained space
+            return sfmpe_y_bijector.forward(y_deq)
+        
+        # Independence structure for structured inference
+        independence = {
+            'local': ['obs'],  # Observations independent across time/sites
+            'cross': [],
+            'cross_local': [  # Site-specific parameters connect to their observations
+                ('A', 'obs', (0, 0)),
+                ('T_season', 'obs', (0, 0)),
+                ('phi', 'obs', (0, 0))
+            ]
+        }
+        
+        # SFMPE Neural Network Setup
+        rngs = nnx.Rngs(key)
+        transformer_config = {
+            'latent_dim': cfg.sfmpe.transformer.latent_dim,
+            'label_dim': cfg.sfmpe.transformer.label_dim,
+            'index_out_dim': cfg.sfmpe.transformer.index_out_dim,
+            'n_encoder': cfg.sfmpe.transformer.n_encoder,
+            'n_decoder': cfg.sfmpe.transformer.n_decoder,
+            'n_heads': cfg.sfmpe.transformer.n_heads,
+            'n_ff': cfg.sfmpe.transformer.n_ff,
+            'dropout': cfg.sfmpe.transformer.dropout,
+            'activation': nnx.relu,
+        }
+
+        nn = Transformer(
+            transformer_config,
+            value_dim=1,
+            n_labels=7,  # 3 global + 3 site-specific parameters + obs
+            index_dim=1,  # Temporal indexing
+            rngs=rngs
         )
 
-        mcmc_posterior_samples = tfp.mcmc.sample_chain(
-            num_results=n_post_samples,
-            num_burnin_steps=n_burnin,
-            current_state=init_state,
-            kernel=kernel,
-            seed=sample_key
-        )
-        mcmc_posterior_samples = mcmc_posterior_samples.all_states
-    elif cfg.mcmc.sampler == "nuts":
-        from numpyro.infer import MCMC, NUTS
-        init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+        model = StructuredCNF(nn, rngs=rngs)
+        estim = SFMPE(model, rngs=rngs)
 
-        mcmc = MCMC(
-            NUTS(
-                potential_fn=lambda theta: flat_simulator_log_prob(
-                    theta[None, ...]
-                )[0],
-                step_size=cfg.mcmc.step_size,
-                max_tree_depth=cfg.mcmc.max_tree_depth,
-                adapt_step_size=True
-            ),
-            num_warmup=n_burnin,
-            num_samples=n_post_samples,
-            # chain_method='vectorized',
-            num_chains=cfg.mcmc.n_chains,
-            jit_model_args=True
+        # Training
+        train_key, key = jr.split(key)
+        logger.info("Starting SFMPE bottom-up training")
+        
+        # Set up f_in function arguments based on configuration
+        if cfg.f_in_sample == 'observed':
+            f_in_fn_train = f_in_fn_observed
+            f_in_args = (n_obs, 1, f_in)
+            f_in_args_global = (n_obs, n_sites, f_in)
+        elif cfg.f_in_sample == 'prior':
+            f_in_fn_train = f_in_fn
+            f_in_args = (n_obs, 1, n_timesteps)
+            f_in_args_global = (n_obs, n_sites, n_timesteps)
+        else:
+            raise ValueError(f"Invalid f_in_sample: {cfg.f_in_sample}")
+        
+        labels, slices, masks = train_bottom_up(
+            train_key,
+            estim,
+            wrapped_prior_fn,
+            wrapped_p_local,
+            wrapped_simulator_fn,
+            ['beta_0', 'alpha', 'sigma'],  # Global parameters
+            ['A', 'T_season', 'phi'],  # Local parameters
+            n_sites,
+            n_rounds,
+            n_simulations,
+            n_epochs,
+            y_unconstrained,  # Use unconstrained data
+            independence,
+            optimiser=optax.adam(cfg.training.learning_rate),
+            batch_size=int(n_simulations * cfg.training.batch_size_fraction),
+            f_in=f_in_fn_train,
+            f_in_args=f_in_args,
+            f_in_args_global=f_in_args_global,
+            f_in_target=f_in
         )
-        mcmc.run(sample_key, init_params=init_state)
-        mcmc_posterior_samples = mcmc.get_samples(group_by_chain=True)
+        logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
+
+        # Sample SFMPE posterior
+        logger.info("Sampling SFMPE posterior")
+        start_time = time.time()
+        
+        # Create flattened f_in index for posterior sampling
+        f_in_flattened = flatten_f_in(f_in)
+        posterior = estim.sample_posterior(
+            _flatten(y_processed)[..., None],
+            labels,
+            slices,
+            masks=masks,
+            n_samples=n_post_samples,
+            index=f_in_flattened
+        )
+
+        # Transform posterior samples back into constrained space
+        posterior = sfmpe_theta_bijector.inverse(posterior)
+        
+        # Convert SFMPE posterior to the same format as MCMC for downstream analysis
+        mcmc_posterior_samples = _flatten(posterior)[None, ...]
+        
+        logger.info(f'SFMPE posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
+        logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
+        
     else:
-        raise ValueError(f"Unknown MCMC sampler: {cfg.mcmc.sampler}")
-
-    logger.info(f'MCMC posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
-    logger.info(f"MCMC posterior sampling completed in {time.time() - start_time:.2f} seconds")
+        raise ValueError(f"Unknown method: {cfg.method}. Choose 'MCMC' or 'SFMPE'.")
 
     logger.info(f'Analysing MCMC')
     start_time = time.time()
     logger.info(f"Converting MCMC posterior to az format")
     post_dict = reconstruct_theta_dict(
-        jnp.swapaxes(mcmc_posterior_samples.all_states, 0, 1),
+        mcmc_posterior_samples,
         n_sites
     )
     posterior = az.from_dict(posterior=post_dict)
@@ -182,7 +395,7 @@ def run(cfg: DictConfig) -> None:
     jnp.save(out_dir / "theta_truth.npy", theta_truth)
     jnp.save(out_dir / "y_observed.npy", y_observed)
     jnp.save(out_dir / "f_in.npy", f_in)
-    jnp.save(out_dir / "mcmc_posterior_samples.npy", mcmc_posterior_samples.all_states)
+    jnp.save(out_dir / "mcmc_posterior_samples.npy", mcmc_posterior_samples)
     
     # Save configuration parameters needed for plotting
     plot_config = {

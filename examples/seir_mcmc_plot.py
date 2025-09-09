@@ -240,7 +240,7 @@ def main():
     logger.info("Creating posterior distribution plots")
     n_sites = plot_config['n_sites']
     post_dict = reconstruct_theta_dict(
-        jnp.swapaxes(mcmc_posterior_samples, 0, 1),
+        mcmc_posterior_samples,
         n_sites
     )
     posterior = az.from_dict(posterior=post_dict)
