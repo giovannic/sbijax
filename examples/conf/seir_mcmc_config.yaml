@@ -9,6 +9,7 @@ defaults:
 n_timesteps: 200    # Total simulation timesteps
 n_obs: 20            # Number of observations to sample
 n_sites: 20          # Number of observation sites
+n_warmup: 100       # Warmup period to exclude initial epidemic dynamics
 
 # ODE simulation parameters
 dt: 1.0            # Time step size (days)
