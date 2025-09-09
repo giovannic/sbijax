@@ -107,7 +107,8 @@ def create_simulator_dist(
     n_timesteps: int,
     dt: float = 1.0,
     population: int = 10000,
-    I0_prop: float = 0.001
+    I0_prop: float = 0.001,
+    n_warmup: int = 0
 ) -> Callable:
     """Create simulator function for SVEIR dynamics."""
     
@@ -148,8 +149,8 @@ def create_simulator_dist(
                 return seir_dynamics(state, t, params_dict)
             
             # Solve ODE at observation times for this site
-            # Sort times for ODE solver, then reorder results
-            t_eval = obs_times_single[:, 0]  # Extract times (n_obs,)
+            # Add warmup offset to observation times
+            t_eval = obs_times_single[:, 0] + n_warmup  # Extract times (n_obs,)
             sort_indices = jnp.argsort(t_eval)
             t_eval_sorted = t_eval[sort_indices]
             solution = odeint(ode_func, initial_state, t_eval_sorted)
@@ -221,6 +222,7 @@ def run(cfg: DictConfig) -> None:
     n_timesteps = cfg.n_timesteps
     n_obs = cfg.n_obs
     n_sites = cfg.n_sites
+    n_warmup = cfg.n_warmup
     n_simulations = cfg.n_simulations
     n_rounds = cfg.n_rounds
     n_epochs = cfg.n_epochs
@@ -295,7 +297,7 @@ def run(cfg: DictConfig) -> None:
     key = jr.PRNGKey(cfg.seed)
     
     # Create functions
-    simulator_dist = create_simulator_dist(n_timesteps, cfg.dt, cfg.population, cfg.I0_prop)
+    simulator_dist = create_simulator_dist(n_timesteps, cfg.dt, cfg.population, cfg.I0_prop, n_warmup)
     simulator_fn = create_simulator_fn(simulator_dist)
     
     # Generate ground truth and observations
@@ -460,7 +462,8 @@ def run(cfg: DictConfig) -> None:
         f_in=f_in,
         cfg=cfg,
         out_dir=out_dir,
-        key=ppc_key
+        key=ppc_key,
+        n_warmup=n_warmup
     )
     
     logger.info("SEIR MCMC experiment completed successfully!")
@@ -473,7 +476,8 @@ def plot_posterior_predictive_checks(
     f_in: Dict[str, Array],
     cfg: DictConfig,
     out_dir: Path,
-    key: Array
+    key: Array,
+    n_warmup: int
 ) -> None:
     """
     Generate posterior predictive check plots showing incidence trajectories.
@@ -505,8 +509,10 @@ def plot_posterior_predictive_checks(
     population = cfg.population
     I0_prop = cfg.I0_prop
     
-    # Create dense time grid for smooth trajectories
-    t_dense = jnp.linspace(0, n_timesteps, n_timesteps * 4)
+    # Create dense time grid for smooth trajectories including warmup
+    t_dense_full = jnp.linspace(0, n_warmup + n_timesteps, (n_warmup + n_timesteps) * 4)
+    # Create plotting grid (post-warmup only)
+    t_dense_plot = jnp.linspace(0, n_timesteps, n_timesteps * 4)
     
     # Initial conditions
     I0 = population * I0_prop
@@ -523,6 +529,13 @@ def plot_posterior_predictive_checks(
         incidence = params_dict['alpha'] * exposed
         return jnp.maximum(incidence, 1e-8)
     
+    def solve_trajectory_post_warmup(params_dict: Dict[str, Array]) -> Array:
+        """Solve trajectory over full time including warmup, return post-warmup."""
+        full_solution = solve_trajectory(params_dict, t_dense_full)
+        # Extract post-warmup portion by finding indices after warmup
+        warmup_idx = int(len(t_dense_full) * n_warmup / (n_warmup + n_timesteps))
+        return full_solution[warmup_idx:]
+    
     # Generate true trajectories for each site
     true_trajectories = []
     for site_idx in range(n_sites):
@@ -534,7 +547,7 @@ def plot_posterior_predictive_checks(
             'T_season': theta_truth['T_season'][0, site_idx, 0],
             'phi': theta_truth['phi'][0, site_idx, 0]
         }
-        true_traj = solve_trajectory(params_dict, t_dense)
+        true_traj = solve_trajectory_post_warmup(params_dict)
         true_trajectories.append(true_traj)
     
     # Convert MCMC samples to structured format
@@ -573,7 +586,7 @@ def plot_posterior_predictive_checks(
                 'phi': sampled_post['phi'][sample_idx, site_idx]
             }
             
-            traj = solve_trajectory(params_dict, t_dense)
+            traj = solve_trajectory_post_warmup(params_dict)
             posterior_trajectories[site_idx].append(traj)
     
     # Convert to arrays and compute percentiles
@@ -589,7 +602,7 @@ def plot_posterior_predictive_checks(
         
         # Plot true trajectory
         true_scaled = true_trajectories[site_idx] * scale_factor
-        plt.plot(t_dense, true_scaled, 'k-', linewidth=2, label='True trajectory')
+        plt.plot(t_dense_plot, true_scaled, 'k-', linewidth=2, label='True trajectory')
         
         # Plot posterior credible bands
         post_traj = posterior_trajectories[site_idx]
@@ -600,7 +613,7 @@ def plot_posterior_predictive_checks(
             axis=0
         )
         plt.fill_between(
-            t_dense, percentiles[0], percentiles[1], 
+            t_dense_plot, percentiles[0], percentiles[1], 
             alpha=0.3, color='blue', label='95% Credible interval'
         )
         
@@ -611,9 +624,9 @@ def plot_posterior_predictive_checks(
         plt.scatter(obs_times, obs_scaled, marker='x', s=50, color='red', 
                    linewidth=2, label='Observations')
         
-        plt.xlabel('Time (days)')
+        plt.xlabel('Time since warmup (days)')
         plt.ylabel('Incidence per 100,000')
-        plt.title(f'Posterior Predictive Check - Site {site_idx + 1}')
+        plt.title(f'Posterior Predictive Check - Site {site_idx + 1} (Post-warmup)')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
