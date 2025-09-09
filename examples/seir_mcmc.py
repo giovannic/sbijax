@@ -149,6 +149,12 @@ def run(cfg: DictConfig) -> None:
                 seed=sample_key
             )
             mcmc_posterior_samples = mcmc_posterior_samples.all_states
+            # change axes so that it's [chain, sample, param]
+            mcmc_posterior_samples = jnp.swapaxes(
+                mcmc_posterior_samples,
+                0,
+                1
+            )
         elif cfg.mcmc.sampler == "nuts":
             from numpyro.infer import MCMC, NUTS
             init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
@@ -160,7 +166,8 @@ def run(cfg: DictConfig) -> None:
                     )[0],
                     step_size=cfg.mcmc.step_size,
                     max_tree_depth=cfg.mcmc.max_tree_depth,
-                    adapt_step_size=True
+                    adapt_step_size=True,
+                    forward_mode_differentiation=True
                 ),
                 num_warmup=n_burnin,
                 num_samples=n_post_samples,
@@ -170,11 +177,9 @@ def run(cfg: DictConfig) -> None:
             )
             mcmc.run(sample_key, init_params=init_state)
             mcmc_posterior_samples = mcmc.get_samples(group_by_chain=True)
-
-            # change axes so that it's [chain, sample, param]
-            mcmc_posterior_samples = jnp.swapaxes(mcmc_posterior_samples, 0, 1),
         else:
             raise ValueError(f"Unknown MCMC sampler: {cfg.mcmc.sampler}")
+
 
         logger.info(f'MCMC posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
         logger.info(f"MCMC posterior sampling completed in {time.time() - start_time:.2f} seconds")

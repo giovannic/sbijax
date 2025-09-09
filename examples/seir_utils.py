@@ -13,8 +13,7 @@ from typing import Callable, Dict
 from jaxtyping import PyTree, Array
 import jax.numpy as jnp
 from jax import random as jr, vmap
-from jax.experimental.ode import odeint
-import tensorflow_probability.substrates.jax as tfp
+from diffrax import diffeqsolve, ODETerm, Dopri5, SaveAt, ForwardMode
 from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
 
@@ -142,19 +141,35 @@ def create_simulator_dist(
                 'phi': params_single['phi'][site_idx, 0]
             }
 
-            def ode_func(state, t):
-                return seir_dynamics(state, t, params_dict)
+            def vector_field(t, y, args):
+                return seir_dynamics(y, t, params_dict)
             
             # Solve ODE at observation times for this site
             # Add warmup offset to observation times
             t_eval = jnp.concatenate([jnp.array([0.]), obs_times_single[:, 0] + n_warmup])  # Extract times (n_obs,)
             sort_indices = jnp.argsort(t_eval)
             t_eval_sorted = t_eval[sort_indices]
-            solution = odeint(ode_func, initial_state, t_eval_sorted)
+            
+            # Set up diffrax solver
+            term = ODETerm(vector_field)
+            solver = Dopri5()
+            saveat = SaveAt(ts=t_eval_sorted)
+            
+            solution = diffeqsolve(
+                term,
+                solver, 
+                t0=t_eval_sorted[0],
+                t1=t_eval_sorted[-1], 
+                dt0=0.1,
+                y0=initial_state, 
+                saveat=saveat,
+                adjoint=ForwardMode(),
+                max_steps=None
+            )
             
             # Reorder solution to match original time sequence
             reorder_indices = jnp.argsort(sort_indices)
-            solution_reordered = solution[reorder_indices]
+            solution_reordered = solution.ys[reorder_indices]
             
             # Extract incidence - since we're solving at the observation times directly,
             # we return the infection rate (new infections per day) at those times
