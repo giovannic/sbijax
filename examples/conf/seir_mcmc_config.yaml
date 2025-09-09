@@ -40,5 +40,20 @@ mcmc:
   max_doublings: 3
   max_tree_depth: 2
 
+# Method selection
+method: "MCMC"  # Options: "MCMC", "SFMPE"
+
+# SFMPE configuration (used when method: "SFMPE")
+sfmpe:
+  transformer:
+    latent_dim: 64
+    label_dim: 16
+    index_out_dim: 32
+    n_encoder: 2
+    n_decoder: 2
+    n_heads: 4
+    n_ff: 256
+    dropout: 0.1
+
 # Random seed
 seed: 42
