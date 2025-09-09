@@ -50,6 +50,7 @@ def seir_dynamics(
     """
     S, E, I, R = state
     N = S + E + I + R
+    mu = 1. / 50.
     
     # Seasonal transmission rate
     beta = params['beta_0'] * (
@@ -65,12 +66,18 @@ def seir_dynamics(
     s_to_e = lambda_force * S
     e_to_i = params['alpha'] * E
     i_to_r = params['sigma'] * I
+
+    # Mortality
+    mu_i = mu * I
+    mu_e = mu * E
+    mu_r = mu * R
+    rebirth = mu * (E + I + R)
     
     # Derivatives
-    dS = -s_to_e
-    dE = s_to_e - e_to_i
-    dI = e_to_i - i_to_r
-    dR = i_to_r
+    dS = -s_to_e + rebirth
+    dE = s_to_e - e_to_i - mu_e
+    dI = e_to_i - i_to_r - mu_i
+    dR = i_to_r - mu_r
     
     return jnp.array([dS, dE, dI, dR])
 
@@ -110,11 +117,11 @@ def create_simulator_dist(
     I0_prop: float = 0.001,
     n_warmup: int = 0
 ) -> Callable:
-    """Create simulator function for SVEIR dynamics."""
+    """Create simulator function for SEIR dynamics."""
     
     def simulator_dist(theta: Dict[str, Array], f_in: dict) -> tfd.Distribution:
         """
-        Simulate SVEIR dynamics and return indexed observations.
+        Simulate SEIR dynamics and return indexed observations.
         
         Args:
             key: Random key
@@ -144,13 +151,13 @@ def create_simulator_dist(
                 'T_season': params_single['T_season'][site_idx, 0],
                 'phi': params_single['phi'][site_idx, 0]
             }
-            
+
             def ode_func(state, t):
                 return seir_dynamics(state, t, params_dict)
             
             # Solve ODE at observation times for this site
             # Add warmup offset to observation times
-            t_eval = obs_times_single[:, 0] + n_warmup  # Extract times (n_obs,)
+            t_eval = jnp.concatenate([jnp.array([0.]), obs_times_single[:, 0] + n_warmup])  # Extract times (n_obs,)
             sort_indices = jnp.argsort(t_eval)
             t_eval_sorted = t_eval[sort_indices]
             solution = odeint(ode_func, initial_state, t_eval_sorted)
@@ -162,7 +169,8 @@ def create_simulator_dist(
             # Extract incidence - since we're solving at the observation times directly,
             # we return the infection rate (new infections per day) at those times
             # For incidence, we use the infection rate α*E at observation times  
-            exposed = solution_reordered[:, 1]  # E compartment (index 1 in SEIR)
+            exposed = solution_reordered[1:, 1]  # E compartment (index 1 in SEIR)
+
             incidence = params_dict['alpha'] * exposed
             incidence = jnp.maximum(incidence, 1e-8)  # Ensure positive with small delta
             
@@ -177,7 +185,6 @@ def create_simulator_dist(
         # Generate incidence for all sites
         site_indices = jnp.arange(n_sites)
         incidence_batch = solve_batch_sites(site_indices, theta, obs_times)
-        
         return tfd.JointDistributionNamed(
             dict(
                 obs = tfd.Independent(
@@ -306,7 +313,7 @@ def run(cfg: DictConfig) -> None:
     theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
     f_in = f_in_fn(n_obs, n_sites).sample((1,), seed=f_in_key)
     y_observed = simulator_fn(obs_key, theta_truth, f_in)
-    
+
     # Generate representative data for consistent Z-scaling across all bijectors
     repr_key, key = jr.split(key)
     repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
@@ -456,7 +463,7 @@ def run(cfg: DictConfig) -> None:
     logger.info("Generating posterior predictive check plots")
     ppc_key, key = jr.split(key)
     plot_posterior_predictive_checks(
-        mcmc_posterior_samples=mcmc_posterior_samples,
+        mcmc_posterior_samples=mcmc_posterior_samples.all_states, #flatten_theta_dict(repr_theta), 
         theta_truth=theta_truth,
         y_observed=y_observed,
         f_in=f_in,
@@ -552,7 +559,7 @@ def plot_posterior_predictive_checks(
     
     # Convert MCMC samples to structured format
     post_dict = reconstruct_theta_dict(
-        mcmc_posterior_samples.all_states,
+        mcmc_posterior_samples,
         n_sites
     )
     
