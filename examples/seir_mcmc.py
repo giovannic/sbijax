@@ -22,7 +22,7 @@ import hydra
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 
-from jax import numpy as jnp, random as jr, tree, vmap
+from jax import numpy as jnp, random as jr, tree, vmap, jit
 from jax.experimental.ode import odeint
 import tensorflow_probability.substrates.jax as tfp
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -387,6 +387,7 @@ def run(cfg: DictConfig) -> None:
 
     prior = prior_fn(n_sites)
 
+    @jit
     def flat_simulator_log_prob(theta_flat: Array) -> Array:
         """Simulator function compatible with FMPE interface"""
         # Reconstruct structured theta from flat representation
