@@ -16,6 +16,10 @@ from jax import random as jr, vmap
 from diffrax import diffeqsolve, ODETerm, Dopri5, SaveAt, ForwardMode
 from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
+from sfmpe.pytree_bijector import (
+    PyTreeBijector, 
+    create_zscaling_bijector_tree
+)
 
 
 def seir_dynamics(
@@ -70,7 +74,7 @@ def seir_dynamics(
 
 def prior_fn(n):
     """Global prior distribution."""
-    t_season_spread = 1./50.
+    t_season_spread = 1./7.
     return tfd.JointDistributionNamed(
         dict(
             # Global parameters (independent of obs by exchangeability)
@@ -79,7 +83,7 @@ def prior_fn(n):
             sigma = tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
             
             # Local parameters are independent of global parameters
-            A = tfd.Uniform(jnp.zeros((n, 1)), jnp.ones((n, 1))),
+            A = tfd.Uniform(jnp.zeros((n, 1)), jnp.full((n, 1), .2)),
             T_season = tfd.Gamma(
                 jnp.full((n, 1), 365.0 * t_season_spread), 
                 jnp.full((n, 1), t_season_spread)
@@ -87,6 +91,27 @@ def prior_fn(n):
             phi = tfd.Uniform(
                 jnp.zeros((n, 1)), 
                 jnp.full((n, 1), 2*jnp.pi)
+            )
+        ),
+        batch_ndims=1,
+    )
+
+
+def p_local(g, n):
+    """Local prior distribution for site-specific parameters (independent of global)."""
+    n_sims = g['beta_0'].shape[0]
+    t_season_spread = 1./7.
+    return tfd.JointDistributionNamed(
+        dict(
+            # Site-specific seasonal parameters  
+            A = tfd.Uniform(jnp.zeros((n_sims, n, 1)), jnp.full((n_sims, n, 1), .2)),
+            T_season = tfd.Gamma(
+                jnp.full((n_sims, n, 1), 365.0 * t_season_spread), 
+                jnp.full((n_sims, n, 1), t_season_spread)
+            ),
+            phi = tfd.Uniform(
+                jnp.zeros((n_sims, n, 1)), 
+                jnp.full((n_sims, n, 1), 2*jnp.pi)
             )
         ),
         batch_ndims=1,
@@ -295,12 +320,18 @@ def f_in_fn_observed(n_obs: int, n_sites: int, f_in):
 
 
 def flatten_theta_dict(theta_dict: Dict[str, Array]) -> Array:
-    """Flatten theta dictionary to 1D array for FMPE."""
+    """Flatten theta dictionary to 1D array for MCMC/FMPE."""
+    n_sites = theta_dict['A'].shape[-2]
     flattened_parts = []
+    
+    # Global parameters (3 parameters, 1 each)
     for param_name in ['beta_0', 'alpha', 'sigma']:
         flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], 1))
+    
+    # Site-specific parameters (3 parameters, n_sites each)  
     for param_name in ['A', 'T_season', 'phi']:
-        flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], theta_dict[param_name].shape[1]))
+        flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], n_sites))
+    
     return jnp.concatenate(flattened_parts, axis=1)
 
 
@@ -396,3 +427,40 @@ def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8,
     }
     
     return flattened_index
+
+
+def get_standard_bijector_specs() -> Dict[str, tfb.Bijector]:
+    """Get standard bijector specifications for SEIR parameters."""
+    return {
+        'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
+        'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
+        'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
+        'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=0.2)),
+        'T_season': tfb.Invert(tfb.Softplus()),
+        'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
+    }
+
+
+def get_y_bijector_specs() -> Dict[str, tfb.Bijector]:
+    """Get bijector specifications for observation data."""
+    return {
+        'obs': tfb.Invert(tfb.Softplus())  # Positive observations to unconstrained
+    }
+
+
+def create_pytree_bijectors(
+    repr_theta: Dict[str, Array], 
+    repr_y: Dict[str, Array],
+    theta_bijector_specs: Dict[str, tfb.Bijector],
+    y_bijector_specs: Dict[str, tfb.Bijector]
+) -> tuple[PyTreeBijector, PyTreeBijector]:
+    """Create PyTreeBijectors for SFMPE with Z-scaling."""
+        
+    # Create Z-scaled bijector maps and PyTreeBijectors
+    theta_bijector_map = create_zscaling_bijector_tree(repr_theta, repr_theta, theta_bijector_specs)
+    sfmpe_theta_bijector = PyTreeBijector(theta_bijector_map, repr_theta)
+    
+    y_bijector_map = create_zscaling_bijector_tree(repr_y, repr_y, y_bijector_specs)
+    sfmpe_y_bijector = PyTreeBijector(y_bijector_map, repr_y)
+    
+    return sfmpe_theta_bijector, sfmpe_y_bijector

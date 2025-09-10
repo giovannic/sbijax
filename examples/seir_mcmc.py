@@ -41,7 +41,8 @@ from seir_utils import (
     prior_fn, create_simulator_dist, create_simulator_fn,
     f_in_fn, flatten_theta_dict, apply_dequantization,
     create_flat_blockwise_bijector, reconstruct_theta_dict,
-    f_in_fn_observed, _flatten, flatten_f_in
+    f_in_fn_observed, _flatten, flatten_f_in,
+    get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors
 )
 
 
@@ -85,14 +86,7 @@ def run(cfg: DictConfig) -> None:
     prior_samples_flat = flatten_theta_dict(prior_samples_dict)[None, ...]  # Add chain dimension
     
     # Define bijector specifications for constrained -> unconstrained transformation
-    bijector_specs = {
-        'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
-        'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
-        'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
-        'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=1.0)),
-        'T_season': tfb.Invert(tfb.Softplus()),
-        'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
-    }
+    bijector_specs = get_standard_bijector_specs()
 
     # Create MCMC bijector
     flat_theta_bijector = create_flat_blockwise_bijector(repr_theta, bijector_specs, n_sites)
@@ -208,26 +202,10 @@ def run(cfg: DictConfig) -> None:
         repr_y_raw = simulator_fn(repr_key, repr_theta, repr_f_in)
         repr_y = apply_dequantization(repr_y_raw, deq_key)
         
-        # Define bijector specifications for constrained -> unconstrained transformation
-        bijector_specs = {
-            'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
-            'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
-            'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
-            'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=1.0)),
-            'T_season': tfb.Invert(tfb.Softplus()),
-            'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
-        }
-        
-        y_bijector_specs = {
-            'obs': tfb.Invert(tfb.Softplus())  # Positive observations to unconstrained
-        }
-        
-        # Create Z-scaled bijector maps and PyTreeBijectors
-        theta_bijector_map = create_zscaling_bijector_tree(repr_theta, repr_theta, bijector_specs)
-        sfmpe_theta_bijector = PyTreeBijector(theta_bijector_map, repr_theta)
-        
-        y_bijector_map = create_zscaling_bijector_tree(repr_y, repr_y, y_bijector_specs)
-        sfmpe_y_bijector = PyTreeBijector(y_bijector_map, repr_y)
+        # Create Z-scaled bijector maps and PyTreeBijectors  
+        theta_bijector_specs = get_standard_bijector_specs()
+        y_bijector_specs = get_y_bijector_specs()
+        sfmpe_theta_bijector, sfmpe_y_bijector = create_pytree_bijectors(repr_theta, repr_y, theta_bijector_specs, y_bijector_specs)
         
         # Transform observations to unconstrained space
         y_unconstrained = sfmpe_y_bijector.forward(y_processed)
