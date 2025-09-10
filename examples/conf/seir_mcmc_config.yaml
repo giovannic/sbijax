@@ -16,6 +16,9 @@ dt: 1.0            # Time step size (days)
 population: 10000  # Population size
 I0_prop: 0.001     # Initial infection proportion
 
+# N prior
+n_prior_samples: 1000
+
 # Training parameters  
 n_simulations: 1000 # Number of simulations per round
 n_rounds: 1        # Number of training rounds
