@@ -7,8 +7,6 @@ from jax import tree
 import jax.tree_util as tree_util
 from jaxtyping import PyTree, Array
 from tensorflow_probability.substrates.jax import bijectors as tfb
-from tensorflow_probability.substrates.jax import distributions as tfd
-
 
 def _find_bijector_for_path(path, bijector_tree):
     """Find a bijector for a given path, defaulting to Identity."""
