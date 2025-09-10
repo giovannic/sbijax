@@ -159,11 +159,16 @@ def run(cfg: DictConfig) -> None:
             from numpyro.infer import MCMC, NUTS
             init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
 
+            def transformed_log_prob(theta: Array) -> Array:
+                log_prob = flat_simulator_log_prob(theta[None, ...])[0]
+                det = flat_theta_bijector.forward_log_det_jacobian(
+                    theta[None, ...]
+                )[0]
+                return log_prob + det
+
             mcmc = MCMC(
                 NUTS(
-                    potential_fn=lambda theta: flat_simulator_log_prob(
-                        theta[None, ...]
-                    )[0],
+                    potential_fn=transformed_log_prob,
                     step_size=cfg.mcmc.step_size,
                     max_tree_depth=cfg.mcmc.max_tree_depth,
                     adapt_step_size=True,
