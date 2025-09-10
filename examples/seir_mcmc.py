@@ -3,11 +3,8 @@ SEIR (Susceptible-Exposed-Infectious-Recovered) model implementation
 using Flow Matching for Posterior Estimation.
 
 This script implements a modern epidemiological model with:
-- Functional random variables (obs) with temporal indexing
-- PyTree bijectors for continuous data transformation  
-- Both structured (SFMPE) and flat (FMPE) inference approaches
+- Both SFMPE and MCMC inference approaches
 - Hydra configuration management
-- LC2ST evaluation framework
 
 Updated to use latest package interfaces following hierarchical_brownian.py pattern.
 This version performs estimation only and saves results to .npy files.
@@ -22,6 +19,7 @@ import hydra
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 
+import jax
 from jax import numpy as jnp, random as jr, tree, jit
 import tensorflow_probability.substrates.jax as tfp
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -276,7 +274,8 @@ def run(cfg: DictConfig) -> None:
             theta_constrained = sfmpe_theta_bijector.inverse(theta)
             
             # Apply original simulator
-            y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
+            with jax.default_device(jax.devices('cpu')[0]):
+                y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
             y_deq = apply_dequantization(y_constrained, seed)
             
             # Transform outputs to unconstrained space
@@ -376,7 +375,7 @@ def run(cfg: DictConfig) -> None:
         posterior = sfmpe_theta_bijector.inverse(posterior)
         
         # Convert SFMPE posterior to the same format as MCMC for downstream analysis
-        mcmc_posterior_samples = _flatten(posterior)[None, ...]
+        mcmc_posterior_samples = flatten_theta_dict(posterior)[None, ...]
         
         logger.info(f'SFMPE posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
         logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
