@@ -19,7 +19,6 @@ import hydra
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 
-import jax
 from jax import numpy as jnp, random as jr, tree, jit
 import tensorflow_probability.substrates.jax as tfp
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -80,6 +79,11 @@ def run(cfg: DictConfig) -> None:
     repr_key, key = jr.split(key)
     repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
     
+    # Generate prior samples for comparison plots
+    prior_key, key = jr.split(key)
+    prior_samples_dict = prior_fn(n_sites).sample((cfg.n_prior_samples,), seed=prior_key)
+    prior_samples_flat = flatten_theta_dict(prior_samples_dict)[None, ...]  # Add chain dimension
+    
     # Define bijector specifications for constrained -> unconstrained transformation
     bijector_specs = {
         'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
@@ -89,8 +93,7 @@ def run(cfg: DictConfig) -> None:
         'T_season': tfb.Invert(tfb.Softplus()),
         'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
     }
-    
-    
+
     # Create MCMC bijector
     flat_theta_bijector = create_flat_blockwise_bijector(repr_theta, bijector_specs, n_sites)
 
@@ -274,8 +277,7 @@ def run(cfg: DictConfig) -> None:
             theta_constrained = sfmpe_theta_bijector.inverse(theta)
             
             # Apply original simulator
-            with jax.default_device(jax.devices('cpu')[0]):
-                y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
+            y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
             y_deq = apply_dequantization(y_constrained, seed)
             
             # Transform outputs to unconstrained space
@@ -405,6 +407,7 @@ def run(cfg: DictConfig) -> None:
     jnp.save(out_dir / "y_observed.npy", y_observed)
     jnp.save(out_dir / "f_in.npy", f_in)
     jnp.save(out_dir / "mcmc_posterior_samples.npy", mcmc_posterior_samples)
+    jnp.save(out_dir / "prior_samples.npy", prior_samples_flat)
     
     # Save configuration parameters needed for plotting
     plot_config = {

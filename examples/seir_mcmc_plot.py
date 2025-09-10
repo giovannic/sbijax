@@ -34,7 +34,9 @@ def plot_posterior_predictive_checks(
     f_in: Dict[str, Array],
     plot_config: Dict,
     out_dir: Path,
-    key: Array
+    key: Array,
+    title_prefix: str = "Posterior",
+    filename_prefix: str = "seir_ppc"
 ) -> None:
     """
     Generate posterior predictive check plots showing incidence trajectories.
@@ -184,13 +186,57 @@ def plot_posterior_predictive_checks(
         
         plt.xlabel('Time since warmup (days)')
         plt.ylabel('Incidence per 100,000')
-        plt.title(f'Posterior Predictive Check - Site {site_idx + 1} (Post-warmup)')
+        plt.title(f'{title_prefix} Predictive Check - Site {site_idx + 1} (Post-warmup)')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
         # Save plot
-        plt.savefig(out_dir / f"seir_ppc_site_{site_idx + 1}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(out_dir / f"{filename_prefix}_site_{site_idx + 1}.png", dpi=300, bbox_inches='tight')
         plt.close()
+
+
+def plot_prior_posterior_comparison(
+    inference_data: az.InferenceData,
+    out_dir: Path
+) -> None:
+    """
+    Create prior/posterior comparison plots using ArviZ.
+    
+    Parameters
+    ----------
+    inference_data : az.InferenceData
+        ArviZ InferenceData containing both prior and posterior
+    out_dir : Path
+        Output directory for saving plots
+    """
+    az.plot_dist_comparison(inference_data)
+    plt.savefig(out_dir / "seir_prior_posterior_comparison.png", dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_prior_predictive_checks(
+    prior_samples: Array,
+    theta_truth: Dict[str, Array],
+    y_observed: Dict[str, Array],
+    f_in: Dict[str, Array],
+    plot_config: Dict,
+    out_dir: Path,
+    key: Array
+) -> None:
+    """
+    Generate prior predictive check plots showing incidence trajectories.
+    """
+    plot_posterior_predictive_checks(
+        mcmc_posterior_samples=prior_samples,
+        theta_truth=theta_truth,
+        y_observed=y_observed,
+        f_in=f_in,
+        plot_config=plot_config,
+        out_dir=out_dir,
+        key=key,
+        title_prefix="Prior",
+        filename_prefix="seir_prior_ppc"
+    )
 
 
 def main():
@@ -218,6 +264,7 @@ def main():
         "y_observed.npy", 
         "f_in.npy",
         "mcmc_posterior_samples.npy",
+        "prior_samples.npy",
         "plot_config.json"
     ]
     
@@ -232,22 +279,26 @@ def main():
     y_observed = jnp.load(out_dir / "y_observed.npy", allow_pickle=True).item()
     f_in = jnp.load(out_dir / "f_in.npy", allow_pickle=True).item()
     mcmc_posterior_samples = jnp.load(out_dir / "mcmc_posterior_samples.npy")
+    prior_samples = jnp.load(out_dir / "prior_samples.npy")
     
     with open(out_dir / "plot_config.json", 'r') as f:
         plot_config = json.load(f)
     
-    # Convert MCMC samples to structured format for ArviZ plotting
+    # Convert samples to structured format for ArviZ plotting
     logger.info("Creating posterior distribution plots")
     n_sites = plot_config['n_sites']
-    post_dict = reconstruct_theta_dict(
-        mcmc_posterior_samples,
-        n_sites
+    post_dict = reconstruct_theta_dict(mcmc_posterior_samples, n_sites)
+    prior_dict = reconstruct_theta_dict(prior_samples, n_sites)
+    
+    # Create combined InferenceData with both prior and posterior
+    inference_data = az.from_dict(
+        posterior=post_dict,
+        prior=prior_dict
     )
-    posterior = az.from_dict(posterior=post_dict)
     
     # Create posterior plots
     az.plot_posterior(
-        posterior,
+        inference_data,
         var_names=['beta_0', 'alpha', 'sigma'],
         ref_val=[
             float(theta_truth['beta_0'][0, 0, 0]),
@@ -257,6 +308,10 @@ def main():
     )
     plt.savefig(out_dir / "seir_mcmc_posterior.png", dpi=300)
     plt.close()
+    
+    # Generate prior/posterior comparison plots
+    logger.info("Generating prior/posterior comparison plots")
+    plot_prior_posterior_comparison(inference_data, out_dir)
     
     # Generate posterior predictive checks
     logger.info("Generating posterior predictive check plots")
@@ -269,6 +324,19 @@ def main():
         plot_config=plot_config,
         out_dir=out_dir,
         key=key
+    )
+    
+    # Generate prior predictive checks
+    logger.info("Generating prior predictive check plots")
+    prior_key = jr.PRNGKey(43)  # Different seed for prior plots
+    plot_prior_predictive_checks(
+        prior_samples=prior_samples,
+        theta_truth=theta_truth,
+        y_observed=y_observed,
+        f_in=f_in,
+        plot_config=plot_config,
+        out_dir=out_dir,
+        key=prior_key
     )
     
     logger.info("SEIR MCMC visualization completed successfully!")
