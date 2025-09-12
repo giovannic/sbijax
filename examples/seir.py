@@ -55,11 +55,6 @@ from seir_utils import (
     get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors
 )
 
-
-
-
-
-
 def run(cfg: DictConfig) -> None:
     """Main execution function."""
     logger = logging.getLogger(__name__)

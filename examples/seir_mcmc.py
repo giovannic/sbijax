@@ -150,6 +150,30 @@ def run(cfg: DictConfig) -> None:
                 0,
                 1
             )
+        elif cfg.mcmc.sampler == "ess":
+            from numpyro.infer import MCMC
+            from numpyro.infer.ensemble import ESS
+            init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+
+            def transformed_log_prob(theta: Array) -> Array:
+                log_prob = flat_simulator_log_prob(theta[None, ...])[0]
+                det = flat_theta_bijector.forward_log_det_jacobian(
+                    theta[None, ...]
+                )[0]
+                return log_prob + det
+
+            mcmc = MCMC(
+                ESS(
+                    potential_fn=transformed_log_prob,
+                ),
+                num_warmup=n_burnin,
+                num_samples=n_post_samples,
+                chain_method='vectorized',
+                num_chains=cfg.mcmc.n_chains,
+                jit_model_args=True
+            )
+            mcmc.run(sample_key, init_params=init_state)
+            mcmc_posterior_samples = mcmc.get_samples(group_by_chain=True)
         elif cfg.mcmc.sampler == "nuts":
             from numpyro.infer import MCMC, NUTS
             init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
