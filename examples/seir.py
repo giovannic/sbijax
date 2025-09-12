@@ -25,9 +25,7 @@ from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 
 from jax import numpy as jnp, random as jr, tree, vmap
-from jax.experimental.ode import odeint
 from tensorflow_probability.substrates.jax import distributions as tfd
-from tensorflow_probability.substrates.jax import bijectors as tfb
 
 from sfmpe.sfmpe import SFMPE
 from sfmpe.fmpe import FMPE
@@ -37,11 +35,6 @@ from sfmpe.cnf import CNF
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.train_rounds import train_fmpe_rounds
-from sfmpe.pytree_bijector import (
-    PyTreeBijector, 
-    create_zscaling_bijector_tree
-)
-from tensorflow_probability.substrates.jax import bijectors as tfb
 from sfmpe.metrics.lc2st import (
     train_lc2st_classifiers,
     evaluate_lc2st,
@@ -49,8 +42,8 @@ from sfmpe.metrics.lc2st import (
     MultiBinaryMLPClassifier
 )
 from seir_utils import (
-    seir_dynamics, prior_fn, p_local, create_simulator_dist, create_simulator_fn, apply_dequantization,
-    f_in_fn, f_in_fn_observed, flatten_theta_dict, reconstruct_theta_dict,
+    prior_fn, p_local, create_simulator_dist, create_simulator_fn, apply_dequantization,
+    f_in_fn, f_in_fn_observed,
     create_flat_blockwise_bijector, _flatten, flatten_f_in,
     get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors
 )
