@@ -187,10 +187,10 @@ def run(cfg: DictConfig) -> None:
                 num_chains=cfg.mcmc.n_chains,
                 jit_model_args=True
             )
-            mcmc.run(sample_key, init_params=init_state)
+            mcmc.run(sample_key, init_params=flat_theta_bijector.forward(init_state))
             unconstrained_samples = mcmc.get_samples(group_by_chain=True)
             mcmc_posterior_samples = flat_theta_bijector.inverse(unconstrained_samples)
-            if cfg.mcmc.sampler == "ess":
+            if cfg.mcmc.sampler == "nuts":
                 mcmc_posterior_samples = jnp.swapaxes(
                     mcmc_posterior_samples,
                     0,
