@@ -83,14 +83,14 @@ def prior_fn(n):
             sigma = tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
             
             # Local parameters are independent of global parameters
-            A = tfd.Uniform(jnp.zeros((n, 1)), jnp.full((n, 1), .2)),
+            A = tfd.Uniform(jnp.full((n, 1), .2), jnp.full((n, 1), .5)),
             T_season = tfd.Gamma(
                 jnp.full((n, 1), 365.0 * t_season_spread), 
                 jnp.full((n, 1), t_season_spread)
             ),
             phi = tfd.Uniform(
                 jnp.zeros((n, 1)), 
-                jnp.full((n, 1), 2*jnp.pi)
+                jnp.full((n, 1), jnp.pi)
             )
         ),
         batch_ndims=1,
@@ -104,14 +104,14 @@ def p_local(g, n):
     return tfd.JointDistributionNamed(
         dict(
             # Site-specific seasonal parameters  
-            A = tfd.Uniform(jnp.zeros((n_sims, n, 1)), jnp.full((n_sims, n, 1), .2)),
+            A = tfd.Uniform(jnp.full((n_sims, n, 1), .2), jnp.full((n_sims, n, 1), .5)),
             T_season = tfd.Gamma(
                 jnp.full((n_sims, n, 1), 365.0 * t_season_spread), 
                 jnp.full((n_sims, n, 1), t_season_spread)
             ),
             phi = tfd.Uniform(
                 jnp.zeros((n_sims, n, 1)), 
-                jnp.full((n_sims, n, 1), 2*jnp.pi)
+                jnp.full((n_sims, n, 1), jnp.pi)
             )
         ),
         batch_ndims=1,
@@ -435,9 +435,9 @@ def get_standard_bijector_specs() -> Dict[str, tfb.Bijector]:
         'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
         'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
         'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
-        'A': tfb.Invert(tfb.Sigmoid(low=0.0, high=0.2)),
+        'A': tfb.Invert(tfb.Sigmoid(low=0.2, high=0.5)),
         'T_season': tfb.Invert(tfb.Softplus()),
-        'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=2*jnp.pi)),
+        'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=jnp.pi)),
     }
 
 
