@@ -28,7 +28,7 @@ n_epochs: 1000     # Number of epochs per round
 n_post_samples: 100  # Number of posterior samples
 
 # F_in_sample
-f_in_sample: "observed" # Options: "observed", "prior"
+f_in_sample: "prior" # Options: "observed", "prior"
 
 # Training configuration
 training:
