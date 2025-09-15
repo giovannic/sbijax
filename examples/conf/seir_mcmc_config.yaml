@@ -37,7 +37,8 @@ training:
 
 # MCMC configuration
 mcmc:
-  sampler: "slice"  # Options: "slice", "nuts"
+  sampler: "slice"  # Options: "slice", "nuts", "ess"
+  use_numpyro_model: false  # Use NumPyro model instead of manual log_prob (NUTS/ESS only)
   n_chains: 4
   step_size: 0.001
   max_doublings: 3

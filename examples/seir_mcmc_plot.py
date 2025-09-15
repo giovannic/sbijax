@@ -111,6 +111,7 @@ def plot_posterior_predictive_checks(
         true_trajectories.append(true_traj)
     
     # Convert MCMC samples to structured format
+
     post_dict = reconstruct_theta_dict(
         mcmc_posterior_samples,
         n_sites
@@ -287,6 +288,11 @@ def main():
     # Convert samples to structured format for ArviZ plotting
     logger.info("Creating posterior distribution plots")
     n_sites = plot_config['n_sites']
+
+    # TODO: remove swapaxes
+    mcmc_posterior_samples = mcmc_posterior_samples.swapaxes(0, 1)
+    logger.info(f"MCMC posterior samples shape: {mcmc_posterior_samples.shape}")
+
     post_dict = reconstruct_theta_dict(mcmc_posterior_samples, n_sites)
     prior_dict = reconstruct_theta_dict(prior_samples, n_sites)
     
@@ -295,6 +301,9 @@ def main():
         posterior=post_dict,
         prior=prior_dict
     )
+    
+    # Generate summary statistics
+    print(az.summary(inference_data))
     
     # Create posterior plots
     az.plot_posterior(
@@ -312,32 +321,39 @@ def main():
     # Generate prior/posterior comparison plots
     logger.info("Generating prior/posterior comparison plots")
     plot_prior_posterior_comparison(inference_data, out_dir)
-    
+
+    # Generate trace plot
+    logger.info("Generating trace plot")
+    az.plot_trace(inference_data)
+    plt.savefig(out_dir / "seir_mcmc_trace.png", dpi=300)
+    plt.close()
+
+
     # Generate posterior predictive checks
-    logger.info("Generating posterior predictive check plots")
-    key = jr.PRNGKey(42)  # Fixed seed for reproducible plots
-    plot_posterior_predictive_checks(
-        mcmc_posterior_samples=mcmc_posterior_samples,
-        theta_truth=theta_truth,
-        y_observed=y_observed,
-        f_in=f_in,
-        plot_config=plot_config,
-        out_dir=out_dir,
-        key=key
-    )
+    # logger.info("Generating posterior predictive check plots")
+    # key = jr.PRNGKey(42)  # Fixed seed for reproducible plots
+    # plot_posterior_predictive_checks(
+        # mcmc_posterior_samples=mcmc_posterior_samples,
+        # theta_truth=theta_truth,
+        # y_observed=y_observed,
+        # f_in=f_in,
+        # plot_config=plot_config,
+        # out_dir=out_dir,
+        # key=key
+    # )
     
-    # Generate prior predictive checks
-    logger.info("Generating prior predictive check plots")
-    prior_key = jr.PRNGKey(43)  # Different seed for prior plots
-    plot_prior_predictive_checks(
-        prior_samples=prior_samples,
-        theta_truth=theta_truth,
-        y_observed=y_observed,
-        f_in=f_in,
-        plot_config=plot_config,
-        out_dir=out_dir,
-        key=prior_key
-    )
+    # # Generate prior predictive checks
+    # logger.info("Generating prior predictive check plots")
+    # prior_key = jr.PRNGKey(43)  # Different seed for prior plots
+    # plot_prior_predictive_checks(
+        # prior_samples=prior_samples,
+        # theta_truth=theta_truth,
+        # y_observed=y_observed,
+        # f_in=f_in,
+        # plot_config=plot_config,
+        # out_dir=out_dir,
+        # key=prior_key
+    # )
     
     logger.info("SEIR MCMC visualization completed successfully!")
     logger.info(f"Plots saved to: {out_dir}")
