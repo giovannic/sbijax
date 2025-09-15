@@ -12,14 +12,16 @@ and visualization scripts, including:
 from typing import Callable, Dict
 from jaxtyping import PyTree, Array
 import jax.numpy as jnp
-from jax import random as jr, vmap
+from jax import random as jr, vmap, tree
 from diffrax import diffeqsolve, ODETerm, Dopri5, SaveAt, ForwardMode
 from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
 from sfmpe.pytree_bijector import (
-    PyTreeBijector, 
+    PyTreeBijector,
     create_zscaling_bijector_tree
 )
+import numpyro
+import numpyro.distributions as dist
 
 
 def seir_dynamics(
@@ -205,7 +207,7 @@ def create_simulator_dist(
             incidence = jnp.maximum(incidence, 1e-8)  # Ensure positive with small delta
             
             return incidence
-        
+
         # Vectorize over batch and sites  
         solve_batch_sites = vmap(
             vmap(solve_single_site, in_axes=(0, None, 0)),  # site_idx, params, obs_times_per_site
@@ -449,18 +451,110 @@ def get_y_bijector_specs() -> Dict[str, tfb.Bijector]:
 
 
 def create_pytree_bijectors(
-    repr_theta: Dict[str, Array], 
+    repr_theta: Dict[str, Array],
     repr_y: Dict[str, Array],
     theta_bijector_specs: Dict[str, tfb.Bijector],
     y_bijector_specs: Dict[str, tfb.Bijector]
 ) -> tuple[PyTreeBijector, PyTreeBijector]:
     """Create PyTreeBijectors for SFMPE with Z-scaling."""
-        
+
     # Create Z-scaled bijector maps and PyTreeBijectors
     theta_bijector_map = create_zscaling_bijector_tree(repr_theta, repr_theta, theta_bijector_specs)
     sfmpe_theta_bijector = PyTreeBijector(theta_bijector_map, repr_theta)
-    
+
     y_bijector_map = create_zscaling_bijector_tree(repr_y, repr_y, y_bijector_specs)
     sfmpe_y_bijector = PyTreeBijector(y_bijector_map, repr_y)
-    
+
     return sfmpe_theta_bijector, sfmpe_y_bijector
+
+
+def create_numpyro_seir_model(
+    simulator_fn: Callable,
+    n_sites: int,
+    f_in: Dict[str, Array]
+) -> Callable:
+    """
+    Create a NumPyro model for SEIR inference using native NumPyro distributions.
+
+    Args:
+        simulator_fn: Function that simulates SEIR dynamics
+        n_sites: Number of observation sites
+        f_in: Functional input data containing observation indices
+
+    Returns:
+        NumPyro model function compatible with NUTS/ESS kernels
+    """
+    def seir_model(y_observed: Dict[str, Array] = None):
+        # Global parameters (shared across sites)
+        beta_0 = numpyro.sample(
+            'beta_0',
+            dist.Uniform(jnp.array(0.1), jnp.array(2.0))
+        )
+        alpha = numpyro.sample(
+            'alpha',
+            dist.Uniform(jnp.array(1/30), jnp.array(1/7))
+        )
+        sigma = numpyro.sample(
+            'sigma',
+            dist.Uniform(jnp.array(1/21), jnp.array(1/7))
+        )
+
+        # Site-specific parameters
+        # Seasonal amplitude
+        A = numpyro.sample(
+            'A',
+            dist.Uniform(
+                jnp.full((n_sites,), 0.2),
+                jnp.full((n_sites,), 0.5)
+            )
+        )
+
+        # Seasonal period (using Gamma distribution like TFP version)
+        t_season_spread = 1./7.
+        T_season = numpyro.sample(
+            'T_season',
+            dist.Gamma(
+                jnp.full((n_sites,), 365.0 * t_season_spread),
+                jnp.full((n_sites,), t_season_spread)
+            )
+        )
+
+        # Seasonal phase
+        phi = numpyro.sample(
+            'phi',
+            dist.Uniform(
+                jnp.zeros((n_sites,)),
+                jnp.full((n_sites,), jnp.pi)
+            )
+        )
+
+        # Construct theta dictionary in the expected format
+        theta = {
+            'beta_0': beta_0[None, None],  # Shape: (1, 1)
+            'alpha': alpha[None, None],    # Shape: (1, 1)
+            'sigma': sigma[None, None],    # Shape: (1, 1)
+            'A': A[:, None],               # Shape: (n_sites, 1)
+            'T_season': T_season[:, None], # Shape: (n_sites, 1)
+            'phi': phi[:, None]            # Shape: (n_sites, 1)
+        }
+
+        # Add batch dimension for simulator compatibility
+        theta = tree.map(lambda x: x[None, ...], theta)
+
+        # Simulate observations using the existing simulator
+        y_pred = simulator_fn(numpyro.prng_key(), theta, f_in)
+
+        # Extract predicted observations and ensure positive values
+        obs_pred = jnp.maximum(y_pred['obs'][0], 0.1)  # Remove batch dim, ensure positive
+
+        # Likelihood: Poisson observations
+        numpyro.sample(
+            'obs',
+            dist.Independent(
+                dist.Poisson(obs_pred),
+                reinterpreted_batch_ndims=1
+            ),
+            obs=y_observed['obs'][0] if y_observed is not None else None
+        )
+
+    return seir_model
