@@ -323,18 +323,23 @@ def f_in_fn_observed(n_obs: int, n_sites: int, f_in):
 
 def flatten_theta_dict(theta_dict: Dict[str, Array]) -> Array:
     """Flatten theta dictionary to 1D array for MCMC/FMPE."""
+    batch_shape = theta_dict['A'].shape[:-2]
     n_sites = theta_dict['A'].shape[-2]
     flattened_parts = []
     
     # Global parameters (3 parameters, 1 each)
     for param_name in ['beta_0', 'alpha', 'sigma']:
-        flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], 1))
+        flattened_parts.append(
+            theta_dict[param_name].reshape(batch_shape + (1,))
+        )
     
     # Site-specific parameters (3 parameters, n_sites each)  
     for param_name in ['A', 'T_season', 'phi']:
-        flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], n_sites))
+        flattened_parts.append(
+            theta_dict[param_name].reshape(batch_shape + (n_sites,))
+        )
     
-    return jnp.concatenate(flattened_parts, axis=1)
+    return jnp.concatenate(flattened_parts, axis=len(batch_shape))
 
 
 def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs: Dict[str, tfb.Bijector], n_sites: int) -> tfb.Bijector:

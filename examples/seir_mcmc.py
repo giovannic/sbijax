@@ -197,6 +197,7 @@ def run(cfg: DictConfig) -> None:
                     'T_season': samples['T_season'][:, :, :, None],
                     'phi': samples['phi'][:, :, :, None]
                 }
+                print(tree.map(lambda leaf: leaf.shape, theta_dict))
 
                 # Convert to flat format for downstream analysis
                 mcmc_posterior_samples = flatten_theta_dict(theta_dict)
