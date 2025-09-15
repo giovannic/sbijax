@@ -83,20 +83,78 @@ def prior_fn(n):
             beta_0 = tfd.Uniform(jnp.full((1, 1), 0.1), jnp.full((1, 1), 2.0)),
             alpha = tfd.Uniform(jnp.full((1, 1), 1/30), jnp.full((1, 1), 1/7)),
             sigma = tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
-            
+
             # Local parameters are independent of global parameters
             A = tfd.Uniform(jnp.full((n, 1), .2), jnp.full((n, 1), .5)),
             T_season = tfd.Gamma(
-                jnp.full((n, 1), 365.0 * t_season_spread), 
+                jnp.full((n, 1), 365.0 * t_season_spread),
                 jnp.full((n, 1), t_season_spread)
             ),
             phi = tfd.Uniform(
-                jnp.zeros((n, 1)), 
+                jnp.zeros((n, 1)),
                 jnp.full((n, 1), jnp.pi)
             )
         ),
         batch_ndims=1,
     )
+
+
+def create_selective_prior_fn(
+    n_sites: int,
+    sample_params: list[str],
+    fixed_params: Dict[str, Array]
+) -> Callable:
+    """
+    Create prior distribution that only samples specified parameters.
+
+    Args:
+        n_sites: Number of observation sites
+        sample_params: List of parameter names to sample
+        fixed_params: Dictionary of fixed parameter values
+
+    Returns:
+        Prior function that returns distribution over sampled parameters only
+    """
+    t_season_spread = 1./7.
+
+    def selective_prior_fn(n):
+        prior_dict = {}
+
+        # Only include distributions for parameters we want to sample
+        if 'beta_0' in sample_params:
+            prior_dict['beta_0'] = tfd.Uniform(
+                jnp.full((1, 1), 0.1),
+                jnp.full((1, 1), 2.0)
+            )
+        if 'alpha' in sample_params:
+            prior_dict['alpha'] = tfd.Uniform(
+                jnp.full((1, 1), 1/30),
+                jnp.full((1, 1), 1/7)
+            )
+        if 'sigma' in sample_params:
+            prior_dict['sigma'] = tfd.Uniform(
+                jnp.full((1, 1), 1/21),
+                jnp.full((1, 1), 1/7)
+            )
+        if 'A' in sample_params:
+            prior_dict['A'] = tfd.Uniform(
+                jnp.full((n, 1), .2),
+                jnp.full((n, 1), .5)
+            )
+        if 'T_season' in sample_params:
+            prior_dict['T_season'] = tfd.Gamma(
+                jnp.full((n, 1), 365.0 * t_season_spread),
+                jnp.full((n, 1), t_season_spread)
+            )
+        if 'phi' in sample_params:
+            prior_dict['phi'] = tfd.Uniform(
+                jnp.zeros((n, 1)),
+                jnp.full((n, 1), jnp.pi)
+            )
+
+        return tfd.JointDistributionNamed(prior_dict, batch_ndims=1)
+
+    return selective_prior_fn
 
 
 def p_local(g, n):
@@ -326,26 +384,78 @@ def flatten_theta_dict(theta_dict: Dict[str, Array]) -> Array:
     batch_shape = theta_dict['A'].shape[:-2]
     n_sites = theta_dict['A'].shape[-2]
     flattened_parts = []
-    
+
     # Global parameters (3 parameters, 1 each)
     for param_name in ['beta_0', 'alpha', 'sigma']:
         flattened_parts.append(
             theta_dict[param_name].reshape(batch_shape + (1,))
         )
-    
-    # Site-specific parameters (3 parameters, n_sites each)  
+
+    # Site-specific parameters (3 parameters, n_sites each)
     for param_name in ['A', 'T_season', 'phi']:
         flattened_parts.append(
             theta_dict[param_name].reshape(batch_shape + (n_sites,))
         )
-    
+
+    return jnp.concatenate(flattened_parts, axis=len(batch_shape))
+
+
+def flatten_selective_theta_dict(
+    theta_dict: Dict[str, Array],
+    sample_params: list[str]
+) -> Array:
+    """
+    Flatten only sampled parameters from theta dictionary.
+
+    Args:
+        theta_dict: Full theta dictionary
+        sample_params: List of parameter names to include
+
+    Returns:
+        Flattened array containing only sampled parameters
+    """
+    # Get dimensions from any site-specific parameter
+    if 'A' in theta_dict:
+        batch_shape = theta_dict['A'].shape[:-2]
+        n_sites = theta_dict['A'].shape[-2]
+    elif 'T_season' in theta_dict:
+        batch_shape = theta_dict['T_season'].shape[:-2]
+        n_sites = theta_dict['T_season'].shape[-2]
+    elif 'phi' in theta_dict:
+        batch_shape = theta_dict['phi'].shape[:-2]
+        n_sites = theta_dict['phi'].shape[-2]
+    else:
+        # Only global parameters
+        batch_shape = theta_dict['beta_0'].shape[:-2]
+        n_sites = 1  # Not used for global-only case
+
+    flattened_parts = []
+
+    # Process parameters in consistent order
+    param_order = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+
+    for param_name in param_order:
+        if param_name not in sample_params or param_name not in theta_dict:
+            continue
+
+        if param_name in ['beta_0', 'alpha', 'sigma']:
+            # Global parameters
+            flattened_parts.append(
+                theta_dict[param_name].reshape(batch_shape + (1,))
+            )
+        else:
+            # Site-specific parameters
+            flattened_parts.append(
+                theta_dict[param_name].reshape(batch_shape + (n_sites,))
+            )
+
     return jnp.concatenate(flattened_parts, axis=len(batch_shape))
 
 
 def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs: Dict[str, tfb.Bijector], n_sites: int) -> tfb.Bijector:
     """Create blockwise bijector for FMPE using same Z-scaling as SFMPE."""
     individual_bijectors = []
-    
+
     # Global parameters (3 parameters, 1 each)
     for param in ['beta_0', 'alpha', 'sigma']:
         base_bij = bijector_specs[param]
@@ -358,7 +468,7 @@ def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs:
             base_bij
         ])
         individual_bijectors.append(z_scaled_bij)
-    
+
     # Site-specific parameters (3 parameters, n_sites each)
     for param in ['A', 'T_season', 'phi']:
         base_bij = bijector_specs[param]
@@ -371,7 +481,7 @@ def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs:
             base_bij
         ])
         individual_bijectors.append(z_scaled_bij)
-    
+
     # Create blockwise bijector
     return tfb.Blockwise(
         bijectors=individual_bijectors,
@@ -379,11 +489,69 @@ def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs:
     )
 
 
+def create_selective_flat_bijector(
+    repr_theta: Dict[str, Array],
+    bijector_specs: Dict[str, tfb.Bijector],
+    n_sites: int,
+    sample_params: list[str]
+) -> tfb.Bijector:
+    """
+    Create blockwise bijector for selective parameter sampling.
+
+    Args:
+        repr_theta: Representative theta samples for Z-scaling
+        bijector_specs: Bijector specifications for each parameter
+        n_sites: Number of observation sites
+        sample_params: List of parameter names to sample
+
+    Returns:
+        Blockwise bijector for sampled parameters only
+    """
+    individual_bijectors = []
+    block_sizes = []
+
+    # Process parameters in the same order as flattening
+    param_order = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+
+    for param in param_order:
+        if param not in sample_params:
+            continue
+
+        base_bij = bijector_specs[param]
+
+        if param in ['beta_0', 'alpha', 'sigma']:
+            # Global parameters
+            param_data = repr_theta[param].reshape(-1, 1)
+            mean_val = jnp.mean(base_bij.forward(param_data))
+            std_val = jnp.std(base_bij.forward(param_data))
+            block_size = 1
+        else:
+            # Site-specific parameters
+            param_data = repr_theta[param].reshape(-1, n_sites)
+            mean_val = jnp.mean(base_bij.forward(param_data), axis=0)
+            std_val = jnp.std(base_bij.forward(param_data), axis=0)
+            block_size = n_sites
+
+        z_scaled_bij = tfb.Chain([
+            tfb.Scale(1.0 / jnp.maximum(std_val, 1e-8)),
+            tfb.Shift(-mean_val),
+            base_bij
+        ])
+        individual_bijectors.append(z_scaled_bij)
+        block_sizes.append(block_size)
+
+    # Create blockwise bijector
+    return tfb.Blockwise(
+        bijectors=individual_bijectors,
+        block_sizes=block_sizes
+    )
+
+
 def reconstruct_theta_dict(theta_flat: Array, n_sites: int) -> Dict[str, Array]:
     """Reconstruct structured theta from flattened array."""
     theta_dict = {}
     idx = 0
-    
+
     # Global parameters (3 parameters, 1 each)
     theta_dict['beta_0'] = theta_flat[..., idx:idx+1, None]
     idx += 1
@@ -391,12 +559,71 @@ def reconstruct_theta_dict(theta_flat: Array, n_sites: int) -> Dict[str, Array]:
     idx += 1
     theta_dict['sigma'] = theta_flat[..., idx:idx+1, None]
     idx += 1
-    
+
     # Site-specific parameters (3 parameters, n_sites each)
     for param_name in ['A', 'T_season', 'phi']:
         theta_dict[param_name] = theta_flat[..., idx:idx+n_sites, None]
         idx += n_sites
-        
+
+    return theta_dict
+
+
+def reconstruct_selective_theta_dict(
+    theta_flat: Array,
+    sample_params: list[str],
+    fixed_params: Dict[str, Array],
+    n_sites: int
+) -> Dict[str, Array]:
+    """
+    Reconstruct full theta dictionary from selective samples + fixed values.
+
+    Args:
+        theta_flat: Flattened array containing only sampled parameters
+        sample_params: List of parameter names that were sampled
+        fixed_params: Dictionary of fixed parameter values
+        n_sites: Number of observation sites
+
+    Returns:
+        Full theta dictionary with sampled and fixed parameters
+    """
+    theta_dict = {}
+    idx = 0
+
+    # Process parameters in consistent order
+    param_order = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+
+    for param_name in param_order:
+        if param_name in sample_params:
+            # Extract sampled parameter from flattened array
+            if param_name in ['beta_0', 'alpha', 'sigma']:
+                # Global parameters
+                theta_dict[param_name] = theta_flat[..., idx:idx+1, None]
+                idx += 1
+            else:
+                # Site-specific parameters
+                theta_dict[param_name] = theta_flat[..., idx:idx+n_sites, None]
+                idx += n_sites
+        else:
+            # Use fixed parameter value
+            if param_name in fixed_params:
+                # Broadcast fixed value to match batch dimensions of sampled params
+                fixed_val = fixed_params[param_name]
+                if theta_flat.ndim > 1:
+                    # Add batch dimensions to match theta_flat
+                    batch_shape = theta_flat.shape[:-1]
+                    if param_name in ['beta_0', 'alpha', 'sigma']:
+                        theta_dict[param_name] = jnp.broadcast_to(
+                            fixed_val,
+                            batch_shape + (1, 1)
+                        )
+                    else:
+                        theta_dict[param_name] = jnp.broadcast_to(
+                            fixed_val,
+                            batch_shape + (n_sites, 1)
+                        )
+                else:
+                    theta_dict[param_name] = fixed_val
+
     return theta_dict
 
 
@@ -563,3 +790,95 @@ def create_numpyro_seir_model(
         )
 
     return seir_model
+
+
+def create_selective_numpyro_seir_model(
+    simulator_fn: Callable,
+    n_sites: int,
+    f_in: Dict[str, Array],
+    sample_params: list[str],
+    fixed_params: Dict[str, Array]
+) -> Callable:
+    """
+    Create a NumPyro model that only samples specified parameters.
+
+    Args:
+        simulator_fn: Function that simulates SEIR dynamics
+        n_sites: Number of observation sites
+        f_in: Functional input data containing observation indices
+        sample_params: List of parameter names to sample
+        fixed_params: Dictionary of fixed parameter values
+
+    Returns:
+        NumPyro model function that samples only specified parameters
+    """
+    def selective_seir_model(y_observed: Dict[str, Array] = None):
+        # Initialize theta dictionary with fixed values
+        theta = {}
+
+        # Add fixed parameters
+        for param_name, param_value in fixed_params.items():
+            theta[param_name] = param_value
+
+        # Sample only specified parameters
+        if 'beta_0' in sample_params:
+            theta['beta_0'] = numpyro.sample(
+                'beta_0',
+                dist.Uniform(jnp.array(0.1), jnp.array(2.0))
+            )[None, None]
+        if 'alpha' in sample_params:
+            theta['alpha'] = numpyro.sample(
+                'alpha',
+                dist.Uniform(jnp.array(1/30), jnp.array(1/7))
+            )[None, None]
+        if 'sigma' in sample_params:
+            theta['sigma'] = numpyro.sample(
+                'sigma',
+                dist.Uniform(jnp.array(1/21), jnp.array(1/7))
+            )[None, None]
+        if 'A' in sample_params:
+            theta['A'] = numpyro.sample(
+                'A',
+                dist.Uniform(
+                    jnp.full((n_sites,), 0.2),
+                    jnp.full((n_sites,), 0.5)
+                )
+            )[:, None]
+        if 'T_season' in sample_params:
+            t_season_spread = 1./7.
+            theta['T_season'] = numpyro.sample(
+                'T_season',
+                dist.Gamma(
+                    jnp.full((n_sites,), 365.0 * t_season_spread),
+                    jnp.full((n_sites,), t_season_spread)
+                )
+            )[:, None]
+        if 'phi' in sample_params:
+            theta['phi'] = numpyro.sample(
+                'phi',
+                dist.Uniform(
+                    jnp.zeros((n_sites,)),
+                    jnp.full((n_sites,), jnp.pi)
+                )
+            )[:, None]
+
+        # Add batch dimension for simulator compatibility
+        theta = tree.map(lambda x: x[None, ...], theta)
+
+        # Simulate observations using the existing simulator
+        y_pred = simulator_fn(numpyro.prng_key(), theta, f_in)
+
+        # Extract predicted observations and ensure positive values
+        obs_pred = jnp.maximum(y_pred['obs'][0], 0.1)  # Remove batch dim
+
+        # Likelihood: Poisson observations
+        numpyro.sample(
+            'obs',
+            dist.Independent(
+                dist.Poisson(obs_pred),
+                reinterpreted_batch_ndims=1
+            ),
+            obs=y_observed['obs'][0] if y_observed is not None else None
+        )
+
+    return selective_seir_model
