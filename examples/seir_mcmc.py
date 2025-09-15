@@ -42,7 +42,8 @@ from seir_utils import (
     f_in_fn, flatten_theta_dict, apply_dequantization,
     create_flat_blockwise_bijector, reconstruct_theta_dict,
     f_in_fn_observed, _flatten, flatten_f_in,
-    get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors
+    get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors,
+    create_numpyro_seir_model
 )
 
 
@@ -153,43 +154,93 @@ def run(cfg: DictConfig) -> None:
         elif cfg.mcmc.sampler in ["nuts", "ess"]:
             from numpyro.infer import MCMC, NUTS
             from numpyro.infer.ensemble import ESS
-            init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
 
-            def transformed_log_prob(theta: Array) -> Array:
-                batched_theta = theta[None, ...]
-                unconstrained_theta = flat_theta_bijector.forward(batched_theta)
-                log_prob = flat_simulator_log_prob(unconstrained_theta)[0]
-                det = flat_theta_bijector.forward_log_det_jacobian(
-                    batched_theta
-                )[0]
-                return log_prob + det
+            if cfg.mcmc.use_numpyro_model:
+                # Use NumPyro model approach
+                logger.info(f"Using NumPyro model with {cfg.mcmc.sampler} sampler")
 
-            if cfg.mcmc.sampler == "ess":
-                kernel = ESS(
-                    potential_fn=transformed_log_prob
+                # Create NumPyro model
+                numpyro_model = create_numpyro_seir_model(simulator_fn, n_sites, f_in)
+
+                if cfg.mcmc.sampler == "ess":
+                    kernel = ESS(numpyro_model)
+                    chain_method = "vectorized"
+                else:
+                    kernel = NUTS(
+                        numpyro_model,
+                        step_size=cfg.mcmc.step_size,
+                        max_tree_depth=cfg.mcmc.max_tree_depth,
+                        adapt_step_size=True,
+                        forward_mode_differentiation=True
+                    )
+                    chain_method = "parallel"
+
+                mcmc = MCMC(
+                    kernel,
+                    num_warmup=n_burnin,
+                    num_samples=n_post_samples,
+                    chain_method=chain_method,
+                    num_chains=cfg.mcmc.n_chains,
+                    jit_model_args=True
                 )
-                chain_method = "vectorized"
+                mcmc.run(sample_key, y_observed=y_observed)
+
+                # Extract samples and convert to expected format
+                samples = mcmc.get_samples(group_by_chain=True)
+
+                # Reconstruct theta dictionary from NumPyro samples
+                theta_dict = {
+                    'beta_0': samples['beta_0'][:, :, None, None],  # Add extra dims
+                    'alpha': samples['alpha'][:, :, None, None],
+                    'sigma': samples['sigma'][:, :, None, None],
+                    'A': samples['A'][:, :, :, None],  # Site dimension preserved
+                    'T_season': samples['T_season'][:, :, :, None],
+                    'phi': samples['phi'][:, :, :, None]
+                }
+
+                # Convert to flat format for downstream analysis
+                mcmc_posterior_samples = flatten_theta_dict(theta_dict)
+
             else:
-                kernel = NUTS(
-                    potential_fn=transformed_log_prob,
-                    step_size=cfg.mcmc.step_size,
-                    max_tree_depth=cfg.mcmc.max_tree_depth,
-                    adapt_step_size=True,
-                    forward_mode_differentiation=True
-                )
-                chain_method = "parallel"
+                # Use existing manual log_prob approach
+                logger.info(f"Using manual log_prob with {cfg.mcmc.sampler} sampler")
+                init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
 
-            mcmc = MCMC(
-                kernel,
-                num_warmup=n_burnin,
-                num_samples=n_post_samples,
-                chain_method=chain_method,
-                num_chains=cfg.mcmc.n_chains,
-                jit_model_args=True
-            )
-            mcmc.run(sample_key, init_params=flat_theta_bijector.forward(init_state))
-            unconstrained_samples = mcmc.get_samples(group_by_chain=True)
-            mcmc_posterior_samples = flat_theta_bijector.inverse(unconstrained_samples)
+                def transformed_log_prob(theta: Array) -> Array:
+                    batched_theta = theta[None, ...]
+                    unconstrained_theta = flat_theta_bijector.forward(batched_theta)
+                    log_prob = flat_simulator_log_prob(unconstrained_theta)[0]
+                    det = flat_theta_bijector.forward_log_det_jacobian(
+                        batched_theta
+                    )[0]
+                    return log_prob + det
+
+                if cfg.mcmc.sampler == "ess":
+                    kernel = ESS(
+                        potential_fn=transformed_log_prob
+                    )
+                    chain_method = "vectorized"
+                else:
+                    kernel = NUTS(
+                        potential_fn=transformed_log_prob,
+                        step_size=cfg.mcmc.step_size,
+                        max_tree_depth=cfg.mcmc.max_tree_depth,
+                        adapt_step_size=True,
+                        forward_mode_differentiation=True
+                    )
+                    chain_method = "parallel"
+
+                mcmc = MCMC(
+                    kernel,
+                    num_warmup=n_burnin,
+                    num_samples=n_post_samples,
+                    chain_method=chain_method,
+                    num_chains=cfg.mcmc.n_chains,
+                    jit_model_args=True
+                )
+                mcmc.run(sample_key, init_params=flat_theta_bijector.forward(init_state))
+                unconstrained_samples = mcmc.get_samples(group_by_chain=True)
+                mcmc_posterior_samples = flat_theta_bijector.inverse(unconstrained_samples)
         else:
             raise ValueError(f"Unknown MCMC sampler: {cfg.mcmc.sampler}")
 
