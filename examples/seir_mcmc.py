@@ -109,15 +109,10 @@ def run(cfg: DictConfig) -> None:
     # Generate prior samples for comparison plots
     prior_key, key = jr.split(key)
     if use_selective_inference:
-        # For selective inference, generate samples only for sampled parameters
+        # For selective inference, generate and save only sampled parameters
         selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
         prior_samples_selective = selective_prior(n_sites).sample((cfg.n_prior_samples,), seed=prior_key)
-        # Reconstruct full prior samples for plotting
-        prior_samples_dict = reconstruct_selective_theta_dict(
-            flatten_selective_theta_dict(prior_samples_selective, sample_params),
-            sample_params, fixed_params, n_sites
-        )
-        prior_samples_flat = flatten_selective_theta_dict(prior_samples_dict, sample_params)[None, ...]
+        prior_samples_flat = flatten_selective_theta_dict(prior_samples_selective, sample_params)[None, ...]
     else:
         prior_samples_dict = prior_fn(n_sites).sample((cfg.n_prior_samples,), seed=prior_key)
         prior_samples_flat = flatten_theta_dict(prior_samples_dict)[None, ...]  # Add chain dimension
@@ -521,19 +516,22 @@ def run(cfg: DictConfig) -> None:
     logger.info(f"Converting MCMC posterior to az format")
 
     if use_selective_inference:
-        # Reconstruct full theta dict from selective samples + fixed values
-        post_dict = reconstruct_selective_theta_dict(
+        # For selective inference, reconstruct only sampled parameters
+        # First reconstruct with fixed params to get proper shapes, then filter
+        post_dict_full = reconstruct_selective_theta_dict(
             mcmc_posterior_samples,
             sample_params,
             fixed_params,
             n_sites
         )
+        post_dict = {k: v for k, v in post_dict_full.items() if k in sample_params}
+        posterior = az.from_dict(posterior=post_dict)
     else:
         post_dict = reconstruct_theta_dict(
             mcmc_posterior_samples,
             n_sites
         )
-    posterior = az.from_dict(posterior=post_dict)
+        posterior = az.from_dict(posterior=post_dict)
     logger.info(f"Summarising MCMC posterior")
     print(az.summary(posterior))
     logger.info(f"MCMC summarisation completed in {time.time() - start_time:.2f} seconds")
@@ -559,10 +557,19 @@ def run(cfg: DictConfig) -> None:
         'I0_prop': cfg.I0_prop,
         'dt': cfg.dt
     }
-    
+
     # Save as JSON for easy loading
     with open(out_dir / "plot_config.json", 'w') as f:
         json.dump(plot_config, f, indent=2)
+
+    # Save selective inference configuration if used
+    if use_selective_inference:
+        selective_config = {
+            'sample_params': list(sample_params),  # Convert from ListConfig to list
+            'fixed_params': tree.map(lambda x: x.tolist(), fixed_params)
+        }
+        with open(out_dir / "selective_inference_config.json", 'w') as f:
+            json.dump(selective_config, f, indent=2)
     
     logger.info("SEIR MCMC estimation completed successfully!")
 
