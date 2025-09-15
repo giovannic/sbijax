@@ -190,13 +190,6 @@ def run(cfg: DictConfig) -> None:
             mcmc.run(sample_key, init_params=flat_theta_bijector.forward(init_state))
             unconstrained_samples = mcmc.get_samples(group_by_chain=True)
             mcmc_posterior_samples = flat_theta_bijector.inverse(unconstrained_samples)
-            if cfg.mcmc.sampler == "nuts":
-                mcmc_posterior_samples = jnp.swapaxes(
-                    mcmc_posterior_samples,
-                    0,
-                    1
-                )
-
         else:
             raise ValueError(f"Unknown MCMC sampler: {cfg.mcmc.sampler}")
 
