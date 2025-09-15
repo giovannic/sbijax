@@ -47,6 +47,12 @@ mcmc:
 # Method selection
 method: "MCMC"  # Options: "MCMC", "SFMPE"
 
+# Inference configuration - selective parameter sampling
+inference:
+  sample_params: null  # List of parameters to sample, e.g. ["beta_0"] for beta-0 only
+                       # If null, samples all parameters (default behavior)
+                       # Available params: ["beta_0", "alpha", "sigma", "A", "T_season", "phi"]
+
 # SFMPE configuration (used when method: "SFMPE")
 sfmpe:
   transformer:

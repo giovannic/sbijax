@@ -289,8 +289,6 @@ def main():
     logger.info("Creating posterior distribution plots")
     n_sites = plot_config['n_sites']
 
-    # TODO: remove swapaxes
-    mcmc_posterior_samples = mcmc_posterior_samples.swapaxes(0, 1)
     logger.info(f"MCMC posterior samples shape: {mcmc_posterior_samples.shape}")
 
     post_dict = reconstruct_theta_dict(mcmc_posterior_samples, n_sites)
