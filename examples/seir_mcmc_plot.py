@@ -254,7 +254,7 @@ def plot_prior_predictive_checks(
         key=key,
         title_prefix="Prior",
         filename_prefix="seir_prior_ppc",
-        selective_config=None  # Prior samples are always full, not selective
+        selective_config=selective_config
     )
 
 
@@ -397,30 +397,32 @@ def main():
 
 
     # Generate posterior predictive checks
-    # logger.info("Generating posterior predictive check plots")
-    # key = jr.PRNGKey(42)  # Fixed seed for reproducible plots
-    # plot_posterior_predictive_checks(
-        # mcmc_posterior_samples=mcmc_posterior_samples,
-        # theta_truth=theta_truth,
-        # y_observed=y_observed,
-        # f_in=f_in,
-        # plot_config=plot_config,
-        # out_dir=out_dir,
-        # key=key
-    # )
+    logger.info("Generating posterior predictive check plots")
+    key = jr.PRNGKey(42)  # Fixed seed for reproducible plots
+    plot_posterior_predictive_checks(
+        mcmc_posterior_samples=mcmc_posterior_samples,
+        theta_truth=theta_truth,
+        y_observed=y_observed,
+        f_in=f_in,
+        plot_config=plot_config,
+        out_dir=out_dir,
+        key=key,
+        selective_config=selective_config
+    )
     
-    # # Generate prior predictive checks
-    # logger.info("Generating prior predictive check plots")
-    # prior_key = jr.PRNGKey(43)  # Different seed for prior plots
-    # plot_prior_predictive_checks(
-        # prior_samples=prior_samples,
-        # theta_truth=theta_truth,
-        # y_observed=y_observed,
-        # f_in=f_in,
-        # plot_config=plot_config,
-        # out_dir=out_dir,
-        # key=prior_key
-    # )
+    # Generate prior predictive checks
+    logger.info("Generating prior predictive check plots")
+    prior_key = jr.PRNGKey(43)  # Different seed for prior plots
+    plot_prior_predictive_checks(
+        prior_samples=prior_samples,
+        theta_truth=theta_truth,
+        y_observed=y_observed,
+        f_in=f_in,
+        plot_config=plot_config,
+        out_dir=out_dir,
+        key=prior_key,
+        selective_config=selective_config
+    )
     
     logger.info("SEIR MCMC visualization completed successfully!")
     logger.info(f"Plots saved to: {out_dir}")
