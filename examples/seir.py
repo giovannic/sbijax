@@ -42,10 +42,12 @@ from sfmpe.metrics.lc2st import (
     MultiBinaryMLPClassifier
 )
 from seir_utils import (
-    prior_fn, p_local, create_simulator_dist, create_simulator_fn, apply_dequantization,
-    f_in_fn, f_in_fn_observed,
-    create_flat_blockwise_bijector, _flatten, flatten_f_in,
-    get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors
+    prior_fn, create_simulator_dist, create_simulator_fn, apply_dequantization,
+    f_in_fn, f_in_fn_observed, _flatten, flatten_f_in,
+    get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors,
+    create_selective_prior_fn, create_selective_sfmpe_functions,
+    flatten_selective_theta_dict, reconstruct_selective_theta_dict,
+    create_selective_flat_bijector
 )
 
 def run(cfg: DictConfig) -> None:
@@ -53,7 +55,7 @@ def run(cfg: DictConfig) -> None:
     logger = logging.getLogger(__name__)
     logger.info(f"Running SEIR with n_simulations={cfg.n_simulations}, "
                 f"n_rounds={cfg.n_rounds}, n_epochs={cfg.n_epochs}")
-    
+
     # Extract parameters
     n_timesteps = cfg.n_timesteps
     n_obs = cfg.n_obs
@@ -64,17 +66,24 @@ def run(cfg: DictConfig) -> None:
     n_epochs = cfg.n_epochs
     n_post_samples = cfg.n_post_samples
 
-    
-    # Independence structure for structured inference
-    independence = {
-        'local': ['obs'],  # Observations independent across time/sites
-        'cross': [],
-        'cross_local': [  # Site-specific parameters connect to their observations
-            ('A', 'obs', (0, 0)),
-            ('T_season', 'obs', (0, 0)),
-            ('phi', 'obs', (0, 0))
-        ]
-    }
+    # Set up parameters for unified selective approach
+    # Full inference is just selective inference with all parameters sampled
+    all_params = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+
+    if (hasattr(cfg, 'inference') and
+        cfg.inference is not None and
+        cfg.inference.sample_params is not None):
+        sample_params = cfg.inference.sample_params
+        logger.info(f"Using selective inference: sampling {sample_params}")
+    else:
+        sample_params = all_params
+        logger.info("Using full inference: sampling all parameters")
+
+    fixed_param_names = [p for p in all_params if p not in sample_params]
+    if fixed_param_names:
+        logger.info(f"Fixed parameters: {fixed_param_names}")
+    else:
+        logger.info("No fixed parameters")
     
     key = jr.PRNGKey(cfg.seed)
     
@@ -84,10 +93,26 @@ def run(cfg: DictConfig) -> None:
     
     # Generate ground truth and observations
     theta_key, obs_key, f_in_key, key = jr.split(key, 4)
-    
+
     theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
+
+    # For selective inference, broadcast fixed local parameters to be identical across sites
+    for param_name in fixed_param_names:
+        if param_name in ['A', 'T_season', 'phi']:
+            # Take the first site's value and broadcast it across all sites
+            single_value = theta_truth[param_name][0, 0:1]  # Shape: (1, 1)
+            broadcasted_value = jnp.broadcast_to(single_value, (n_sites, 1))
+            theta_truth[param_name] = theta_truth[param_name].at[0].set(broadcasted_value)
+
     f_in = f_in_fn(n_obs, n_sites, n_timesteps).sample((1,), seed=f_in_key)
     y_observed = simulator_fn(obs_key, theta_truth, f_in)
+
+    # Extract fixed parameter values
+    fixed_params = {}
+    for param_name in fixed_param_names:
+        fixed_params[param_name] = theta_truth[param_name][0]  # Remove batch dim
+    if fixed_params:
+        logger.info(f"Fixed parameter values: {tree.map(lambda x: jnp.squeeze(x), fixed_params)}")
     
     # Apply dequantization  
     deq_key, key = jr.split(key)
@@ -95,18 +120,25 @@ def run(cfg: DictConfig) -> None:
     
     # Generate representative data for consistent Z-scaling across all bijectors
     repr_key, key = jr.split(key)
-    repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
-    
-    # For representative data, we can use the same f_in for all samples
-    # since we just need diverse parameter samples, not diverse observation times
+
+    # Always use selective functions for representative data generation
+    selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names = create_selective_sfmpe_functions(
+        n_sites, sample_params, fixed_params, simulator_fn
+    )
+    # Sample only the selected parameters for representative data
+    repr_theta = selective_prior_fn(n_sites).sample((1000,), seed=repr_key)
+
+    # For representative data, use the same f_in for all samples
     repr_f_in = tree.map(lambda leaf: jnp.repeat(leaf, 1000, axis=0), f_in)
-    repr_y_raw = simulator_fn(repr_key, repr_theta, repr_f_in)
+    repr_y_raw = wrapped_simulator_fn(repr_key, repr_theta, repr_f_in)
     repr_y = apply_dequantization(repr_y_raw, deq_key)
     
     # Create Z-scaled bijector maps and PyTreeBijectors
+    # Filter bijector specs to only include sampled parameters
     theta_bijector_specs = get_standard_bijector_specs()
+    selective_theta_specs = {k: v for k, v in theta_bijector_specs.items() if k in sample_params}
     y_bijector_specs = get_y_bijector_specs()
-    sfmpe_theta_bijector, sfmpe_y_bijector = create_pytree_bijectors(repr_theta, repr_y, theta_bijector_specs, y_bijector_specs)
+    sfmpe_theta_bijector, sfmpe_y_bijector = create_pytree_bijectors(repr_theta, repr_y, selective_theta_specs, y_bijector_specs)
     
     # Transform observations to unconstrained space
     y_unconstrained = sfmpe_y_bijector.forward(y_processed)
@@ -114,31 +146,31 @@ def run(cfg: DictConfig) -> None:
     # Create wrapped functions for train_bottom_up
     def wrapped_prior_fn(n):
         """Prior function that returns TransformedDistribution."""
-        base_prior = prior_fn(n)
+        base_prior = selective_prior_fn(n)
         return tfd.TransformedDistribution(
-            base_prior, 
+            base_prior,
             sfmpe_theta_bijector,
             name="transformed_prior"
         )
-    
+
     def wrapped_p_local(g, n):
         """Local prior function that returns TransformedDistribution."""
-        base_local = p_local(g, n)
+        base_local = selective_local_fn(g, n)
         return tfd.TransformedDistribution(
             base_local,
-            sfmpe_theta_bijector,  # Can handle sub-PyTrees
+            sfmpe_theta_bijector,
             name="transformed_local"
         )
     
-    def wrapped_simulator_fn(seed, theta, f_in_sample):
+    def wrapped_simulator_fn_for_training(seed, theta, f_in_sample):
         """Simulator function that handles bijector transformations."""
         # Transform parameters back to constrained space
         theta_constrained = sfmpe_theta_bijector.inverse(theta)
-        
-        # Apply original simulator
-        y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
+
+        # Apply wrapped simulator (handles parameter reconstruction if needed)
+        y_constrained = wrapped_simulator_fn(seed, theta_constrained, f_in_sample)
         y_deq = apply_dequantization(y_constrained, seed)
-        
+
         # Transform outputs to unconstrained space
         return sfmpe_y_bijector.forward(y_deq)
     
@@ -148,8 +180,20 @@ def run(cfg: DictConfig) -> None:
     logger.info(f"Processed incidence range: {jnp.min(y_processed['obs'])} to {jnp.max(y_processed['obs'])}")
     logger.info(f"Transformed incidence range: {jnp.min(y_unconstrained['obs'])} to {jnp.max(y_unconstrained['obs'])}")
     
-    # SFMPE Implementation
+    # Independence structure for structured inference (dynamic based on sampled parameters)
+    local_independence = ['obs'] + local_names
+    cross_local_connections = [(param, 'obs', (0, 0)) for param in local_names]
+    independence = {
+        'local': local_independence,  # Observations independent across time/sites
+        'cross': [],
+        'cross_local': cross_local_connections
+    }
+
+    # SFMPE Neural Network Setup (dynamic n_labels)
     rngs = nnx.Rngs(key)
+    n_labels = len(global_names) + len(local_names) + 1  # sampled parameters + obs
+    logger.info(f"Using {n_labels} labels: {len(global_names)} global + {len(local_names)} local + 1 obs")
+
     transformer_config = {
         'latent_dim': cfg.sfmpe.transformer.latent_dim,
         'label_dim': cfg.sfmpe.transformer.label_dim,
@@ -165,7 +209,7 @@ def run(cfg: DictConfig) -> None:
     nn = Transformer(
         transformer_config,
         value_dim=1,
-        n_labels=7,  # 3 global + 3 site-specific parameters + obs
+        n_labels=n_labels,
         index_dim=1,  # Temporal indexing
         rngs=rngs
     )
@@ -173,8 +217,11 @@ def run(cfg: DictConfig) -> None:
     model = StructuredCNF(nn, rngs=rngs)
     estim = SFMPE(model, rngs=rngs)
 
+    # Training
     train_key, key = jr.split(key)
     logger.info("Starting SFMPE bottom-up training")
+
+    # Set up f_in function arguments based on configuration
     if cfg.f_in_sample == 'observed':
         f_in_fn_train = f_in_fn_observed
         f_in_args = (n_obs, 1, f_in)
@@ -185,16 +232,16 @@ def run(cfg: DictConfig) -> None:
         f_in_args_global = (n_obs, n_sites, n_timesteps)
     else:
         raise ValueError(f"Invalid f_in_sample: {cfg.f_in_sample}")
-    
+
     start_time = time.time()
     labels, slices, masks = train_bottom_up(
         train_key,
         estim,
         wrapped_prior_fn,
         wrapped_p_local,
-        wrapped_simulator_fn,
-        ['beta_0', 'alpha', 'sigma'],  # Global parameters
-        ['A', 'T_season', 'phi'],  # Local parameters
+        wrapped_simulator_fn_for_training,  # Use training-specific wrapped simulator
+        global_names,  # Dynamic global parameters
+        local_names,   # Dynamic local parameters
         n_sites,
         n_rounds,
         n_simulations,
@@ -210,72 +257,49 @@ def run(cfg: DictConfig) -> None:
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
+    # Sample SFMPE posterior
     logger.info("Sampling SFMPE posterior")
     start_time = time.time()
+
     # Create flattened f_in index for posterior sampling
-    f_in_flattened = flatten_f_in(f_in)
+    f_in_flattened = flatten_f_in(f_in, sample_params=sample_params)
     posterior = estim.sample_posterior(
         _flatten(y_processed)[..., None],
-        labels, #type:ignore
+        labels,
         slices,
         masks=masks,
         n_samples=n_post_samples,
         index=f_in_flattened
     )
 
+    # Transform posterior samples back into constrained space
+    posterior = sfmpe_theta_bijector.inverse(posterior)
+
+    logger.info(f'SFMPE posterior mean: {jnp.mean(_flatten(posterior), axis=0)}')
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
-    # Helper functions for FMPE bijector integration
-    def flatten_theta_dict(theta_dict: Dict[str, Array]) -> Array:
-        """Flatten theta dictionary to 1D array for FMPE."""
-        flattened_parts = []
-        for param_name in ['beta_0', 'alpha', 'sigma']:
-            flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], 1))
-        for param_name in ['A', 'T_season', 'phi']:
-            flattened_parts.append(theta_dict[param_name].reshape(theta_dict[param_name].shape[0], n_sites))
-        return jnp.concatenate(flattened_parts, axis=1)
-    
-    def reconstruct_theta_dict(theta_flat: Array) -> Dict[str, Array]:
-        """Reconstruct structured theta from flattened array."""
-        theta_dict = {}
-        idx = 0
-        
-        # Global parameters (3 parameters, 1 each)
-        theta_dict['beta_0'] = theta_flat[:, idx:idx+1, None]
-        idx += 1
-        theta_dict['alpha'] = theta_flat[:, idx:idx+1, None]
-        idx += 1
-        theta_dict['sigma'] = theta_flat[:, idx:idx+1, None]
-        idx += 1
-        
-        # Site-specific parameters (3 parameters, n_sites each)
-        for param_name in ['A', 'T_season', 'phi']:
-            theta_dict[param_name] = theta_flat[:, idx:idx+n_sites, None]
-            idx += n_sites
-            
-        return theta_dict
-    
     # Create FMPE bijector
-    fmpe_theta_bijector = create_flat_blockwise_bijector(repr_theta, theta_bijector_specs, n_sites)
+    fmpe_theta_bijector = create_selective_flat_bijector(repr_theta, theta_bijector_specs, n_sites, sample_params)
     
     logger.info('Starting FMPE training')
     
     # Create proxy functions for FMPE training
     def fmpe_prior_fn(key: Array, n_samples: int) -> Array:
         """Prior function compatible with FMPE interface"""
-        theta_samples = prior_fn(n_sites).sample((n_samples,), seed=key)
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+        theta_samples = selective_prior(n_sites).sample((n_samples,), seed=key)
         # Flatten and transform to unconstrained space
-        theta_flat = flatten_theta_dict(theta_samples)
+        theta_flat = flatten_selective_theta_dict(theta_samples, sample_params)
         return fmpe_theta_bijector.forward(theta_flat)
 
     def fmpe_simulator_fn(key: Array, theta_flat: Array) -> Array:
         """Simulator function compatible with FMPE interface"""
         # Inverse transform to constrained space
         theta_constrained_flat = fmpe_theta_bijector.inverse(theta_flat)
-        
+
         # Reconstruct structured theta from flat representation
-        theta_dict = reconstruct_theta_dict(theta_constrained_flat)
-        
+        theta_dict = reconstruct_selective_theta_dict(theta_constrained_flat, sample_params, fixed_params, n_sites)
+
         # Run simulator
         n_simulations = theta_flat.shape[0]
         f_in_matched = tree.map(
@@ -284,13 +308,17 @@ def run(cfg: DictConfig) -> None:
         )
         y_samples = simulator_fn(key, theta_dict, f_in_matched)
         y_deq = apply_dequantization(y_samples, key)
-        
+
         # Transform observations to unconstrained space (consistent with SFMPE)
         y_transformed = sfmpe_y_bijector.forward(y_deq)
         return y_transformed['obs'].reshape((theta_flat.shape[0], -1))
 
     # Create FMPE model
-    total_params = 3 + 3 * n_sites  # 3 global + 3 * n_sites local parameters (SEIR model)
+    # Calculate parameter dimensions based on sampled parameters
+    n_global_params = len([p for p in sample_params if p in ['beta_0', 'alpha', 'sigma']])
+    n_local_params = len([p for p in sample_params if p in ['A', 'T_season', 'phi']])
+    total_params = n_global_params + n_local_params * n_sites
+
     fmpe_nn = MLPVectorField(
         theta_dim=total_params,
         context_dim=n_obs * n_sites,  # flattened observations
@@ -314,7 +342,7 @@ def run(cfg: DictConfig) -> None:
     def sim_corrected_fmpe_prior_fn(key, n_samples):
         n = n_samples // n_sites
         return fmpe_prior_fn(key, n)
-    
+
     fmpe_estim = train_fmpe_rounds(
         train_key,
         fmpe_estim,
@@ -340,7 +368,6 @@ def run(cfg: DictConfig) -> None:
         n_samples=n_post_samples
     )
 
-    logger.info(f'Ground truth shape: {fmpe_y_observed.shape}')
     logger.info(f'FMPE posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
     logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
@@ -350,7 +377,9 @@ def run(cfg: DictConfig) -> None:
     start_time = time.time()
 
     def sample_single_sfmpe_posterior(key, x):
-        theta_0 = jr.normal(key, (1, total_params, 1))
+        # Use the correct dimensions for selective inference
+        n_selective_params = len(global_names) + len(local_names) * n_sites
+        theta_0 = jr.normal(key, (1, n_selective_params, 1))
         x = tree.map(lambda leaf: leaf[None, ...], x)
         context = _flatten(x)[..., None]
         posterior = estim.sample_posterior(
@@ -392,7 +421,7 @@ def run(cfg: DictConfig) -> None:
         create_sfmpe_calibration_dataset,
         sample_single_sfmpe_posterior,
         lambda: wrapped_prior_fn(n_sites),  # Use wrapped (transformed) function
-        lambda seed, theta: wrapped_simulator_fn(seed, theta, cal_f_in),  # Partial apply cal_f_in
+        lambda seed, theta: wrapped_simulator_fn_for_training(seed, theta, cal_f_in),  # Use training-specific wrapped simulator
         y_unconstrained['obs'].reshape(-1), # Use transformed observations
         sfmpe_posterior_flat,
         n_cal_epochs,
@@ -555,39 +584,6 @@ def create_fmpe_calibration_dataset(
     return y, prior, post_estimate
 
 
-def _flatten(x: PyTree) -> jnp.ndarray:
-    """Flatten a batched SFMPE PyTree into a 2D array."""
-    return jnp.concatenate(
-        [v.reshape(v.shape[0], -1) for v in x.values()],
-        axis=-1
-    )
-
-def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8, 
-                 data_sample_ndims: int = 1) -> PyTree:
-    """
-    Flatten f_in data for use as index in SFMPE posterior sampling.
-    
-    Uses the same methodology as flatten_structured: splits f_in into 
-    'theta' and 'y' blocks based on parameter structure, then applies
-    _flatten_index to each block.
-    """
-    from sfmpe.util.dataloader import _flatten_index
-    
-    # Define which keys go to which block (matching the data structure)
-    theta_keys = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']  # all parameters
-    y_keys = ['obs']              # observations
-    
-    # Split f_in_data into theta and y components
-    theta_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in theta_keys}
-    y_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in y_keys}
-    
-    # Apply _flatten_index to each block
-    flattened_index = {
-        'theta': _flatten_index(theta_f_in, pad_value, data_sample_ndims),
-        'y': _flatten_index(y_f_in, pad_value, data_sample_ndims)
-    }
-    
-    return flattened_index
 
 @hydra.main(version_base=None, config_path="conf", config_name="seir_config")
 def main(cfg: DictConfig) -> None:

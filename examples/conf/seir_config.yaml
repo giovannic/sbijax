@@ -6,16 +6,19 @@ defaults:
   - fmpe: default
   - _self_
 
-# SVEIR model parameters
-n_timesteps: 1850   # Total simulation timesteps
+# SEIR model parameters
+n_timesteps: 365    # Total simulation timesteps
 n_obs: 25           # Number of observations to sample
-n_sites: 20         # Number of observation sites
-n_warmup: 1850      # Warmup period to exclude initial epidemic dynamics
+n_sites: 2          # Number of observation sites
+n_warmup: 730       # Warmup period to exclude initial epidemic dynamics
 
 # ODE simulation parameters
 dt: 1.0            # Time step size (days)
 population: 10000  # Population size
 I0_prop: 0.001     # Initial infection proportion
+
+# N prior
+n_prior_samples: 1000
 
 # Training parameters  
 n_simulations: 1000  # Number of simulations per round
@@ -41,6 +44,12 @@ analysis:
   classifier:
     latent_dim: 16
     n_layers: 2
+
+# Inference configuration - selective parameter sampling
+inference:
+  sample_params: null  # List of parameters to sample, e.g. ["beta_0"] for beta-0 only
+                       # If null, samples all parameters (default behavior)
+                       # Available params: ["beta_0", "alpha", "sigma", "A", "T_season", "phi"]
 
 # Random seed
 seed: 42
