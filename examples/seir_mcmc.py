@@ -93,6 +93,16 @@ def run(cfg: DictConfig) -> None:
     theta_key, obs_key, f_in_key, key = jr.split(key, 4)
     
     theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
+
+    # For selective inference, broadcast fixed local parameters to be identical across sites
+    if use_selective_inference:
+        for param_name in fixed_param_names:
+            if param_name in ['A', 'T_season', 'phi']:
+                # Take the first site's value and broadcast it across all sites
+                single_value = theta_truth[param_name][0, 0:1]  # Shape: (1, 1)
+                broadcasted_value = jnp.broadcast_to(single_value, (n_sites, 1))
+                theta_truth[param_name] = theta_truth[param_name].at[0].set(broadcasted_value)
+
     f_in = f_in_fn(n_obs, n_sites, n_timesteps).sample((1,), seed=f_in_key)
     y_observed = simulator_fn(obs_key, theta_truth, f_in)
 
