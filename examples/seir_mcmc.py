@@ -362,9 +362,10 @@ def run(cfg: DictConfig) -> None:
             return sfmpe_y_bijector.forward(y_deq)
         
         # Independence structure for structured inference (dynamic based on sampled parameters)
+        local_independence = ['obs'] + local_names
         cross_local_connections = [(param, 'obs', (0, 0)) for param in local_names]
         independence = {
-            'local': ['obs'],  # Observations independent across time/sites
+            'local': local_independence,  # Observations independent across time/sites
             'cross': [],
             'cross_local': cross_local_connections
         }
