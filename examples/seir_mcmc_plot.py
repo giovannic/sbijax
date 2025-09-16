@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import arviz as az
 
 from seir_utils import (
-    seir_dynamics, reconstruct_theta_dict, reconstruct_selective_theta_dict
+    seir_dynamics, reconstruct_selective_theta_dict
 )
 
 
@@ -35,9 +35,9 @@ def plot_posterior_predictive_checks(
     plot_config: Dict,
     out_dir: Path,
     key: Array,
+    selective_config: Dict,
     title_prefix: str = "Posterior",
-    filename_prefix: str = "seir_ppc",
-    selective_config: Dict = None
+    filename_prefix: str = "seir_ppc"
 ) -> None:
     """
     Generate posterior predictive check plots showing incidence trajectories.
@@ -114,24 +114,18 @@ def plot_posterior_predictive_checks(
     # Convert MCMC samples to structured format
     n_sites = plot_config['n_sites']
 
-    if selective_config is not None:
-        # Selective inference case
-        sample_params = selective_config['sample_params']
-        fixed_params_list = selective_config['fixed_params']
+    # Always use selective approach (full inference is selective with all params)
+    sample_params = selective_config['sample_params']
+    fixed_params_list = selective_config['fixed_params']
 
-        # Convert fixed params back to jax arrays
-        fixed_params = {}
-        for param_name, param_values in fixed_params_list.items():
-            fixed_params[param_name] = jnp.array(param_values)
+    # Convert fixed params back to jax arrays
+    fixed_params = {}
+    for param_name, param_values in fixed_params_list.items():
+        fixed_params[param_name] = jnp.array(param_values)
 
-        post_dict = reconstruct_selective_theta_dict(
-            mcmc_posterior_samples, sample_params, fixed_params, n_sites
-        )
-    else:
-        post_dict = reconstruct_theta_dict(
-            mcmc_posterior_samples,
-            n_sites
-        )
+    post_dict = reconstruct_selective_theta_dict(
+        mcmc_posterior_samples, sample_params, fixed_params, n_sites
+    )
     
     # Flatten first two dimensions using tree.map
     flattened_post = tree.map(
@@ -239,7 +233,7 @@ def plot_prior_predictive_checks(
     plot_config: Dict,
     out_dir: Path,
     key: Array,
-    selective_config: Dict = None
+    selective_config: Dict
 ) -> None:
     """
     Generate prior predictive check plots showing incidence trajectories.
@@ -252,9 +246,9 @@ def plot_prior_predictive_checks(
         plot_config=plot_config,
         out_dir=out_dir,
         key=key,
+        selective_config=selective_config,
         title_prefix="Prior",
-        filename_prefix="seir_prior_ppc",
-        selective_config=selective_config
+        filename_prefix="seir_prior_ppc"
     )
 
 
@@ -287,11 +281,12 @@ def main():
         "plot_config.json"
     ]
 
-    # Check for optional selective inference config
+    # Load selective inference config (always present now)
     selective_config_file = out_dir / "selective_inference_config.json"
-    has_selective_config = selective_config_file.exists()
     
-    for filename in required_files:
+    # Check required files including selective config
+    all_required_files = required_files + ["selective_inference_config.json"]
+    for filename in all_required_files:
         if not (out_dir / filename).exists():
             raise FileNotFoundError(f"Required file not found: {out_dir / filename}")
     
@@ -307,12 +302,10 @@ def main():
     with open(out_dir / "plot_config.json", 'r') as f:
         plot_config = json.load(f)
 
-    # Load selective inference configuration if present
-    selective_config = None
-    if has_selective_config:
-        with open(selective_config_file, 'r') as f:
-            selective_config = json.load(f)
-            logger.info(f"Loaded selective inference config: sampling {selective_config['sample_params']}")
+    # Load selective inference configuration (always present)
+    with open(selective_config_file, 'r') as f:
+        selective_config = json.load(f)
+        logger.info(f"Loaded selective inference config: sampling {selective_config['sample_params']}")
 
     # Convert samples to structured format for ArviZ plotting
     logger.info("Creating posterior distribution plots")
@@ -320,34 +313,26 @@ def main():
 
     logger.info(f"MCMC posterior samples shape: {mcmc_posterior_samples.shape}")
 
-    # Reconstruct theta dictionaries based on whether selective inference was used
-    if selective_config is not None:
-        # Selective inference case - need to reconstruct with fixed parameters
-        sample_params = selective_config['sample_params']
-        fixed_params_list = selective_config['fixed_params']
+    # Reconstruct theta dictionaries using selective approach
+    sample_params = selective_config['sample_params']
+    fixed_params_list = selective_config['fixed_params']
 
-        # Convert fixed params back to jax arrays with proper shapes
-        fixed_params = {}
-        for param_name, param_values in fixed_params_list.items():
-            fixed_params[param_name] = jnp.array(param_values)
+    # Convert fixed params back to jax arrays with proper shapes
+    fixed_params = {}
+    for param_name, param_values in fixed_params_list.items():
+        fixed_params[param_name] = jnp.array(param_values)
 
-        # Reconstruct full posterior dictionary
-        post_dict = reconstruct_selective_theta_dict(
-            mcmc_posterior_samples, sample_params, fixed_params, n_sites
-        )
+    # Reconstruct full posterior dictionary
+    post_dict = reconstruct_selective_theta_dict(
+        mcmc_posterior_samples, sample_params, fixed_params, n_sites
+    )
 
-        # Prior samples were saved as selective samples, need to reconstruct accordingly
-        prior_dict = reconstruct_selective_theta_dict(prior_samples, sample_params, fixed_params, n_sites)
+    # Prior samples were saved as selective samples, need to reconstruct accordingly
+    prior_dict = reconstruct_selective_theta_dict(prior_samples, sample_params, fixed_params, n_sites)
 
-        # Filter to only sampled parameters for ArviZ (avoid plotting fixed parameters)
-        post_dict_filtered = {k: v for k, v in post_dict.items() if k in sample_params}
-        prior_dict_filtered = {k: v for k, v in prior_dict.items() if k in sample_params}
-    else:
-        # Standard inference case - all parameters were sampled
-        post_dict = reconstruct_theta_dict(mcmc_posterior_samples, n_sites)
-        prior_dict = reconstruct_theta_dict(prior_samples, n_sites)
-        post_dict_filtered = post_dict
-        prior_dict_filtered = prior_dict
+    # Filter to only sampled parameters for ArviZ (avoid plotting fixed parameters)
+    post_dict_filtered = {k: v for k, v in post_dict.items() if k in sample_params}
+    prior_dict_filtered = {k: v for k, v in prior_dict.items() if k in sample_params}
 
     # Create combined InferenceData with filtered dictionaries (sampled parameters only)
     inference_data = az.from_dict(
@@ -359,28 +344,14 @@ def main():
     print(az.summary(inference_data))
     
     # Create posterior plots - only for parameters that were actually sampled
-    if selective_config is not None:
-        # For selective inference, only plot sampled parameters
-        sample_params = selective_config['sample_params']
-        # Filter to global parameters that were sampled (excluding site-specific ones)
-        global_sampled = [p for p in sample_params if p in ['beta_0', 'alpha', 'sigma']]
-        if global_sampled:
-            ref_vals = [float(theta_truth[param][0, 0, 0]) for param in global_sampled]
-            az.plot_posterior(
-                inference_data,
-                var_names=global_sampled,
-                ref_val=ref_vals,
-            )
-    else:
-        # Standard inference - plot all global parameters
+    # Filter to global parameters that were sampled (excluding site-specific ones)
+    global_sampled = [p for p in sample_params if p in ['beta_0', 'alpha', 'sigma']]
+    if global_sampled:
+        ref_vals = [float(theta_truth[param][0, 0, 0]) for param in global_sampled]
         az.plot_posterior(
             inference_data,
-            var_names=['beta_0', 'alpha', 'sigma'],
-            ref_val=[
-                float(theta_truth['beta_0'][0, 0, 0]),
-                float(theta_truth['alpha'][0, 0, 0]),
-                float(theta_truth['sigma'][0, 0, 0])
-            ],
+            var_names=global_sampled,
+            ref_val=ref_vals,
         )
     plt.savefig(out_dir / "seir_mcmc_posterior.png", dpi=300)
     plt.close()

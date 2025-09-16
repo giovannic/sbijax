@@ -22,7 +22,6 @@ from hydra.core.hydra_config import HydraConfig
 from jax import numpy as jnp, random as jr, tree, jit
 import tensorflow_probability.substrates.jax as tfp
 from tensorflow_probability.substrates.jax import distributions as tfd
-from tensorflow_probability.substrates.jax import bijectors as tfb
 
 import arviz as az
 import optax
@@ -32,18 +31,13 @@ from sfmpe.sfmpe import SFMPE
 from sfmpe.bottom_up import train_bottom_up
 from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.nn.transformer.transformer import Transformer
-from sfmpe.pytree_bijector import (
-    PyTreeBijector, 
-    create_zscaling_bijector_tree
-)
 
 from seir_utils import (
     prior_fn, create_simulator_dist, create_simulator_fn,
-    f_in_fn, flatten_theta_dict, apply_dequantization,
-    create_flat_blockwise_bijector, reconstruct_theta_dict,
+    f_in_fn, apply_dequantization,
     f_in_fn_observed, _flatten, flatten_f_in,
     get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors,
-    create_numpyro_seir_model, create_selective_prior_fn,
+    create_selective_prior_fn,
     create_selective_flat_bijector, flatten_selective_theta_dict,
     reconstruct_selective_theta_dict, create_selective_numpyro_seir_model,
     create_selective_sfmpe_functions
@@ -66,22 +60,24 @@ def run(cfg: DictConfig) -> None:
     n_epochs = cfg.n_epochs
     n_post_samples = cfg.n_post_samples
 
-    # Check for selective inference configuration
-    use_selective_inference = (
-        hasattr(cfg, 'inference') and
-        cfg.inference is not None and
-        cfg.inference.sample_params is not None
-    )
+    # Set up parameters for unified selective approach
+    # Full inference is just selective inference with all parameters sampled
+    all_params = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
 
-    if use_selective_inference:
+    if (hasattr(cfg, 'inference') and
+        cfg.inference is not None and
+        cfg.inference.sample_params is not None):
         sample_params = cfg.inference.sample_params
         logger.info(f"Using selective inference: sampling {sample_params}")
-        # All other parameters will be fixed at their true values
-        all_params = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
-        fixed_param_names = [p for p in all_params if p not in sample_params]
+    else:
+        sample_params = all_params
+        logger.info("Using full inference: sampling all parameters")
+
+    fixed_param_names = [p for p in all_params if p not in sample_params]
+    if fixed_param_names:
         logger.info(f"Fixed parameters: {fixed_param_names}")
     else:
-        logger.info("Using standard inference: sampling all parameters")
+        logger.info("No fixed parameters")
 
     key = jr.PRNGKey(cfg.seed)
     
@@ -95,22 +91,21 @@ def run(cfg: DictConfig) -> None:
     theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
 
     # For selective inference, broadcast fixed local parameters to be identical across sites
-    if use_selective_inference:
-        for param_name in fixed_param_names:
-            if param_name in ['A', 'T_season', 'phi']:
-                # Take the first site's value and broadcast it across all sites
-                single_value = theta_truth[param_name][0, 0:1]  # Shape: (1, 1)
-                broadcasted_value = jnp.broadcast_to(single_value, (n_sites, 1))
-                theta_truth[param_name] = theta_truth[param_name].at[0].set(broadcasted_value)
+    for param_name in fixed_param_names:
+        if param_name in ['A', 'T_season', 'phi']:
+            # Take the first site's value and broadcast it across all sites
+            single_value = theta_truth[param_name][0, 0:1]  # Shape: (1, 1)
+            broadcasted_value = jnp.broadcast_to(single_value, (n_sites, 1))
+            theta_truth[param_name] = theta_truth[param_name].at[0].set(broadcasted_value)
 
     f_in = f_in_fn(n_obs, n_sites, n_timesteps).sample((1,), seed=f_in_key)
     y_observed = simulator_fn(obs_key, theta_truth, f_in)
 
-    # Extract fixed parameter values for selective inference
-    if use_selective_inference:
-        fixed_params = {}
-        for param_name in fixed_param_names:
-            fixed_params[param_name] = theta_truth[param_name][0]  # Remove batch dim
+    # Extract fixed parameter values
+    fixed_params = {}
+    for param_name in fixed_param_names:
+        fixed_params[param_name] = theta_truth[param_name][0]  # Remove batch dim
+    if fixed_params:
         logger.info(f"Fixed parameter values: {tree.map(lambda x: jnp.squeeze(x), fixed_params)}")
 
     # Generate representative data for consistent Z-scaling across all bijectors
@@ -119,52 +114,33 @@ def run(cfg: DictConfig) -> None:
 
     # Generate prior samples for comparison plots
     prior_key, key = jr.split(key)
-    if use_selective_inference:
-        # For selective inference, generate and save only sampled parameters
-        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
-        prior_samples_selective = selective_prior(n_sites).sample((cfg.n_prior_samples,), seed=prior_key)
-        prior_samples_flat = flatten_selective_theta_dict(prior_samples_selective, sample_params)[None, ...]
-    else:
-        prior_samples_dict = prior_fn(n_sites).sample((cfg.n_prior_samples,), seed=prior_key)
-        prior_samples_flat = flatten_theta_dict(prior_samples_dict)[None, ...]  # Add chain dimension
+    selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+    prior_samples_selective = selective_prior(n_sites).sample((cfg.n_prior_samples,), seed=prior_key)
+    prior_samples_flat = flatten_selective_theta_dict(prior_samples_selective, sample_params)[None, ...]
 
     # Define bijector specifications for constrained -> unconstrained transformation
     bijector_specs = get_standard_bijector_specs()
 
-    # Create MCMC bijector
-    if use_selective_inference:
-        flat_theta_bijector = create_selective_flat_bijector(repr_theta, bijector_specs, n_sites, sample_params)
-    else:
-        flat_theta_bijector = create_flat_blockwise_bijector(repr_theta, bijector_specs, n_sites)
+    # Create MCMC bijector (always use selective approach)
+    flat_theta_bijector = create_selective_flat_bijector(repr_theta, bijector_specs, n_sites, sample_params)
 
     # Create proxy functions for MCMC sampling
     def flat_prior_fn(key: Array, n_samples: int) -> Array:
         """Prior function compatible with FMPE interface"""
-        if use_selective_inference:
-            selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
-            theta_samples = selective_prior(n_sites).sample((n_samples,), seed=key)
-            return flatten_selective_theta_dict(theta_samples, sample_params)
-        else:
-            theta_samples = prior_fn(n_sites).sample((n_samples,), seed=key)
-            return flatten_theta_dict(theta_samples)
-
-    prior = prior_fn(n_sites)
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+        theta_samples = selective_prior(n_sites).sample((n_samples,), seed=key)
+        return flatten_selective_theta_dict(theta_samples, sample_params)
 
     @jit
     def flat_simulator_log_prob(theta_flat: Array) -> Array:
         """Simulator function compatible with FMPE interface"""
-        if use_selective_inference:
-            # Reconstruct full theta from selective samples + fixed values
-            theta_dict = reconstruct_selective_theta_dict(theta_flat, sample_params, fixed_params, n_sites)
-            # Create selective prior for log_prob calculation
-            selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)(n_sites)
-            # Extract sampled parameters for prior calculation
-            theta_selective = {k: v for k, v in theta_dict.items() if k in sample_params}
-            prior_p = selective_prior.log_prob(theta_selective)
-        else:
-            # Reconstruct structured theta from flat representation
-            theta_dict = reconstruct_theta_dict(theta_flat, n_sites)
-            prior_p = prior.log_prob(theta_dict)
+        # Reconstruct full theta from selective samples + fixed values
+        theta_dict = reconstruct_selective_theta_dict(theta_flat, sample_params, fixed_params, n_sites)
+        # Create selective prior for log_prob calculation
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)(n_sites)
+        # Extract sampled parameters for prior calculation
+        theta_selective = {k: v for k, v in theta_dict.items() if k in sample_params}
+        prior_p = selective_prior.log_prob(theta_selective)
 
         # Run simulator
         n_simulations = theta_flat.shape[0]
@@ -217,13 +193,10 @@ def run(cfg: DictConfig) -> None:
                 # Use NumPyro model approach
                 logger.info(f"Using NumPyro model with {cfg.mcmc.sampler} sampler")
 
-                # Create NumPyro model
-                if use_selective_inference:
-                    numpyro_model = create_selective_numpyro_seir_model(
-                        simulator_fn, n_sites, f_in, sample_params, fixed_params
-                    )
-                else:
-                    numpyro_model = create_numpyro_seir_model(simulator_fn, n_sites, f_in)
+                # Create NumPyro model (always use selective approach)
+                numpyro_model = create_selective_numpyro_seir_model(
+                    simulator_fn, n_sites, f_in, sample_params, fixed_params
+                )
 
                 if cfg.mcmc.sampler == "ess":
                     kernel = ESS(numpyro_model)
@@ -251,47 +224,31 @@ def run(cfg: DictConfig) -> None:
                 # Extract samples and convert to expected format
                 samples = mcmc.get_samples(group_by_chain=True)
 
-                if use_selective_inference:
-                    # Reconstruct theta dictionary from selective NumPyro samples
-                    theta_dict = {}
-                    for param_name in sample_params:
-                        if param_name in ['beta_0', 'alpha', 'sigma']:
-                            theta_dict[param_name] = samples[param_name][:, :, None, None]
-                        else:
-                            theta_dict[param_name] = samples[param_name][:, :, :, None]
+                # Reconstruct theta dictionary from selective NumPyro samples
+                theta_dict = {}
+                for param_name in sample_params:
+                    if param_name in ['beta_0', 'alpha', 'sigma']:
+                        theta_dict[param_name] = samples[param_name][:, :, None, None]
+                    else:
+                        theta_dict[param_name] = samples[param_name][:, :, :, None]
 
-                    # Add fixed parameters
-                    for param_name in fixed_param_names:
-                        fixed_val = fixed_params[param_name]
-                        batch_shape = samples[sample_params[0]].shape[:2]  # [n_chains, n_samples]
-                        if param_name in ['beta_0', 'alpha', 'sigma']:
-                            theta_dict[param_name] = jnp.broadcast_to(
-                                fixed_val[None, None, :, :],
-                                batch_shape + (1, 1)
-                            )
-                        else:
-                            theta_dict[param_name] = jnp.broadcast_to(
-                                fixed_val[None, None, :, :],
-                                batch_shape + (n_sites, 1)
-                            )
-                else:
-                    # Reconstruct theta dictionary from NumPyro samples
-                    theta_dict = {
-                        'beta_0': samples['beta_0'][:, :, None, None],  # Add extra dims
-                        'alpha': samples['alpha'][:, :, None, None],
-                        'sigma': samples['sigma'][:, :, None, None],
-                        'A': samples['A'][:, :, :, None],  # Site dimension preserved
-                        'T_season': samples['T_season'][:, :, :, None],
-                        'phi': samples['phi'][:, :, :, None]
-                    }
-
-                print(tree.map(lambda leaf: leaf.shape, theta_dict))
+                # Add fixed parameters
+                for param_name in fixed_param_names:
+                    fixed_val = fixed_params[param_name]
+                    batch_shape = samples[sample_params[0]].shape[:2]  # [n_chains, n_samples]
+                    if param_name in ['beta_0', 'alpha', 'sigma']:
+                        theta_dict[param_name] = jnp.broadcast_to(
+                            fixed_val[None, None, :, :],
+                            batch_shape + (1, 1)
+                        )
+                    else:
+                        theta_dict[param_name] = jnp.broadcast_to(
+                            fixed_val[None, None, :, :],
+                            batch_shape + (n_sites, 1)
+                        )
 
                 # Convert to flat format for downstream analysis
-                if use_selective_inference:
-                    mcmc_posterior_samples = flatten_selective_theta_dict(theta_dict, sample_params)
-                else:
-                    mcmc_posterior_samples = flatten_theta_dict(theta_dict)
+                mcmc_posterior_samples = flatten_selective_theta_dict(theta_dict, sample_params)
 
             else:
                 # Use existing manual log_prob approach
@@ -351,19 +308,12 @@ def run(cfg: DictConfig) -> None:
         
         # Generate representative data for consistent Z-scaling across all bijectors
         repr_key, key = jr.split(key)
-        if use_selective_inference:
-            # Use selective functions for representative data generation
-            selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names = create_selective_sfmpe_functions(
-                n_sites, sample_params, fixed_params, simulator_fn
-            )
-            # Sample only the selected parameters for representative data (consistent with original call)
-            repr_theta = selective_prior_fn(n_sites).sample((1000,), seed=repr_key)
-        else:
-            repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
-            wrapped_simulator_fn = simulator_fn
-            # Use standard parameters
-            global_names = ['beta_0', 'alpha', 'sigma']
-            local_names = ['A', 'T_season', 'phi']
+        # Always use selective functions for representative data generation
+        selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names = create_selective_sfmpe_functions(
+            n_sites, sample_params, fixed_params, simulator_fn
+        )
+        # Sample only the selected parameters for representative data
+        repr_theta = selective_prior_fn(n_sites).sample((1000,), seed=repr_key)
 
         # For representative data, use the same f_in for all samples
         repr_f_in = tree.map(lambda leaf: jnp.repeat(leaf, 1000, axis=0), f_in)
@@ -371,12 +321,9 @@ def run(cfg: DictConfig) -> None:
         repr_y = apply_dequantization(repr_y_raw, deq_key)
 
         # Create Z-scaled bijector maps and PyTreeBijectors
-        if use_selective_inference:
-            # Filter bijector specs to only include sampled parameters
-            theta_bijector_specs = get_standard_bijector_specs()
-            selective_theta_specs = {k: v for k, v in theta_bijector_specs.items() if k in sample_params}
-        else:
-            selective_theta_specs = get_standard_bijector_specs()
+        # Filter bijector specs to only include sampled parameters
+        theta_bijector_specs = get_standard_bijector_specs()
+        selective_theta_specs = {k: v for k, v in theta_bijector_specs.items() if k in sample_params}
         y_bijector_specs = get_y_bijector_specs()
         sfmpe_theta_bijector, sfmpe_y_bijector = create_pytree_bijectors(repr_theta, repr_y, selective_theta_specs, y_bijector_specs)
         
@@ -386,10 +333,7 @@ def run(cfg: DictConfig) -> None:
         # Create wrapped functions for train_bottom_up
         def wrapped_prior_fn(n):
             """Prior function that returns TransformedDistribution."""
-            if use_selective_inference:
-                base_prior = selective_prior_fn(n)
-            else:
-                base_prior = prior_fn(n)
+            base_prior = selective_prior_fn(n)
             return tfd.TransformedDistribution(
                 base_prior,
                 sfmpe_theta_bijector,
@@ -398,28 +342,7 @@ def run(cfg: DictConfig) -> None:
 
         def wrapped_p_local(g, n):
             """Local prior function that returns TransformedDistribution."""
-            if use_selective_inference:
-                base_local = selective_local_fn(g, n)
-            else:
-                # Use corrected local prior (fixing the outdated parameters)
-                n_sims = g[next(iter(g.keys()))].shape[0]
-                t_season_spread = 1./7.  # Correct value, not 1./50.
-                local_dict = {
-                    'A': tfd.Uniform(
-                        jnp.full((n_sims, n, 1), 0.2),  # Correct range: 0.2 to 0.5
-                        jnp.full((n_sims, n, 1), 0.5)
-                    ),
-                    'T_season': tfd.Gamma(
-                        jnp.full((n_sims, n, 1), 365.0 * t_season_spread),
-                        jnp.full((n_sims, n, 1), t_season_spread)
-                    ),
-                    'phi': tfd.Uniform(
-                        jnp.zeros((n_sims, n, 1)),
-                        jnp.full((n_sims, n, 1), jnp.pi)  # Correct range: 0 to π
-                    )
-                }
-                base_local = tfd.JointDistributionNamed(local_dict, batch_ndims=1)
-
+            base_local = selective_local_fn(g, n)
             return tfd.TransformedDistribution(
                 base_local,
                 sfmpe_theta_bijector,
@@ -518,10 +441,7 @@ def run(cfg: DictConfig) -> None:
         start_time = time.time()
         
         # Create flattened f_in index for posterior sampling
-        if use_selective_inference:
-            f_in_flattened = flatten_f_in(f_in, sample_params=sample_params)
-        else:
-            f_in_flattened = flatten_f_in(f_in)
+        f_in_flattened = flatten_f_in(f_in, sample_params=sample_params)
         posterior = estim.sample_posterior(
             _flatten(y_processed)[..., None],
             labels,
@@ -535,10 +455,7 @@ def run(cfg: DictConfig) -> None:
         posterior = sfmpe_theta_bijector.inverse(posterior)
 
         # Convert SFMPE posterior to the same format as MCMC for downstream analysis
-        if use_selective_inference:
-            mcmc_posterior_samples = flatten_selective_theta_dict(posterior, sample_params)[None, ...]
-        else:
-            mcmc_posterior_samples = flatten_theta_dict(posterior)[None, ...]
+        mcmc_posterior_samples = flatten_selective_theta_dict(posterior, sample_params)[None, ...]
         
         logger.info(f'SFMPE posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
         logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
@@ -550,23 +467,16 @@ def run(cfg: DictConfig) -> None:
     start_time = time.time()
     logger.info(f"Converting MCMC posterior to az format")
 
-    if use_selective_inference:
-        # For selective inference, reconstruct only sampled parameters
-        # First reconstruct with fixed params to get proper shapes, then filter
-        post_dict_full = reconstruct_selective_theta_dict(
-            mcmc_posterior_samples,
-            sample_params,
-            fixed_params,
-            n_sites
-        )
-        post_dict = {k: v for k, v in post_dict_full.items() if k in sample_params}
-        posterior = az.from_dict(posterior=post_dict)
-    else:
-        post_dict = reconstruct_theta_dict(
-            mcmc_posterior_samples,
-            n_sites
-        )
-        posterior = az.from_dict(posterior=post_dict)
+    # Reconstruct only sampled parameters for ArviZ
+    # First reconstruct with fixed params to get proper shapes, then filter
+    post_dict_full = reconstruct_selective_theta_dict(
+        mcmc_posterior_samples,
+        sample_params,
+        fixed_params,
+        n_sites
+    )
+    post_dict = {k: v for k, v in post_dict_full.items() if k in sample_params}
+    posterior = az.from_dict(posterior=post_dict)
     logger.info(f"Summarising MCMC posterior")
     print(az.summary(posterior))
     logger.info(f"MCMC summarisation completed in {time.time() - start_time:.2f} seconds")
@@ -597,14 +507,13 @@ def run(cfg: DictConfig) -> None:
     with open(out_dir / "plot_config.json", 'w') as f:
         json.dump(plot_config, f, indent=2)
 
-    # Save selective inference configuration if used
-    if use_selective_inference:
-        selective_config = {
-            'sample_params': list(sample_params),  # Convert from ListConfig to list
-            'fixed_params': tree.map(lambda x: x.tolist(), fixed_params)
-        }
-        with open(out_dir / "selective_inference_config.json", 'w') as f:
-            json.dump(selective_config, f, indent=2)
+    # Always save selective inference configuration
+    selective_config = {
+        'sample_params': list(sample_params),  # Convert from ListConfig to list
+        'fixed_params': tree.map(lambda x: x.tolist(), fixed_params)
+    }
+    with open(out_dir / "selective_inference_config.json", 'w') as f:
+        json.dump(selective_config, f, indent=2)
     
     logger.info("SEIR MCMC estimation completed successfully!")
 
