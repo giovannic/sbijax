@@ -45,7 +45,8 @@ from seir_utils import (
     get_standard_bijector_specs, get_y_bijector_specs, create_pytree_bijectors,
     create_numpyro_seir_model, create_selective_prior_fn,
     create_selective_flat_bijector, flatten_selective_theta_dict,
-    reconstruct_selective_theta_dict, create_selective_numpyro_seir_model
+    reconstruct_selective_theta_dict, create_selective_numpyro_seir_model,
+    create_selective_sfmpe_functions
 )
 
 
@@ -340,17 +341,34 @@ def run(cfg: DictConfig) -> None:
         
         # Generate representative data for consistent Z-scaling across all bijectors
         repr_key, key = jr.split(key)
-        repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
-        
+        if use_selective_inference:
+            # Use selective functions for representative data generation
+            selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names = create_selective_sfmpe_functions(
+                n_sites, sample_params, fixed_params, simulator_fn
+            )
+            # Sample only the selected parameters for representative data (consistent with original call)
+            repr_theta = selective_prior_fn(n_sites).sample((1000,), seed=repr_key)
+        else:
+            repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
+            wrapped_simulator_fn = simulator_fn
+            # Use standard parameters
+            global_names = ['beta_0', 'alpha', 'sigma']
+            local_names = ['A', 'T_season', 'phi']
+
         # For representative data, use the same f_in for all samples
         repr_f_in = tree.map(lambda leaf: jnp.repeat(leaf, 1000, axis=0), f_in)
-        repr_y_raw = simulator_fn(repr_key, repr_theta, repr_f_in)
+        repr_y_raw = wrapped_simulator_fn(repr_key, repr_theta, repr_f_in)
         repr_y = apply_dequantization(repr_y_raw, deq_key)
-        
-        # Create Z-scaled bijector maps and PyTreeBijectors  
-        theta_bijector_specs = get_standard_bijector_specs()
+
+        # Create Z-scaled bijector maps and PyTreeBijectors
+        if use_selective_inference:
+            # Filter bijector specs to only include sampled parameters
+            theta_bijector_specs = get_standard_bijector_specs()
+            selective_theta_specs = {k: v for k, v in theta_bijector_specs.items() if k in sample_params}
+        else:
+            selective_theta_specs = get_standard_bijector_specs()
         y_bijector_specs = get_y_bijector_specs()
-        sfmpe_theta_bijector, sfmpe_y_bijector = create_pytree_bijectors(repr_theta, repr_y, theta_bijector_specs, y_bijector_specs)
+        sfmpe_theta_bijector, sfmpe_y_bijector = create_pytree_bijectors(repr_theta, repr_y, selective_theta_specs, y_bijector_specs)
         
         # Transform observations to unconstrained space
         y_unconstrained = sfmpe_y_bijector.forward(y_processed)
@@ -358,67 +376,71 @@ def run(cfg: DictConfig) -> None:
         # Create wrapped functions for train_bottom_up
         def wrapped_prior_fn(n):
             """Prior function that returns TransformedDistribution."""
-            base_prior = prior_fn(n)
+            if use_selective_inference:
+                base_prior = selective_prior_fn(n)
+            else:
+                base_prior = prior_fn(n)
             return tfd.TransformedDistribution(
-                base_prior, 
+                base_prior,
                 sfmpe_theta_bijector,
                 name="transformed_prior"
             )
-        
-        def p_local(g, n):
-            """Local prior distribution for site-specific parameters (independent of global)."""
-            n_sims = g['beta_0'].shape[0]
-            t_season_spread = 1./50.
-            return tfd.JointDistributionNamed(
-                dict(
-                    # Site-specific seasonal parameters  
-                    A = tfd.Uniform(jnp.zeros((n_sims, n, 1)), jnp.ones((n_sims, n, 1))),
-                    T_season = tfd.Gamma(
-                        jnp.full((n_sims, n, 1), 365.0 * t_season_spread), 
-                        jnp.full((n_sims, n, 1), t_season_spread)
-                    ),
-                    phi = tfd.Uniform(
-                        jnp.zeros((n_sims, n, 1)), 
-                        jnp.full((n_sims, n, 1), 2*jnp.pi)
-                    )
-                ),
-                batch_ndims=1,
-            )
-        
+
         def wrapped_p_local(g, n):
             """Local prior function that returns TransformedDistribution."""
-            base_local = p_local(g, n)
+            if use_selective_inference:
+                base_local = selective_local_fn(g, n)
+            else:
+                # Use corrected local prior (fixing the outdated parameters)
+                n_sims = g[next(iter(g.keys()))].shape[0]
+                t_season_spread = 1./7.  # Correct value, not 1./50.
+                local_dict = {
+                    'A': tfd.Uniform(
+                        jnp.full((n_sims, n, 1), 0.2),  # Correct range: 0.2 to 0.5
+                        jnp.full((n_sims, n, 1), 0.5)
+                    ),
+                    'T_season': tfd.Gamma(
+                        jnp.full((n_sims, n, 1), 365.0 * t_season_spread),
+                        jnp.full((n_sims, n, 1), t_season_spread)
+                    ),
+                    'phi': tfd.Uniform(
+                        jnp.zeros((n_sims, n, 1)),
+                        jnp.full((n_sims, n, 1), jnp.pi)  # Correct range: 0 to π
+                    )
+                }
+                base_local = tfd.JointDistributionNamed(local_dict, batch_ndims=1)
+
             return tfd.TransformedDistribution(
                 base_local,
-                sfmpe_theta_bijector,  # Same bijector as wrapped_prior_fn
+                sfmpe_theta_bijector,
                 name="transformed_local"
             )
-        
-        def wrapped_simulator_fn(seed, theta, f_in_sample):
+
+        def wrapped_simulator_fn_for_training(seed, theta, f_in_sample):
             """Simulator function that handles bijector transformations."""
             # Transform parameters back to constrained space
             theta_constrained = sfmpe_theta_bijector.inverse(theta)
-            
-            # Apply original simulator
-            y_constrained = simulator_fn(seed, theta_constrained, f_in_sample)
+
+            # Apply wrapped simulator (handles parameter reconstruction if needed)
+            y_constrained = wrapped_simulator_fn(seed, theta_constrained, f_in_sample)
             y_deq = apply_dequantization(y_constrained, seed)
-            
+
             # Transform outputs to unconstrained space
             return sfmpe_y_bijector.forward(y_deq)
         
-        # Independence structure for structured inference
+        # Independence structure for structured inference (dynamic based on sampled parameters)
+        cross_local_connections = [(param, 'obs', (0, 0)) for param in local_names]
         independence = {
             'local': ['obs'],  # Observations independent across time/sites
             'cross': [],
-            'cross_local': [  # Site-specific parameters connect to their observations
-                ('A', 'obs', (0, 0)),
-                ('T_season', 'obs', (0, 0)),
-                ('phi', 'obs', (0, 0))
-            ]
+            'cross_local': cross_local_connections
         }
-        
-        # SFMPE Neural Network Setup
+
+        # SFMPE Neural Network Setup (dynamic n_labels)
         rngs = nnx.Rngs(key)
+        n_labels = len(global_names) + len(local_names) + 1  # sampled parameters + obs
+        logger.info(f"Using {n_labels} labels: {len(global_names)} global + {len(local_names)} local + 1 obs")
+
         transformer_config = {
             'latent_dim': cfg.sfmpe.transformer.latent_dim,
             'label_dim': cfg.sfmpe.transformer.label_dim,
@@ -434,7 +456,7 @@ def run(cfg: DictConfig) -> None:
         nn = Transformer(
             transformer_config,
             value_dim=1,
-            n_labels=7,  # 3 global + 3 site-specific parameters + obs
+            n_labels=n_labels,
             index_dim=1,  # Temporal indexing
             rngs=rngs
         )
@@ -463,9 +485,9 @@ def run(cfg: DictConfig) -> None:
             estim,
             wrapped_prior_fn,
             wrapped_p_local,
-            wrapped_simulator_fn,
-            ['beta_0', 'alpha', 'sigma'],  # Global parameters
-            ['A', 'T_season', 'phi'],  # Local parameters
+            wrapped_simulator_fn_for_training,  # Use training-specific wrapped simulator
+            global_names,  # Dynamic global parameters
+            local_names,   # Dynamic local parameters
             n_sites,
             n_rounds,
             n_simulations,
@@ -486,7 +508,10 @@ def run(cfg: DictConfig) -> None:
         start_time = time.time()
         
         # Create flattened f_in index for posterior sampling
-        f_in_flattened = flatten_f_in(f_in)
+        if use_selective_inference:
+            f_in_flattened = flatten_f_in(f_in, sample_params=sample_params)
+        else:
+            f_in_flattened = flatten_f_in(f_in)
         posterior = estim.sample_posterior(
             _flatten(y_processed)[..., None],
             labels,

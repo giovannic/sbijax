@@ -99,6 +99,43 @@ def prior_fn(n):
     )
 
 
+def create_selective_structured_prior_fn(
+    sample_params: list[str]
+) -> Callable:
+    """
+    Create structured prior function that returns distribution over specified parameters.
+
+    Args:
+        sample_params: List of parameter names to sample
+
+    Returns:
+        Function (n) -> Distribution that can be sampled with .sample()
+    """
+    assert len(sample_params) > 0, "Must specify at least one parameter to sample"
+
+    def selective_structured_prior_fn(n):
+        """Return distribution over only the specified parameters."""
+        t_season_spread = 1./7.
+
+        # Define all possible priors using the n parameter
+        all_priors = {
+            'beta_0': tfd.Uniform(jnp.full((1, 1), 0.1), jnp.full((1, 1), 2.0)),
+            'alpha': tfd.Uniform(jnp.full((1, 1), 1/30), jnp.full((1, 1), 1/7)),
+            'sigma': tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
+            'A': tfd.Uniform(jnp.full((n, 1), .2), jnp.full((n, 1), .5)),
+            'T_season': tfd.Gamma(
+                jnp.full((n, 1), 365.0 * t_season_spread),
+                jnp.full((n, 1), t_season_spread)
+            ),
+            'phi': tfd.Uniform(jnp.zeros((n, 1)), jnp.full((n, 1), jnp.pi))
+        }
+
+        prior_dict = {param: all_priors[param] for param in sample_params if param in all_priors}
+        return tfd.JointDistributionNamed(prior_dict, batch_ndims=1)
+
+    return selective_structured_prior_fn
+
+
 def create_selective_prior_fn(
     n_sites: int,
     sample_params: list[str],
@@ -635,31 +672,44 @@ def _flatten(x: PyTree) -> jnp.ndarray:
     )
 
 
-def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8, 
-                 data_sample_ndims: int = 1) -> PyTree:
+def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8,
+                 data_sample_ndims: int = 1,
+                 sample_params: list[str] = None) -> PyTree:
     """
     Flatten f_in data for use as index in SFMPE posterior sampling.
-    
-    Uses the same methodology as flatten_structured: splits f_in into 
+
+    Uses the same methodology as flatten_structured: splits f_in into
     'theta' and 'y' blocks based on parameter structure, then applies
     _flatten_index to each block.
+
+    Args:
+        f_in_data: The f_in data structure
+        pad_value: Padding value for flattening
+        data_sample_ndims: Number of sample dimensions
+        sample_params: List of parameters to sample (for selective inference)
     """
     from sfmpe.util.dataloader import _flatten_index
-    
+
     # Define which keys go to which block (matching the data structure)
-    theta_keys = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']  # all parameters
+    if sample_params is not None:
+        # For selective inference, only include sampled parameters in same order as sample_params
+        theta_keys = [p for p in sample_params if p in f_in_data.keys()]
+    else:
+        # For standard inference, include all parameters
+        theta_keys = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+
     y_keys = ['obs']              # observations
-    
+
     # Split f_in_data into theta and y components
-    theta_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in theta_keys}
+    theta_f_in = {k: f_in_data[k] for k in theta_keys if k in f_in_data.keys()}
     y_f_in = {k: f_in_data[k] for k in f_in_data.keys() if k in y_keys}
-    
+
     # Apply _flatten_index to each block
     flattened_index = {
         'theta': _flatten_index(theta_f_in, pad_value, data_sample_ndims),
         'y': _flatten_index(y_f_in, pad_value, data_sample_ndims)
     }
-    
+
     return flattened_index
 
 
@@ -882,3 +932,77 @@ def create_selective_numpyro_seir_model(
         )
 
     return selective_seir_model
+
+
+def create_selective_sfmpe_functions(
+    n_sites: int,
+    sample_params: list[str],
+    fixed_params: Dict[str, Array],
+    simulator_fn: Callable
+) -> tuple[Callable, Callable, Callable, list[str], list[str]]:
+    """
+    Create minimal SFMPE primitives for selective parameter inference.
+
+    Args:
+        n_sites: Number of observation sites
+        sample_params: List of parameter names to sample
+        fixed_params: Dictionary of fixed parameter values
+        simulator_fn: Original simulator function
+
+    Returns:
+        Tuple of (selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names)
+    """
+    # Create selective structured prior function
+    selective_prior_fn = create_selective_structured_prior_fn(sample_params)
+
+    # Create selective local prior function consistent with true prior
+    def selective_local_fn(g, n):
+        """Local prior distribution for site-specific parameters (consistent with true prior)."""
+        n_sims = g[next(iter(g.keys()))].shape[0]  # Get batch size from any global param
+        t_season_spread = 1./7.  # Match true prior, not the outdated 1./50.
+        local_dict = {}
+
+        # Only include local parameters that are being sampled, with correct specifications
+        if 'A' in sample_params:
+            local_dict['A'] = tfd.Uniform(
+                jnp.full((n_sims, n, 1), 0.2),  # Match true prior: 0.2 to 0.5
+                jnp.full((n_sims, n, 1), 0.5)
+            )
+        if 'T_season' in sample_params:
+            local_dict['T_season'] = tfd.Gamma(
+                jnp.full((n_sims, n, 1), 365.0 * t_season_spread),  # Use correct spread
+                jnp.full((n_sims, n, 1), t_season_spread)
+            )
+        if 'phi' in sample_params:
+            local_dict['phi'] = tfd.Uniform(
+                jnp.zeros((n_sims, n, 1)),
+                jnp.full((n_sims, n, 1), jnp.pi)  # Match true prior: 0 to π (not 2π)
+            )
+
+        return tfd.JointDistributionNamed(local_dict, batch_ndims=1)
+
+    # Create wrapped simulator function that fills in fixed parameters
+    def wrapped_simulator_fn(seed, theta_selective, f_in_sample):
+        """Simulator function that handles parameter reconstruction in structured space."""
+        # Start with the sampled parameters
+        theta_full = dict(theta_selective)
+
+        # Add fixed parameters, broadcasting to match batch shape
+        n_samples = theta_selective[next(iter(theta_selective.keys()))].shape[0]
+        for param_name, param_value in fixed_params.items():
+            theta_full[param_name] = jnp.broadcast_to(
+                param_value[None, ...],
+                (n_samples,) + param_value.shape
+            )
+
+        # Apply original simulator
+        return simulator_fn(seed, theta_full, f_in_sample)
+
+    # Determine global and local parameter lists based on what's being sampled
+    all_global = ['beta_0', 'alpha', 'sigma']
+    all_local = ['A', 'T_season', 'phi']
+
+    global_names = [p for p in all_global if p in sample_params]
+    local_names = [p for p in all_local if p in sample_params]
+
+    return selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names
