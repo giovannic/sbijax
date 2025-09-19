@@ -39,7 +39,8 @@ def plot_posterior_predictive_checks(
     key: Array,
     selective_config: Dict,
     title_prefix: str = "Posterior",
-    filename_prefix: str = "seir_ppc"
+    filename_prefix: str = "seir_ppc",
+    n_ppc_samples: int = 0
 ) -> None:
     """
     Generate posterior predictive check plots showing incidence trajectories.
@@ -136,8 +137,15 @@ def plot_posterior_predictive_checks(
     )
     
     n_total_samples = flattened_post['beta_0'].shape[0]
-    n_ensemble = min(100, n_total_samples)
-    ensemble_indices = jr.choice(key, n_total_samples, shape=(n_ensemble,), replace=False)
+    if n_ppc_samples == 0:
+        n_ensemble = n_total_samples
+    else:
+        n_ensemble = min(n_ppc_samples, n_total_samples)
+
+    if n_ensemble == n_total_samples:
+        ensemble_indices = jnp.arange(n_total_samples)
+    else:
+        ensemble_indices = jr.choice(key, n_total_samples, shape=(n_ensemble,), replace=False)
     
     # Sample parameters using tree.map
     sampled_post = tree.map(
@@ -235,7 +243,8 @@ def plot_prior_predictive_checks(
     plot_config: Dict,
     out_dir: Path,
     key: Array,
-    selective_config: Dict
+    selective_config: Dict,
+    n_ppc_samples: int = 0
 ) -> None:
     """
     Generate prior predictive check plots showing incidence trajectories.
@@ -250,7 +259,8 @@ def plot_prior_predictive_checks(
         key=key,
         selective_config=selective_config,
         title_prefix="Prior",
-        filename_prefix="seir_prior_ppc"
+        filename_prefix="seir_prior_ppc",
+        n_ppc_samples=n_ppc_samples
     )
 
 
@@ -357,6 +367,8 @@ def main():
     """Main visualization function."""
     parser = argparse.ArgumentParser(description='Generate SEIR MCMC visualization plots')
     parser.add_argument('output_dir', type=str, help='Hydra output directory containing saved results')
+    parser.add_argument('--n_ppc_samples', type=int, default=0,
+                        help='Number of samples to use for predictive checks (0 = use all samples)')
     args = parser.parse_args()
     
     # Setup logging
@@ -488,7 +500,8 @@ def main():
         plot_config=plot_config,
         out_dir=out_dir,
         key=key,
-        selective_config=selective_config
+        selective_config=selective_config,
+        n_ppc_samples=args.n_ppc_samples
     )
     
     # Generate prior predictive checks
@@ -502,7 +515,8 @@ def main():
         plot_config=plot_config,
         out_dir=out_dir,
         key=prior_key,
-        selective_config=selective_config
+        selective_config=selective_config,
+        n_ppc_samples=args.n_ppc_samples
     )
     
     logger.info("SEIR MCMC visualization completed successfully!")
