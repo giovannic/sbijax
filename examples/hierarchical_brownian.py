@@ -80,21 +80,23 @@ def run(cfg: DictConfig):
             batch_ndims=1,
         )
 
-    # make simulator function
-    def simulator_fn(seed, theta, f_in: dict):
+    # make simulator distribution and function
+    def simulator_dist(theta, f_in: dict):
         # theta['theta'] has shape (n_simulations, n_theta, 1)
         # f_in['obs'] has shape (n_simulations, n_theta, n_obs, 1)
         # We want n_theta means each with n_obs different variances
         # Expand theta to (n_simulations, n_theta, n_obs, 1)
         theta_expanded = jnp.expand_dims(theta['theta'], -2)  # (n_simulations, n_theta, 1, 1)
         theta_expanded = jnp.broadcast_to(theta_expanded, (*theta_expanded.shape[:-2], n_obs, 1))  # (n_simulations, n_theta, n_obs, 1)
-        
-        obs = tfd.Independent(
+
+        return tfd.Independent(
             tfd.Normal(theta_expanded, f_in['obs']),
             reinterpreted_batch_ndims=2
-        ).sample(seed=seed)
+        )
+
+    def simulator_fn(seed, theta, f_in: dict):
         return {
-            'obs': obs  # Shape: (n_simulations, n_theta, n_obs, 1)
+            'obs': simulator_dist(theta, f_in).sample(seed=seed)
         }
 
     # make function input sampler
@@ -216,6 +218,10 @@ def run(cfg: DictConfig):
         n_samples=n_post_samples,
         index=f_in_flattened
     )
+
+    # Compute log probabilities for SFMPE posterior samples
+    sfmpe_log_probs = simulator_dist(posterior, f_in).log_prob(y_observed['obs'])
+
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
     logger.info('Starting internal FMPE training')
@@ -289,6 +295,16 @@ def run(cfg: DictConfig):
         n_samples=n_post_samples
     )
 
+    # Compute log probabilities for FMPE posterior samples
+    # Reconstruct structured parameters from flat FMPE samples
+    def fmpe_log_prob_fn(flat_params):
+        mu = flat_params[..., :1, None]  # (n_samples, 1, 1)
+        theta = flat_params[..., 1:, None]  # (n_samples, n_theta, 1)
+        theta_dict = {'mu': mu, 'theta': theta}
+        return simulator_dist(theta_dict, f_in).log_prob(y_observed['obs'])
+
+    fmpe_log_probs = fmpe_log_prob_fn(fmpe_posterior_samples)
+
     logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
     n_cal = cfg.analysis.n_cal
@@ -351,7 +367,7 @@ def run(cfg: DictConfig):
         cfg.analysis.classifier.latent_dim,
         rngs
     )
-    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe')
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe', sfmpe_log_probs)
     logger.info(f"SFMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
     logger.info("Starting C2ST-NF analysis for FMPE")
@@ -371,7 +387,7 @@ def run(cfg: DictConfig):
         cfg.analysis.classifier.latent_dim,
         rngs
     )
-    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe')
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe', fmpe_log_probs)
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
 
 def apply_lc2st(
@@ -461,7 +477,8 @@ def save_lc2st_results(
     null_stats: jnp.ndarray,
     main_stat: jnp.ndarray,
     p_value: jnp.ndarray,
-    out_dir: Path
+    out_dir: Path,
+    posterior_log_probs: jnp.ndarray
     ):
 
     # Create output directory and make quant plot
@@ -481,7 +498,8 @@ def save_lc2st_results(
         'main_stat': float(main_stat),
         'null_stats': null_stats.tolist(),
         'p_value': float(p_value),
-        'reject': bool(p_value < 0.05)
+        'reject': bool(p_value < 0.05),
+        'posterior_log_probs': posterior_log_probs.tolist()
     }
     with open(out_dir / 'stats.json', 'w') as f:
         json.dump(stats, f)

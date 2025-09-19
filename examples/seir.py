@@ -275,6 +275,14 @@ def run(cfg: DictConfig) -> None:
     # Transform posterior samples back into constrained space
     posterior = sfmpe_theta_bijector.inverse(posterior)
 
+    # Compute log probabilities for SFMPE posterior samples
+    # Broadcast f_in to match posterior sample dimension
+    f_in_matched = tree.map(
+        lambda leaf: jnp.repeat(leaf, n_post_samples, axis=0),
+        f_in
+    )
+    sfmpe_log_probs = simulator_dist(posterior, f_in_matched).log_prob(y_processed['obs'])
+
     logger.info(f'SFMPE posterior mean: {jnp.mean(_flatten(posterior), axis=0)}')
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
@@ -368,6 +376,22 @@ def run(cfg: DictConfig) -> None:
         n_samples=n_post_samples
     )
 
+    # Compute log probabilities for FMPE posterior samples
+    # Transform back to constrained space and reconstruct structured parameters
+    def fmpe_log_prob_fn(flat_params):
+        # Inverse transform to constrained space
+        theta_constrained_flat = fmpe_theta_bijector.inverse(flat_params)
+        # Reconstruct structured theta from flat representation
+        theta_dict = reconstruct_selective_theta_dict(theta_constrained_flat, sample_params, fixed_params, n_sites)
+        # Broadcast f_in to match sample dimension
+        f_in_matched = tree.map(
+            lambda leaf: jnp.repeat(leaf, flat_params.shape[0], axis=0),
+            f_in
+        )
+        return simulator_dist(theta_dict, f_in_matched).log_prob(y_processed['obs'])
+
+    fmpe_log_probs = fmpe_log_prob_fn(fmpe_posterior_samples)
+
     logger.info(f'FMPE posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
     logger.info(f"FMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     
@@ -431,7 +455,7 @@ def run(cfg: DictConfig) -> None:
         cfg.analysis.classifier.latent_dim,
         rngs
     )
-    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe')
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe', sfmpe_log_probs)
     logger.info(f"SFMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
     logger.info("Starting C2ST-NF analysis for FMPE")
@@ -451,7 +475,7 @@ def run(cfg: DictConfig) -> None:
         cfg.analysis.classifier.latent_dim,
         rngs
     )
-    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe')
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe', fmpe_log_probs)
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
     logger.info("SEIR experiment completed successfully!")
@@ -532,7 +556,8 @@ def save_lc2st_results(
     null_stats: jnp.ndarray,
     main_stat: jnp.ndarray,
     p_value: jnp.ndarray,
-    out_dir: Path
+    out_dir: Path,
+    posterior_log_probs: jnp.ndarray
     ):
     """Save LC2ST results and create plots."""
     # Create output directory and make quant plot
@@ -543,7 +568,8 @@ def save_lc2st_results(
         'main_stat': float(main_stat),
         'null_stats': null_stats.tolist(),
         'p_value': float(p_value),
-        'reject': bool(p_value < 0.05)
+        'reject': bool(p_value < 0.05),
+        'posterior_log_probs': posterior_log_probs.tolist()
     }
     with open(out_dir / 'stats.json', 'w') as f:
         json.dump(stats, f)
