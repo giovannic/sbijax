@@ -21,6 +21,8 @@ from jax import random as jr, tree
 from jax.experimental.ode import odeint
 import matplotlib.pyplot as plt
 import arviz as az
+import seaborn as sns
+import pandas as pd
 
 from seir_utils import (
     seir_dynamics, reconstruct_selective_theta_dict
@@ -283,37 +285,69 @@ def plot_pairplot_with_reference(
     sample_params = selective_config['sample_params']
     n_sites = plot_config['n_sites']
 
-    # Build reference values dict for sampled parameters only
+    # Convert ArviZ InferenceData to pandas DataFrame
+    posterior_dict = inference_data.posterior
+
+    # Flatten the data for DataFrame creation
+    df_data = {}
     reference_values = {}
 
     for param in sample_params:
-        if param in ['beta_0', 'alpha', 'sigma']:
-            # Global parameters - need to match shape of coordinates
-            # Extract the actual shape from theta_truth to handle extra dims
-            truth_shape = theta_truth[param].shape[1:]  # Skip batch dimension
-            if len(truth_shape) == 2 and truth_shape == (1, 1):
-                # Shape (1, 1) - single scalar repeated for both dims
-                reference_values[param] = [[float(theta_truth[param][0, 0, 0])]]
-            else:
-                # Fallback for other shapes
-                reference_values[param] = float(theta_truth[param][0, 0, 0])
-        elif param in ['A', 'T_season', 'phi']:
-            # Site-specific parameters - need to match (n_sites, 1) shape
-            truth_values = []
-            for site_idx in range(n_sites):
-                # Each site gets a list with single value to match dim_1
-                truth_values.append([float(theta_truth[param][0, site_idx, 0])])
-            reference_values[param] = truth_values
+        param_data = posterior_dict[param].values  # Shape: (chains, draws, ...)
 
-    # Create pairplot with KDE and marginals
-    az.plot_pair(
-        inference_data,
-        var_names=sample_params,
+        if param in ['beta_0', 'alpha', 'sigma']:
+            # Global parameters - flatten to single column
+            flattened = param_data.reshape(-1)
+            df_data[param] = flattened
+            reference_values[param] = float(theta_truth[param][0, 0, 0])
+
+        elif param in ['A', 'T_season', 'phi']:
+            # Site-specific parameters - create separate columns for each site
+            for site_idx in range(n_sites):
+                col_name = f"{param}_site_{site_idx + 1}"
+                site_data = param_data[:, :, site_idx, 0]  # Extract site data
+                flattened = site_data.reshape(-1)
+                df_data[col_name] = flattened
+                reference_values[col_name] = float(
+                    theta_truth[param][0, site_idx, 0]
+                )
+
+    # Create DataFrame
+    df = pd.DataFrame(df_data)
+
+    # Create seaborn pairplot
+    g = sns.pairplot(
+        df,
         kind='kde',
-        marginals=True,
-        reference_values=reference_values,
-        reference_values_kwargs={'color': 'red', 'marker': 'x', 'markersize': 8}
+        diag_kind='kde',
+        plot_kws={'alpha': 0.6},
+        diag_kws={'alpha': 0.7}
     )
+
+    # Add reference values as red X markers
+    for i, var1 in enumerate(df.columns):
+        for j, var2 in enumerate(df.columns):
+            if i != j:  # Off-diagonal plots
+                ax = g.axes[i, j]
+                if i > j:  # Lower triangle (where KDE plots are)
+                    ax.scatter(
+                        reference_values[var2],
+                        reference_values[var1],
+                        marker='x',
+                        color='red',
+                        s=100,
+                        linewidths=3,
+                        zorder=10
+                    )
+            else:  # Diagonal plots
+                ax = g.axes[i, j]
+                ax.axvline(
+                    reference_values[var1],
+                    color='red',
+                    linestyle='--',
+                    linewidth=2,
+                    alpha=0.8
+                )
 
     plt.savefig(out_dir / "seir_mcmc_pairplot.png", dpi=300, bbox_inches='tight')
     plt.close()
