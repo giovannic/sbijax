@@ -252,6 +252,73 @@ def plot_prior_predictive_checks(
     )
 
 
+def plot_pairplot_with_reference(
+    inference_data: az.InferenceData,
+    theta_truth: Dict[str, Array],
+    selective_config: Dict,
+    plot_config: Dict,
+    out_dir: Path
+) -> None:
+    """
+    Create pairplot with KDE density plots and reference values from truth.
+
+    Creates a pairplot showing:
+    - KDE density plots on the lower triangle
+    - Marginal density distributions on the diagonal
+    - Reference values from theta_truth overlaid as markers
+
+    Parameters
+    ----------
+    inference_data : az.InferenceData
+        ArviZ InferenceData containing posterior samples
+    theta_truth : Dict[str, Array]
+        Ground truth parameters for reference values
+    selective_config : Dict
+        Configuration specifying which parameters were sampled
+    plot_config : Dict
+        Configuration parameters including n_sites
+    out_dir : Path
+        Output directory for saving plots
+    """
+    sample_params = selective_config['sample_params']
+    n_sites = plot_config['n_sites']
+
+    # Build reference values dict for sampled parameters only
+    reference_values = {}
+
+    for param in sample_params:
+        if param in ['beta_0', 'alpha', 'sigma']:
+            # Global parameters - need to match shape of coordinates
+            # Extract the actual shape from theta_truth to handle extra dims
+            truth_shape = theta_truth[param].shape[1:]  # Skip batch dimension
+            if len(truth_shape) == 2 and truth_shape == (1, 1):
+                # Shape (1, 1) - single scalar repeated for both dims
+                reference_values[param] = [[float(theta_truth[param][0, 0, 0])]]
+            else:
+                # Fallback for other shapes
+                reference_values[param] = float(theta_truth[param][0, 0, 0])
+        elif param in ['A', 'T_season', 'phi']:
+            # Site-specific parameters - need to match (n_sites, 1) shape
+            truth_values = []
+            for site_idx in range(n_sites):
+                # Each site gets a list with single value to match dim_1
+                truth_values.append([float(theta_truth[param][0, site_idx, 0])])
+            reference_values[param] = truth_values
+
+    # Create pairplot with KDE and marginals
+    az.plot_pair(
+        inference_data,
+        var_names=sample_params,
+        kind='kde',
+        marginals=True,
+        reference_values=reference_values,
+        reference_values_kwargs={'color': 'red', 'marker': 'x', 'markersize': 8}
+    )
+
+    plt.savefig(out_dir / "seir_mcmc_pairplot.png", dpi=300, bbox_inches='tight')
+    plt.close()
+
+
 def main():
     """Main visualization function."""
     parser = argparse.ArgumentParser(description='Generate SEIR MCMC visualization plots')
@@ -366,6 +433,15 @@ def main():
     plt.savefig(out_dir / "seir_mcmc_trace.png", dpi=300)
     plt.close()
 
+    # Generate pairplot with reference values
+    logger.info("Generating pairplot with reference values")
+    plot_pairplot_with_reference(
+        inference_data=inference_data,
+        theta_truth=theta_truth,
+        selective_config=selective_config,
+        plot_config=plot_config,
+        out_dir=out_dir
+    )
 
     # Generate posterior predictive checks
     logger.info("Generating posterior predictive check plots")
