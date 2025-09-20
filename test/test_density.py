@@ -1,5 +1,5 @@
 import pytest
-from jax import numpy as jnp, random as jr
+from jax import numpy as jnp, random as jr, jit
 from jax.scipy.stats import norm
 from flax import nnx
 
@@ -166,3 +166,33 @@ def test_density_of_constant_cnf_with_transformed_data(doubling_cnf_setup):
     # Compare results
     # Use moderate tolerance due to stochastic nature of FFJORD trace estimation
     assert jnp.allclose(log_prob, log_prob_cnf, rtol=0.1, atol=0.5)
+
+def test_log_prob_jitability(constant_cnf_setup):
+    """Test that log_prob can be jitted without tracing issues."""
+    cnf, _, _, _ = constant_cnf_setup
+
+    # Define a jitted version of log_prob
+    @jit
+    def jitted_log_prob(theta, context):
+        return cnf.log_prob(
+            theta=theta,
+            theta_label=jnp.zeros_like(theta),
+            theta_index=None,
+            theta_mask=None,
+            context=context,
+            context_label=jnp.ones_like(context),
+            context_index=None,
+            context_mask=None,
+            cross_mask=None
+        )
+
+    # Generate test data
+    samples = jr.normal(jr.PRNGKey(0), shape=(10, 2))
+    context = jnp.zeros((10, 2))
+
+    # This should work without tracing errors
+    log_prob_jitted = jitted_log_prob(samples, context)
+
+    # Should return valid log probabilities
+    assert log_prob_jitted.shape == (10,)
+    assert jnp.all(jnp.isfinite(log_prob_jitted))

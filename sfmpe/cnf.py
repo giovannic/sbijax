@@ -110,7 +110,6 @@ class CNF(nnx.Module):
         Array
             Log probabilities for each sample in theta, shape (batch_size,)
         """
-        batch_size = theta.shape[0]
         theta_shape = theta.shape[1:]
         flat_size = int(jnp.prod(jnp.array(theta_shape)))
 
@@ -172,7 +171,7 @@ class CNF(nnx.Module):
             f_t_flat = f_t.reshape(-1)
             return jnp.concatenate([f_t_flat, jnp.array([-trace_estimate])])
 
-        def solve_single(theta_sample, context_sample, epsilon_sample):
+        def solve_single(theta_sample, epsilon_sample):
             """Solve ODE for a single sample."""
             # Initial state: [theta_flat, 0.0]
             theta_flat = theta_sample.reshape(-1)
@@ -206,7 +205,7 @@ class CNF(nnx.Module):
             return log_p_z0 - delta_log_p
 
         # Vectorize over batch
-        log_probs = vmap(solve_single)(theta, context, epsilon)
+        log_probs = vmap(solve_single)(theta, epsilon)
 
         return log_probs
 

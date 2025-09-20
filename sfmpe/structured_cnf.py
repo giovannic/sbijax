@@ -136,9 +136,8 @@ class StructuredCNF(nnx.Module):
         jnp.ndarray
             Log probabilities for each sample in theta, shape (batch_size,)
         """
-        batch_size = theta.shape[0]
         theta_shape = theta.shape[1:]
-        flat_size = int(jnp.prod(jnp.array(theta_shape)))
+        flat_size = jnp.size(theta[0])
 
         # Sample epsilon for stochastic trace estimation
         # Shape: (batch_size, *theta_shape, n_epsilon)

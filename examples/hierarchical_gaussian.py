@@ -21,6 +21,7 @@ from sfmpe.cnf import CNF
 from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.train_rounds import train_fmpe_rounds
+from sfmpe.util.dataloader import decode_theta
 from sfmpe.metrics.lc2st import (
     train_lc2st_classifiers,
     evaluate_lc2st,
@@ -149,7 +150,7 @@ def run(cfg: DictConfig):
     logger.info("Sampling SFMPE posterior")
     start_time = time.time()
 
-    # Sample in both encoded and decoded formats
+    # Sample in encoded format and then decode
     context_flattened = _flatten(y_observed)[..., None]
     posterior_encoded = estim.sample_posterior_encoded(
         context_flattened,
@@ -159,12 +160,11 @@ def run(cfg: DictConfig):
         n_samples=n_post_samples
     )
 
-    posterior = estim.sample_posterior(
-        context_flattened,
-        labels, #type:ignore
-        slices,
-        masks=masks,
-        n_samples=n_post_samples
+    # Decode the samples to structured format
+    posterior = decode_theta(
+        theta=posterior_encoded,
+        theta_slices=slices,
+        sample_shape=(n_post_samples,),
     )
 
     # Compute true posterior log probabilities for SFMPE posterior samples (likelihood + prior)
@@ -261,9 +261,10 @@ def run(cfg: DictConfig):
 
     # Compute CNF density estimates for FMPE posterior samples
     logger.info("Computing FMPE CNF density estimates")
+    # Broadcast context to match batch size of posterior samples
     fmpe_cnf_log_probs = fmpe_estim.log_prob_posterior_samples(
         fmpe_posterior_samples,
-        fmpe_y_observed[None, ...]
+        fmpe_y_observed[None, ...],
     )
 
     # Compute KL divergences
@@ -525,7 +526,7 @@ def compute_true_posterior_log_prob_sfmpe(
     prior_dist = prior_fn(n_theta)
     log_prior = prior_dist.log_prob(posterior_samples)
 
-    return log_likelihood + log_prior
+    return jnp.sum(log_likelihood + log_prior, axis=-1)
 
 def compute_true_posterior_log_prob_fmpe(
     posterior_samples: jnp.ndarray,

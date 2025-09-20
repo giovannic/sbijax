@@ -302,19 +302,29 @@ class SFMPE:
 
         theta_mask, context_mask, cross_mask = _make_attention_masks(masks)
 
-        self.model.eval()
+        # NOTE: nnx.jit somehow leaks tracers. Need to investigate
+        @jit
+        def _compute_log_prob(
+            graphdef,
+            state
+            ):
+            model = nnx.merge(graphdef, state)
+            model.eval()
+            res = model.log_prob(
+                theta=posterior_samples_encoded,
+                theta_label=labels['theta'],
+                theta_index=theta_index,
+                theta_mask=theta_mask,
+                context=context,
+                context_label=labels['y'],
+                context_index=context_index,
+                context_mask=context_mask,
+                cross_mask=cross_mask
+            )
 
-        # Use the CNF's log_prob method directly with encoded samples
-        log_probs = self.model.log_prob(
-            theta=posterior_samples_encoded,
-            theta_label=labels['theta'],
-            theta_index=theta_index,
-            theta_mask=theta_mask,
-            context=context,
-            context_label=labels['y'],
-            context_index=context_index,
-            context_mask=context_mask,
-            cross_mask=cross_mask
-        )
+            return res
 
+        graphdef, state = nnx.split(self.model)
+
+        log_probs = _compute_log_prob(graphdef, state)
         return log_probs
