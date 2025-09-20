@@ -166,3 +166,33 @@ class FMPE(nnx.Module):
 
         z = vmap(sample_pair)(theta, context)
         return z[..., 0, :]
+
+    def log_prob_posterior_samples(
+        self,
+        posterior_samples: Array,
+        context: Array,
+    ) -> Array:
+        """
+        Compute log probabilities of posterior samples using the CNF model.
+
+        Parameters
+        ----------
+        posterior_samples : Array
+            Posterior samples in flat format, shape (n_samples, theta_dim)
+        context : Array
+            Context/conditioning variables
+
+        Returns
+        -------
+        Array
+            Log probabilities from the CNF model, shape (n_samples,)
+        """
+        self.model.eval()
+
+        # Use the CNF's log_prob method
+        log_probs = self.model.log_prob(
+            theta=posterior_samples,
+            context=context
+        )
+
+        return log_probs

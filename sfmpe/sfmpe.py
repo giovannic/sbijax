@@ -147,7 +147,7 @@ class SFMPE:
 
         return losses
 
-    def sample_posterior(
+    def sample_posterior_encoded(
         self,
         context: Array,
         labels: Array,
@@ -155,9 +155,15 @@ class SFMPE:
         masks: Optional[PyTree] = None,
         index: Optional[PyTree] = None,
         n_samples: int = 1_000,
-        theta_0: Optional[PyTree]=None,
+        theta_0: Optional[PyTree] = None,
         direction: Direction = 'forward',
-    ) -> PyTree:
+    ) -> Array:
+        """
+        Sample posterior in encoded/flattened format without decoding.
+
+        This is useful when you need the raw encoded samples for log_prob computation
+        with the same labels, indices, and masks used during training.
+        """
         if index is not None:
             context_index = index['y']
             theta_index = index['theta']
@@ -200,9 +206,36 @@ class SFMPE:
 
         graphdef, state = nnx.split(self.model)
 
-        thetas = _sample_theta(graphdef, state)
+        # Return the raw encoded samples without decoding
+        thetas_encoded = _sample_theta(graphdef, state)
+        return thetas_encoded
+
+    def sample_posterior(
+        self,
+        context: Array,
+        labels: Array,
+        theta_slices: PyTree,
+        masks: Optional[PyTree] = None,
+        index: Optional[PyTree] = None,
+        n_samples: int = 1_000,
+        theta_0: Optional[PyTree]=None,
+        direction: Direction = 'forward',
+    ) -> PyTree:
+        # Use the encoded version and then decode
+        thetas_encoded = self.sample_posterior_encoded(
+            context=context,
+            labels=labels,
+            theta_slices=theta_slices,
+            masks=masks,
+            index=index,
+            n_samples=n_samples,
+            theta_0=theta_0,
+            direction=direction
+        )
+
+        # Decode to structured format
         thetas = decode_theta(
-            theta=thetas,
+            theta=thetas_encoded,
             theta_slices=theta_slices,
             sample_shape=(n_samples,),
         )
@@ -230,3 +263,58 @@ class SFMPE:
             )
 
         return vmap(sample_pair)(theta, context)
+
+    def log_prob_posterior_samples(
+        self,
+        posterior_samples_encoded: Array,
+        context: Array,
+        labels: Array,
+        masks: Optional[PyTree] = None,
+        index: Optional[PyTree] = None,
+    ) -> Array:
+        """
+        Compute log probabilities of encoded posterior samples using the CNF model.
+
+        Parameters
+        ----------
+        posterior_samples_encoded : Array
+            Posterior samples in encoded/flattened format
+        context : Array
+            Context/conditioning variables
+        labels : Array
+            Labels for both theta and context
+        masks : Optional[PyTree]
+            Attention and padding masks
+        index : Optional[PyTree]
+            Index information for theta and context
+
+        Returns
+        -------
+        Array
+            Log probabilities from the CNF model, shape (n_samples,)
+        """
+        if index is not None:
+            context_index = index['y']
+            theta_index = index['theta']
+        else:
+            context_index = None
+            theta_index = None
+
+        theta_mask, context_mask, cross_mask = _make_attention_masks(masks)
+
+        self.model.eval()
+
+        # Use the CNF's log_prob method directly with encoded samples
+        log_probs = self.model.log_prob(
+            theta=posterior_samples_encoded,
+            theta_label=labels['theta'],
+            theta_index=theta_index,
+            theta_mask=theta_mask,
+            context=context,
+            context_label=labels['y'],
+            context_index=context_index,
+            context_mask=context_mask,
+            cross_mask=cross_mask
+        )
+
+        return log_probs

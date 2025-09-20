@@ -148,16 +148,38 @@ def run(cfg: DictConfig):
 
     logger.info("Sampling SFMPE posterior")
     start_time = time.time()
-    posterior = estim.sample_posterior(
-        _flatten(y_observed)[..., None],
+
+    # Sample in both encoded and decoded formats
+    context_flattened = _flatten(y_observed)[..., None]
+    posterior_encoded = estim.sample_posterior_encoded(
+        context_flattened,
         labels, #type:ignore
         slices,
         masks=masks,
         n_samples=n_post_samples
     )
 
-    # Compute log probabilities for SFMPE posterior samples
-    sfmpe_log_probs = simulator_dist(posterior).log_prob(y_observed['obs'])
+    posterior = estim.sample_posterior(
+        context_flattened,
+        labels, #type:ignore
+        slices,
+        masks=masks,
+        n_samples=n_post_samples
+    )
+
+    # Compute true posterior log probabilities for SFMPE posterior samples (likelihood + prior)
+    sfmpe_posterior_log_probs = compute_true_posterior_log_prob_sfmpe(
+        posterior, y_observed, prior_fn, simulator_dist, n_theta
+    )
+
+    # Compute CNF density estimates for SFMPE posterior samples
+    logger.info("Computing SFMPE CNF density estimates")
+    sfmpe_cnf_log_probs = estim.log_prob_posterior_samples(
+        posterior_encoded,
+        context_flattened,
+        labels, #type:ignore
+        masks=masks
+    )
 
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
@@ -232,15 +254,25 @@ def run(cfg: DictConfig):
         n_samples=n_post_samples
     )
 
-    # Compute log probabilities for FMPE posterior samples
-    # Reconstruct structured parameters from flat FMPE samples
-    def fmpe_log_prob_fn(flat_params):
-        mu = flat_params[..., :1, None]  # (n_samples, 1, 1)
-        theta = flat_params[..., 1:, None]  # (n_samples, n_theta, 1)
-        theta_dict = {'mu': mu, 'theta': theta}
-        return simulator_dist(theta_dict).log_prob(y_observed['obs'])
+    # Compute true posterior log probabilities for FMPE posterior samples (likelihood + prior)
+    fmpe_posterior_log_probs = compute_true_posterior_log_prob_fmpe(
+        fmpe_posterior_samples, y_observed, prior_fn, simulator_dist, n_theta
+    )
 
-    fmpe_log_probs = fmpe_log_prob_fn(fmpe_posterior_samples)
+    # Compute CNF density estimates for FMPE posterior samples
+    logger.info("Computing FMPE CNF density estimates")
+    fmpe_cnf_log_probs = fmpe_estim.log_prob_posterior_samples(
+        fmpe_posterior_samples,
+        fmpe_y_observed[None, ...]
+    )
+
+    # Compute KL divergences
+    logger.info("Computing KL divergences")
+    sfmpe_kl_divergence = compute_kl_divergence(sfmpe_cnf_log_probs, sfmpe_posterior_log_probs)
+    fmpe_kl_divergence = compute_kl_divergence(fmpe_cnf_log_probs, fmpe_posterior_log_probs)
+
+    logger.info(f"SFMPE KL divergence (CNF || true posterior): {sfmpe_kl_divergence:.6f}")
+    logger.info(f"FMPE KL divergence (CNF || true posterior): {fmpe_kl_divergence:.6f}")
 
     print(f'truth: {fmpe_y_observed}')
     print(f'posterior mean: {jnp.mean(fmpe_posterior_samples, axis=0)}')
@@ -305,7 +337,7 @@ def run(cfg: DictConfig):
         cfg.analysis.classifier.latent_dim,
         rngs
     )
-    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe', sfmpe_log_probs)
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe', sfmpe_posterior_log_probs, sfmpe_cnf_log_probs, sfmpe_kl_divergence)
     logger.info(f"SFMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
     logger.info("Starting C2ST-NF analysis for FMPE")
@@ -325,7 +357,7 @@ def run(cfg: DictConfig):
         cfg.analysis.classifier.latent_dim,
         rngs
     )
-    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe', fmpe_log_probs)
+    save_lc2st_results(null_stats, main_stat, p_value, out_dir/'fmpe', fmpe_posterior_log_probs, fmpe_cnf_log_probs, fmpe_kl_divergence)
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
 
 def apply_lc2st(
@@ -416,7 +448,9 @@ def save_lc2st_results(
     main_stat: jnp.ndarray,
     p_value: jnp.ndarray,
     out_dir: Path,
-    posterior_log_probs: jnp.ndarray
+    posterior_log_probs: jnp.ndarray,
+    cnf_log_probs: jnp.ndarray,
+    kl_divergence: float
     ):
 
     # Create output directory and make quant plot
@@ -437,7 +471,9 @@ def save_lc2st_results(
         'null_stats': null_stats.tolist(),
         'p_value': float(p_value),
         'reject': bool(p_value < 0.05),
-        'posterior_log_probs': posterior_log_probs.tolist()
+        'posterior_log_probs': posterior_log_probs.tolist(),
+        'cnf_log_probs': cnf_log_probs.tolist(),
+        'kl_divergence': kl_divergence
     }
     with open(out_dir / 'stats.json', 'w') as f:
         json.dump(stats, f)
@@ -453,6 +489,104 @@ def _flatten(x: PyTree) -> jnp.ndarray:
         [v.reshape(v.shape[0], -1) for v in x.values()],
         axis=-1
     )
+
+def compute_true_posterior_log_prob_sfmpe(
+    posterior_samples: PyTree,
+    y_observed: PyTree,
+    prior_fn: Callable,
+    simulator_dist: Callable,
+    n_theta: int
+    ) -> jnp.ndarray:
+    """
+    Compute true posterior log probability for SFMPE samples.
+
+    Parameters
+    ----------
+    posterior_samples : PyTree
+        Posterior samples in SFMPE format (dict with 'mu', 'theta' keys)
+    y_observed : PyTree
+        Observed data
+    prior_fn : Callable
+        Prior distribution function
+    simulator_dist : Callable
+        Simulator distribution function
+    n_theta : int
+        Number of theta parameters
+
+    Returns
+    -------
+    jnp.ndarray
+        Log posterior probabilities (likelihood + prior)
+    """
+    # Compute likelihood
+    log_likelihood = simulator_dist(posterior_samples).log_prob(y_observed['obs'])
+
+    # Compute prior log probability
+    prior_dist = prior_fn(n_theta)
+    log_prior = prior_dist.log_prob(posterior_samples)
+
+    return log_likelihood + log_prior
+
+def compute_true_posterior_log_prob_fmpe(
+    posterior_samples: jnp.ndarray,
+    y_observed: PyTree,
+    prior_fn: Callable,
+    simulator_dist: Callable,
+    n_theta: int
+    ) -> jnp.ndarray:
+    """
+    Compute true posterior log probability for FMPE samples.
+    Reconstructs structured format and calls SFMPE version.
+
+    Parameters
+    ----------
+    posterior_samples : jnp.ndarray
+        Posterior samples in FMPE flat format
+    y_observed : PyTree
+        Observed data
+    prior_fn : Callable
+        Prior distribution function
+    simulator_dist : Callable
+        Simulator distribution function
+    n_theta : int
+        Number of theta parameters
+
+    Returns
+    -------
+    jnp.ndarray
+        Log posterior probabilities (likelihood + prior)
+    """
+    # Reconstruct structured parameters from flat FMPE samples
+    mu = posterior_samples[..., :1, None]  # (n_samples, 1, 1)
+    theta = posterior_samples[..., 1:, None]  # (n_samples, n_theta, 1)
+    theta_dict = {'mu': mu, 'theta': theta}
+
+    # Call SFMPE version with reconstructed structure
+    return compute_true_posterior_log_prob_sfmpe(
+        theta_dict, y_observed, prior_fn, simulator_dist, n_theta
+    )
+
+def compute_kl_divergence(
+    cnf_log_probs: jnp.ndarray,
+    true_log_probs: jnp.ndarray
+    ) -> float:
+    """
+    Compute KL divergence: KL(q||p) = E_q[log q(θ) - log p(θ)]
+    where q is the CNF estimate and p is the true posterior.
+
+    Parameters
+    ----------
+    cnf_log_probs : jnp.ndarray
+        Log probabilities from CNF model
+    true_log_probs : jnp.ndarray
+        True posterior log probabilities
+
+    Returns
+    -------
+    float
+        KL divergence estimate
+    """
+    return float(jnp.mean(cnf_log_probs - true_log_probs))
 
 def create_sfmpe_calibration_dataset(
     key: jnp.ndarray,
