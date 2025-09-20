@@ -142,12 +142,11 @@ def test_density_of_constant_cnf(constant_cnf_setup):
 def test_density_of_constant_cnf_with_transformed_data(doubling_cnf_setup):
     # Generate samples from normal distribution
     samples = jr.normal(jr.PRNGKey(0), shape=(100, 2))
-    log_det_transform = jnp.log(2.0 * 2.0) # scale 2 in 2 dimensions
 
     # Compute density analytically for 2D independent Gaussian
-    # log p(y) = log p(x/2) + log|det(dx/dy)| where y = 2x
-    # log|det(dx/dy)| = log(1/2 * 1/2) = log(1/4) = -log(4)
-    log_prob = jnp.sum(norm.logpdf(samples), axis=1) - log_det_transform
+    # The doubling transform produces y ~ N(0, 4) from x ~ N(0, 1)
+    # So log p(y) should be computed directly as N(y; 0, 2^2)
+    log_prob = jnp.sum(norm.logpdf(samples, scale=2), axis=1)
 
     # Compute stats through constant cnf
     cnf, _, _, _ = doubling_cnf_setup
@@ -161,10 +160,9 @@ def test_density_of_constant_cnf_with_transformed_data(doubling_cnf_setup):
         context_index=None,
         context_mask=None,
         cross_mask=None,
-        n_epsilon=50
+        n_epsilon=20
     )
 
     # Compare results
-    # Use high tolerance due to stochastic nature of FFJORD trace estimation
-    # The method is fundamentally correct but has inherent variance
-    assert jnp.allclose(log_prob, log_prob_cnf, rtol=0.8, atol=2.5)
+    # Use moderate tolerance due to stochastic nature of FFJORD trace estimation
+    assert jnp.allclose(log_prob, log_prob_cnf, rtol=0.1, atol=0.5)
