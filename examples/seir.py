@@ -283,7 +283,7 @@ def run(cfg: DictConfig) -> None:
     )
     sfmpe_log_probs = simulator_dist(posterior, f_in_matched).log_prob(y_processed['obs'])
 
-    logger.info(f'SFMPE posterior mean: {jnp.mean(_flatten(posterior), axis=0)}')
+    logger.info(f'SFMPE posterior mean: {jnp.mean(flatten_selective_theta_dict(posterior, sample_params), axis=0)}')
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
 
     # Create FMPE bijector
@@ -370,22 +370,23 @@ def run(cfg: DictConfig) -> None:
     # Sample from FMPE posterior
     logger.info("Sampling FMPE posterior")
     start_time = time.time()
-    fmpe_posterior_samples = fmpe_estim.sample_posterior(
+    fmpe_posterior_samples_unconstrained = fmpe_estim.sample_posterior(
         fmpe_y_observed[None, ...],
         theta_shape=(total_params,),
         n_samples=n_post_samples
     )
 
+    # Transform posterior samples back to constrained space
+    fmpe_posterior_samples = fmpe_theta_bijector.inverse(fmpe_posterior_samples_unconstrained)
+
     # Compute log probabilities for FMPE posterior samples
-    # Transform back to constrained space and reconstruct structured parameters
-    def fmpe_log_prob_fn(flat_params):
-        # Inverse transform to constrained space
-        theta_constrained_flat = fmpe_theta_bijector.inverse(flat_params)
-        # Reconstruct structured theta from flat representation
-        theta_dict = reconstruct_selective_theta_dict(theta_constrained_flat, sample_params, fixed_params, n_sites)
+    # Samples are already in constrained space, just need to reconstruct structured parameters
+    def fmpe_log_prob_fn(flat_params_constrained):
+        # Reconstruct structured theta from flat representation (already constrained)
+        theta_dict = reconstruct_selective_theta_dict(flat_params_constrained, sample_params, fixed_params, n_sites)
         # Broadcast f_in to match sample dimension
         f_in_matched = tree.map(
-            lambda leaf: jnp.repeat(leaf, flat_params.shape[0], axis=0),
+            lambda leaf: jnp.repeat(leaf, flat_params_constrained.shape[0], axis=0),
             f_in
         )
         return simulator_dist(theta_dict, f_in_matched).log_prob(y_processed['obs'])
@@ -415,17 +416,20 @@ def run(cfg: DictConfig) -> None:
             theta_0 = theta_0,
             index=f_in_flattened
         )
-        return _flatten(posterior)[...,0,:]
+        return flatten_selective_theta_dict(posterior, sample_params)[...,0,:]
 
     def sample_single_fmpe_posterior(key, x):
         dim = total_params
         theta_0 = jr.normal(key, (1, dim))
-        return fmpe_estim.sample_posterior(
+        # Sample in unconstrained space and transform to constrained space
+        theta_unconstrained = fmpe_estim.sample_posterior(
             x[None, ...],
             theta_shape = (dim,),
             n_samples=1,
             theta_0 = theta_0
         ).reshape((dim,))
+        # Transform to constrained space
+        return fmpe_theta_bijector.inverse(theta_unconstrained)
     
     n_cal_epochs = cfg.analysis.n_cal_epochs
     analyse_key, key = jr.split(key)
@@ -435,18 +439,25 @@ def run(cfg: DictConfig) -> None:
     out_dir = Path(hydra_cfg.runtime.output_dir)
 
     # Preprocess posterior samples for SFMPE
-    sfmpe_posterior_flat = _flatten(posterior)
+    sfmpe_posterior_flat = flatten_selective_theta_dict(posterior, sample_params)
     
     logger.info("Starting C2ST-NF analysis for SFMPE")
     start_time = time.time()
     cal_f_in = tree.map(lambda leaf: jnp.repeat(leaf, n_cal, axis=0), f_in)
+
+    # Create closure that captures sample_params for calibration dataset creation
+    def sfmpe_calibration_dataset_with_params(key, sample_posterior, prior_fn, simulator_fn, n):
+        return create_sfmpe_calibration_dataset_with_sample_params(
+            key, sample_posterior, prior_fn, simulator_fn, n, sample_params
+        )
+
     null_stats, main_stat, p_value = apply_lc2st(
         analyse_key,
-        create_sfmpe_calibration_dataset,
+        sfmpe_calibration_dataset_with_params,
         sample_single_sfmpe_posterior,
-        lambda: wrapped_prior_fn(n_sites),  # Use wrapped (transformed) function
-        lambda seed, theta: wrapped_simulator_fn_for_training(seed, theta, cal_f_in),  # Use training-specific wrapped simulator
-        y_unconstrained['obs'].reshape(-1), # Use transformed observations
+        lambda: selective_prior_fn(n_sites),  # Use constrained selective prior
+        lambda seed, theta: apply_dequantization(wrapped_simulator_fn(seed, theta, cal_f_in), seed),  # Use constrained simulator with dequantization
+        y_processed['obs'].reshape(-1), # Use constrained observations
         sfmpe_posterior_flat,
         n_cal_epochs,
         n_cal,
@@ -458,16 +469,41 @@ def run(cfg: DictConfig) -> None:
     save_lc2st_results(null_stats, main_stat, p_value, out_dir/'sfmpe', sfmpe_log_probs)
     logger.info(f"SFMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
+    # Create constrained FMPE functions for LC2ST evaluation
+    def constrained_fmpe_prior_fn(key: Array, n_samples: int) -> Array:
+        """Prior function in constrained space for FMPE LC2ST evaluation"""
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+        theta_samples = selective_prior(n_sites).sample((n_samples,), seed=key)
+        # Flatten but keep in constrained space
+        return flatten_selective_theta_dict(theta_samples, sample_params)
+
+    def constrained_fmpe_simulator_fn(key: Array, theta_flat_constrained: Array) -> Array:
+        """Simulator function in constrained space for FMPE LC2ST evaluation"""
+        # Reconstruct structured theta from flat representation (already constrained)
+        theta_dict = reconstruct_selective_theta_dict(theta_flat_constrained, sample_params, fixed_params, n_sites)
+
+        # Run simulator
+        n_simulations = theta_flat_constrained.shape[0]
+        f_in_matched = tree.map(
+            lambda leaf: jnp.repeat(leaf, n_simulations, axis=0),
+            f_in
+        )
+        y_samples = simulator_fn(key, theta_dict, f_in_matched)
+        y_deq = apply_dequantization(y_samples, key)
+
+        # Return flattened observations (constrained space)
+        return y_deq['obs'].reshape((theta_flat_constrained.shape[0], -1))
+
     logger.info("Starting C2ST-NF analysis for FMPE")
     start_time = time.time()
     null_stats, main_stat, p_value = apply_lc2st(
         analyse_key,
         create_fmpe_calibration_dataset,
         sample_single_fmpe_posterior,
-        fmpe_prior_fn,        # Already transformed
-        fmpe_simulator_fn,    # Already transformed
-        fmpe_y_observed,      # Use same transformed observations as training
-        fmpe_posterior_samples,
+        constrained_fmpe_prior_fn,        # Use constrained prior
+        constrained_fmpe_simulator_fn,    # Use constrained simulator
+        y_processed['obs'].reshape(-1),   # Use constrained observations
+        fmpe_posterior_samples,           # Already in constrained space
         n_cal_epochs,
         n_cal,
         cfg.analysis.classifier.n_layers,
@@ -575,12 +611,13 @@ def save_lc2st_results(
         json.dump(stats, f)
 
 
-def create_sfmpe_calibration_dataset(
+def create_sfmpe_calibration_dataset_with_sample_params(
     key: jnp.ndarray,
     sample_posterior: Callable[[Array, PyTree], PyTree],
     prior_fn: Callable[[], tfd.Distribution],
     simulator_fn: Callable[[Array, PyTree], PyTree],
-    n: int
+    n: int,
+    sample_params: list
     ) -> Tuple[Array, Array, Array]:
     """Create calibration dataset for SFMPE."""
     prior_key, post_key, sim_key = jr.split(key, 3)
@@ -590,7 +627,7 @@ def create_sfmpe_calibration_dataset(
         sample_posterior,
         in_axes=[0, tree.map(lambda _: 0, y)]
     )(jr.split(post_key, n), y)
-    x = _flatten(prior)
+    x = flatten_selective_theta_dict(prior, sample_params)
     y = _flatten(y)
     return y, x, post_estimate
 
