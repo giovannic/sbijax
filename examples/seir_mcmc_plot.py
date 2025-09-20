@@ -204,77 +204,203 @@ def get_method_colors() -> Dict[str, str]:
     }
 
 
-def plot_posterior_predictive_checks(
-    mcmc_posterior_samples: Array,
-    theta_truth: Dict[str, Array],
-    y_observed: Dict[str, Array],
-    f_in: Dict[str, Array],
-    plot_config: Dict,
-    out_dir: Path,
-    key: Array,
-    selective_config: Dict,
-    title_prefix: str = "Posterior",
-    filename_prefix: str = "seir_ppc",
-    n_ppc_samples: int = 0
-) -> None:
+def prepare_posterior_data(
+    job_data: JobData,
+    sample_params: List[str],
+    fixed_params: Dict[str, Array],
+    n_sites: int
+) -> Dict[str, Array]:
     """
-    Generate posterior predictive check plots showing incidence trajectories.
-    
-    Creates separate plots for each site showing:
-    - True trajectory (solid line) from theta_truth
-    - 95% credible bands from posterior samples (shaded area)
-    - Observed data points (crosses) at observation times
-    
+    Prepare posterior data for a single method.
+
     Parameters
     ----------
-    mcmc_posterior_samples : Array
-        MCMC samples from posterior distribution
-    theta_truth : Dict[str, Array]
-        Ground truth parameters used to generate observations
-    y_observed : Dict[str, Array]
-        Observed incidence data
-    f_in : Dict[str, Array]
-        Functional input containing observation times
-    plot_config : Dict
-        Configuration parameters for plotting
-    out_dir : Path
-        Output directory for saving plots
-    key : Array
-        Random key for posterior sampling
+    job_data : JobData
+        Job data containing posterior samples
+    sample_params : List[str]
+        List of sampled parameter names
+    fixed_params : Dict[str, Array]
+        Fixed parameter values
+    n_sites : int
+        Number of sites
+
+    Returns
+    -------
+    Dict[str, Array]
+        Reconstructed posterior dictionary filtered to sampled parameters
     """
-    n_sites = plot_config['n_sites']
+    post_dict = reconstruct_selective_theta_dict(
+        job_data.mcmc_posterior_samples, sample_params, fixed_params, n_sites
+    )
+    return {k: v for k, v in post_dict.items() if k in sample_params}
+
+
+def generate_trajectories(
+    posterior_samples: Array,
+    sample_params: List[str],
+    fixed_params: Dict[str, Array],
+    plot_config: Dict,
+    n_sites: int,
+    n_ppc_samples: int = 0,
+    key: Optional[Array] = None
+) -> List[Array]:
+    """
+    Generate posterior trajectories for all sites.
+
+    Parameters
+    ----------
+    posterior_samples : Array
+        Posterior samples in flat format
+    sample_params : List[str]
+        List of sampled parameter names
+    fixed_params : Dict[str, Array]
+        Fixed parameter values
+    plot_config : Dict
+        Plot configuration
+    n_sites : int
+        Number of sites
+    n_ppc_samples : int
+        Number of samples to use (0 = use all)
+    key : Optional[Array]
+        Random key for sampling
+
+    Returns
+    -------
+    List[Array]
+        List of trajectory arrays, one per site
+    """
     n_timesteps = plot_config['n_timesteps']
     n_warmup = plot_config['n_warmup']
     population = plot_config['population']
     I0_prop = plot_config['I0_prop']
-    
-    # Create dense time grid for smooth trajectories including warmup
+
+    # Create dense time grids
     t_dense_full = jnp.linspace(0, n_warmup + n_timesteps, (n_warmup + n_timesteps) * 4)
-    # Create plotting grid (post-warmup only)
-    t_dense_plot = jnp.linspace(0, n_timesteps, n_timesteps * 4)
-    
+
     # Initial conditions
     I0 = population * I0_prop
     S0 = population - I0
     initial_state = jnp.array([S0, 0.0, I0, 0.0])  # [S, E, I, R]
-    
+
     def solve_trajectory(params_dict: Dict[str, Array], times: Array) -> Array:
         """Solve SEIR ODE for given parameters and return incidence."""
         def ode_func(state, t):
             return seir_dynamics(state, t, params_dict)
-        
+
         solution = odeint(ode_func, initial_state, times)
         exposed = solution[:, 1]  # E compartment
         incidence = params_dict['alpha'] * exposed
         return jnp.maximum(incidence, 1e-8)
-    
+
     def solve_trajectory_post_warmup(params_dict: Dict[str, Array]) -> Array:
         """Solve trajectory over full time including warmup, return post-warmup."""
         full_solution = solve_trajectory(params_dict, t_dense_full)
         # Extract post-warmup portion by finding indices after warmup
         warmup_idx = int(len(t_dense_full) * n_warmup / (n_warmup + n_timesteps))
         return full_solution[warmup_idx:]
-    
+
+    # Reconstruct posterior
+    post_dict = reconstruct_selective_theta_dict(
+        posterior_samples, sample_params, fixed_params, n_sites
+    )
+
+    # Flatten first two dimensions
+    flattened_post = tree.map(
+        lambda x: x.reshape((x.shape[0] * x.shape[1],) + x.shape[2:]),
+        post_dict
+    )
+
+    n_total_samples = flattened_post['beta_0'].shape[0]
+    if n_ppc_samples == 0:
+        n_ensemble = n_total_samples
+    else:
+        n_ensemble = min(n_ppc_samples, n_total_samples)
+
+    if n_ensemble == n_total_samples:
+        ensemble_indices = jnp.arange(n_total_samples)
+    else:
+        if key is None:
+            key = jr.PRNGKey(42)
+        ensemble_indices = jr.choice(key, n_total_samples, shape=(n_ensemble,), replace=False)
+
+    # Sample parameters
+    sampled_post = tree.map(
+        lambda x: x[ensemble_indices],
+        flattened_post
+    )
+
+    # Generate trajectories for each site
+    posterior_trajectories = []
+    for site_idx in range(n_sites):
+        site_trajectories = []
+        for sample_idx in range(n_ensemble):
+            params_dict = {
+                'beta_0': sampled_post['beta_0'][sample_idx, 0],
+                'alpha': sampled_post['alpha'][sample_idx, 0],
+                'sigma': sampled_post['sigma'][sample_idx, 0],
+                'A': sampled_post['A'][sample_idx, site_idx],
+                'T_season': sampled_post['T_season'][sample_idx, site_idx],
+                'phi': sampled_post['phi'][sample_idx, site_idx]
+            }
+            traj = solve_trajectory_post_warmup(params_dict)
+            site_trajectories.append(traj)
+        posterior_trajectories.append(jnp.array(site_trajectories))
+
+    return posterior_trajectories
+
+
+def generate_true_trajectories(
+    theta_truth: Dict[str, Array],
+    plot_config: Dict,
+    n_sites: int
+) -> List[Array]:
+    """
+    Generate true trajectories for all sites.
+
+    Parameters
+    ----------
+    theta_truth : Dict[str, Array]
+        Ground truth parameters
+    plot_config : Dict
+        Plot configuration
+    n_sites : int
+        Number of sites
+
+    Returns
+    -------
+    List[Array]
+        List of true trajectory arrays, one per site
+    """
+    n_timesteps = plot_config['n_timesteps']
+    n_warmup = plot_config['n_warmup']
+    population = plot_config['population']
+    I0_prop = plot_config['I0_prop']
+
+    # Create dense time grids
+    t_dense_full = jnp.linspace(0, n_warmup + n_timesteps, (n_warmup + n_timesteps) * 4)
+
+    # Initial conditions
+    I0 = population * I0_prop
+    S0 = population - I0
+    initial_state = jnp.array([S0, 0.0, I0, 0.0])  # [S, E, I, R]
+
+    def solve_trajectory(params_dict: Dict[str, Array], times: Array) -> Array:
+        """Solve SEIR ODE for given parameters and return incidence."""
+        def ode_func(state, t):
+            return seir_dynamics(state, t, params_dict)
+
+        solution = odeint(ode_func, initial_state, times)
+        exposed = solution[:, 1]  # E compartment
+        incidence = params_dict['alpha'] * exposed
+        return jnp.maximum(incidence, 1e-8)
+
+    def solve_trajectory_post_warmup(params_dict: Dict[str, Array]) -> Array:
+        """Solve trajectory over full time including warmup, return post-warmup."""
+        full_solution = solve_trajectory(params_dict, t_dense_full)
+        # Extract post-warmup portion by finding indices after warmup
+        warmup_idx = int(len(t_dense_full) * n_warmup / (n_warmup + n_timesteps))
+        return full_solution[warmup_idx:]
+
     # Generate true trajectories for each site
     true_trajectories = []
     for site_idx in range(n_sites):
@@ -288,106 +414,154 @@ def plot_posterior_predictive_checks(
         }
         true_traj = solve_trajectory_post_warmup(params_dict)
         true_trajectories.append(true_traj)
-    
-    # Convert MCMC samples to structured format
+
+    return true_trajectories
+
+
+def plot_posterior_predictive_checks(
+    job_data_list: List[JobData],
+    theta_truth: Dict[str, Array],
+    y_observed: Dict[str, Array],
+    f_in: Dict[str, Array],
+    plot_config: Dict,
+    out_dir: Path,
+    selective_config: Dict,
+    title_prefix: str = "Posterior",
+    filename_prefix: str = "seir_ppc",
+    n_ppc_samples: int = 0,
+    key: Optional[Array] = None
+) -> None:
+    """
+    Generate posterior predictive check plots showing incidence trajectories.
+    Supports both single and multiple methods.
+
+    Creates separate plots for each site showing:
+    - True trajectory (solid black line) from theta_truth
+    - 95% credible bands from each method (different colors)
+    - Observed data points (crosses) at observation times
+    - Legend identifying all methods (if multiple)
+
+    Parameters
+    ----------
+    job_data_list : List[JobData]
+        List of job data (single method or multiple for comparison)
+    theta_truth : Dict[str, Array]
+        Ground truth parameters used to generate observations
+    y_observed : Dict[str, Array]
+        Observed incidence data
+    f_in : Dict[str, Array]
+        Functional input containing observation times
+    plot_config : Dict
+        Configuration parameters for plotting
+    out_dir : Path
+        Output directory for saving plots
+    selective_config : Dict
+        Configuration specifying which parameters were sampled
+    title_prefix : str
+        Prefix for plot titles
+    filename_prefix : str
+        Prefix for saved filenames
+    n_ppc_samples : int
+        Number of samples to use for predictive checks (0 = use all samples)
+    key : Optional[Array]
+        Random key for posterior sampling
+    """
     n_sites = plot_config['n_sites']
+    n_timesteps = plot_config['n_timesteps']
+    population = plot_config['population']
+    method_colors = get_method_colors()
 
-    # Always use selective approach (full inference is selective with all params)
+    # Create plotting grid (post-warmup only)
+    t_dense_plot = jnp.linspace(0, n_timesteps, n_timesteps * 4)
+
+    # Generate true trajectories using helper function
+    true_trajectories = generate_true_trajectories(theta_truth, plot_config, n_sites)
+
+    # Generate posterior trajectories for each method
+    method_trajectories = {}
     sample_params = selective_config['sample_params']
-    fixed_params_list = selective_config['fixed_params']
 
-    # Convert fixed params back to jax arrays
-    fixed_params = {}
-    for param_name, param_values in fixed_params_list.items():
-        fixed_params[param_name] = jnp.array(param_values)
+    for job_data in job_data_list:
+        fixed_params = {k: jnp.array(v) for k, v in job_data.selective_config['fixed_params'].items()}
 
-    post_dict = reconstruct_selective_theta_dict(
-        mcmc_posterior_samples, sample_params, fixed_params, n_sites
-    )
-    
-    # Flatten first two dimensions using tree.map
-    flattened_post = tree.map(
-        lambda x: x.reshape((x.shape[0] * x.shape[1],) + x.shape[2:]),
-        post_dict
-    )
-    
-    n_total_samples = flattened_post['beta_0'].shape[0]
-    if n_ppc_samples == 0:
-        n_ensemble = n_total_samples
-    else:
-        n_ensemble = min(n_ppc_samples, n_total_samples)
+        posterior_trajectories = generate_trajectories(
+            job_data.mcmc_posterior_samples,
+            sample_params,
+            fixed_params,
+            plot_config,
+            n_sites,
+            n_ppc_samples,
+            key
+        )
+        method_trajectories[job_data.method_label] = posterior_trajectories
 
-    if n_ensemble == n_total_samples:
-        ensemble_indices = jnp.arange(n_total_samples)
-    else:
-        ensemble_indices = jr.choice(key, n_total_samples, shape=(n_ensemble,), replace=False)
-    
-    # Sample parameters using tree.map
-    sampled_post = tree.map(
-        lambda x: x[ensemble_indices],
-        flattened_post
-    )
-    
-    # Generate posterior trajectories for each site
-    posterior_trajectories = {site_idx: [] for site_idx in range(n_sites)}
-    
-    for sample_idx in range(n_ensemble):
-        for site_idx in range(n_sites):
-            params_dict = {
-                'beta_0': sampled_post['beta_0'][sample_idx, 0],
-                'alpha': sampled_post['alpha'][sample_idx, 0],
-                'sigma': sampled_post['sigma'][sample_idx, 0],
-                'A': sampled_post['A'][sample_idx, site_idx],
-                'T_season': sampled_post['T_season'][sample_idx, site_idx],
-                'phi': sampled_post['phi'][sample_idx, site_idx]
-            }
-            
-            traj = solve_trajectory_post_warmup(params_dict)
-            posterior_trajectories[site_idx].append(traj)
-    
-    # Convert to arrays and compute percentiles
-    for site_idx in range(n_sites):
-        posterior_trajectories[site_idx] = jnp.array(posterior_trajectories[site_idx])
-    
     # Create plots for each site
     for site_idx in range(n_sites):
-        plt.figure(figsize=(10, 6))
-        
+        plt.figure(figsize=(12, 8) if len(job_data_list) > 1 else (10, 6))
+
         # Convert to cases per 100,000
         scale_factor = 100000.0 / population
-        
+
         # Plot true trajectory
         true_scaled = true_trajectories[site_idx] * scale_factor
-        plt.plot(t_dense_plot, true_scaled, 'k-', linewidth=2, label='True trajectory')
-        
-        # Plot posterior credible bands
-        post_traj = posterior_trajectories[site_idx]
-        post_scaled = post_traj * scale_factor
-        percentiles = jnp.percentile(
-            post_scaled,
-            jnp.array([2.5, 97.5]),
-            axis=0
-        )
-        plt.fill_between(
-            t_dense_plot, percentiles[0], percentiles[1], 
-            alpha=0.3, color='blue', label='95% Credible interval'
-        )
-        
+        plt.plot(t_dense_plot, true_scaled, 'k-', linewidth=3,
+                label='True trajectory', zorder=10)
+
+        if len(job_data_list) > 1:
+            # Multi-method: plot credible bands for each method
+            for method_label, trajectories in method_trajectories.items():
+                color = method_colors.get(method_label, '#000000')
+                post_traj = trajectories[site_idx]
+                post_scaled = post_traj * scale_factor
+                percentiles = jnp.percentile(
+                    post_scaled,
+                    jnp.array([2.5, 97.5]),
+                    axis=0
+                )
+                plt.fill_between(
+                    t_dense_plot, percentiles[0], percentiles[1],
+                    alpha=0.3, color=color, label=f'{method_label} (95% CI)'
+                )
+        else:
+            # Single method: use blue credible band
+            method_label = list(method_trajectories.keys())[0]
+            post_traj = method_trajectories[method_label][site_idx]
+            post_scaled = post_traj * scale_factor
+            percentiles = jnp.percentile(
+                post_scaled,
+                jnp.array([2.5, 97.5]),
+                axis=0
+            )
+            plt.fill_between(
+                t_dense_plot, percentiles[0], percentiles[1],
+                alpha=0.3, color='blue', label='95% Credible interval'
+            )
+
         # Plot observed data points
         obs_times = f_in['obs'][0, site_idx, :, 0]  # Extract times for this site
         obs_values = y_observed['obs'][0, site_idx, :, 0]  # Extract observations
         obs_scaled = obs_values * scale_factor
-        plt.scatter(obs_times, obs_scaled, marker='x', s=50, color='red', 
-                   linewidth=2, label='Observations')
-        
+        plt.scatter(obs_times, obs_scaled, marker='x', s=50, color='red',
+                   linewidth=2, label='Observations', zorder=10)
+
         plt.xlabel('Time since warmup (days)')
         plt.ylabel('Incidence per 100,000')
-        plt.title(f'{title_prefix} Predictive Check - Site {site_idx + 1} (Post-warmup)')
-        plt.legend()
+
+        if len(job_data_list) > 1:
+            plt.title(f'Comparative {title_prefix} Predictive Check - Site {site_idx + 1} (Post-warmup)')
+        else:
+            plt.title(f'{title_prefix} Predictive Check - Site {site_idx + 1} (Post-warmup)')
+
+        plt.legend(loc='upper right')
         plt.grid(True, alpha=0.3)
-        
+
         # Save plot
-        plt.savefig(out_dir / f"{filename_prefix}_site_{site_idx + 1}.png", dpi=300, bbox_inches='tight')
+        if len(job_data_list) > 1:
+            save_filename = f"seir_comparative_{filename_prefix}_site_{site_idx + 1}.png"
+        else:
+            save_filename = f"{filename_prefix}_site_{site_idx + 1}.png"
+
+        plt.savefig(out_dir / save_filename, dpi=300, bbox_inches='tight')
         plt.close()
 
 
@@ -411,53 +585,72 @@ def plot_prior_posterior_comparison(
 
 
 def plot_prior_predictive_checks(
-    prior_samples: Array,
+    job_data_list: List[JobData],
     theta_truth: Dict[str, Array],
     y_observed: Dict[str, Array],
     f_in: Dict[str, Array],
     plot_config: Dict,
     out_dir: Path,
-    key: Array,
     selective_config: Dict,
-    n_ppc_samples: int = 0
+    n_ppc_samples: int = 0,
+    key: Optional[Array] = None
 ) -> None:
     """
     Generate prior predictive check plots showing incidence trajectories.
     """
+    # Create job data with prior samples instead of posterior samples
+    prior_job_data_list = []
+    for job_data in job_data_list:
+        prior_job_data = JobData(
+            job_dir=job_data.job_dir,
+            method_label=job_data.method_label,
+            theta_truth=job_data.theta_truth,
+            y_observed=job_data.y_observed,
+            f_in=job_data.f_in,
+            mcmc_posterior_samples=job_data.prior_samples,  # Use prior samples
+            prior_samples=job_data.prior_samples,
+            plot_config=job_data.plot_config,
+            selective_config=job_data.selective_config
+        )
+        prior_job_data_list.append(prior_job_data)
+
     plot_posterior_predictive_checks(
-        mcmc_posterior_samples=prior_samples,
+        job_data_list=prior_job_data_list,
         theta_truth=theta_truth,
         y_observed=y_observed,
         f_in=f_in,
         plot_config=plot_config,
         out_dir=out_dir,
-        key=key,
         selective_config=selective_config,
         title_prefix="Prior",
         filename_prefix="seir_prior_ppc",
-        n_ppc_samples=n_ppc_samples
+        n_ppc_samples=n_ppc_samples,
+        key=key
     )
 
 
 def plot_pairplot_with_reference(
-    inference_data: az.InferenceData,
+    job_data_list: List[JobData],
     theta_truth: Dict[str, Array],
     selective_config: Dict,
     plot_config: Dict,
-    out_dir: Path
+    out_dir: Path,
+    filename: str = "seir_mcmc_pairplot.png"
 ) -> None:
     """
     Create pairplot with KDE density plots and reference values from truth.
+    Supports both single and multiple methods.
 
     Creates a pairplot showing:
     - KDE density plots on the lower triangle
     - Marginal density distributions on the diagonal
     - Reference values from theta_truth overlaid as markers
+    - Different colors for different methods (if multiple)
 
     Parameters
     ----------
-    inference_data : az.InferenceData
-        ArviZ InferenceData containing posterior samples
+    job_data_list : List[JobData]
+        List of job data (single method or multiple for comparison)
     theta_truth : Dict[str, Array]
         Ground truth parameters for reference values
     selective_config : Dict
@@ -466,123 +659,11 @@ def plot_pairplot_with_reference(
         Configuration parameters including n_sites
     out_dir : Path
         Output directory for saving plots
+    filename : str
+        Filename for saved plot
     """
     sample_params = selective_config['sample_params']
     n_sites = plot_config['n_sites']
-
-    # Convert ArviZ InferenceData to pandas DataFrame
-    posterior_dict = inference_data.posterior
-
-    # Flatten the data for DataFrame creation
-    df_data = {}
-    reference_values = {}
-
-    for param in sample_params:
-        param_data = posterior_dict[param].values  # Shape: (chains, draws, ...)
-
-        if param in ['beta_0', 'alpha', 'sigma']:
-            # Global parameters - flatten to single column
-            flattened = param_data.reshape(-1)
-            df_data[param] = flattened
-            reference_values[param] = float(theta_truth[param][0, 0, 0])
-
-        elif param in ['A', 'T_season', 'phi']:
-            # Site-specific parameters - create separate columns for each site
-            for site_idx in range(n_sites):
-                col_name = f"{param}_site_{site_idx + 1}"
-                site_data = param_data[:, :, site_idx, 0]  # Extract site data
-                flattened = site_data.reshape(-1)
-                df_data[col_name] = flattened
-                reference_values[col_name] = float(
-                    theta_truth[param][0, site_idx, 0]
-                )
-
-    # Create DataFrame
-    df = pd.DataFrame(df_data)
-
-    # Create seaborn pairplot
-    g = sns.pairplot(
-        df,
-        kind='kde',
-        diag_kind='kde',
-        plot_kws={'alpha': 0.6},
-        diag_kws={'alpha': 0.7}
-    )
-
-    # Add reference values as red X markers
-    for i, var1 in enumerate(df.columns):
-        for j, var2 in enumerate(df.columns):
-            if i != j:  # Off-diagonal plots
-                ax = g.axes[i, j]
-                if i > j:  # Lower triangle (where KDE plots are)
-                    ax.scatter(
-                        reference_values[var2],
-                        reference_values[var1],
-                        marker='x',
-                        color='red',
-                        s=100,
-                        linewidths=3,
-                        zorder=10
-                    )
-            else:  # Diagonal plots
-                ax = g.axes[i, j]
-                ax.axvline(
-                    reference_values[var1],
-                    color='red',
-                    linestyle='--',
-                    linewidth=2,
-                    alpha=0.8
-                )
-
-    plt.savefig(out_dir / "seir_mcmc_pairplot.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def plot_comparative_pairplot(
-    job_data_list: List[JobData],
-    out_dir: Path
-) -> None:
-    """
-    Create comparative pairplot with KDE density plots from multiple methods.
-
-    Creates a pairplot showing:
-    - KDE density plots with different colors per method using seaborn hue
-    - Marginal density distributions on the diagonal
-    - Reference values from theta_truth overlaid as markers
-
-    Parameters
-    ----------
-    job_data_list : List[JobData]
-        List of job data from different methods
-    out_dir : Path
-        Output directory for saving plots
-    """
-    if len(job_data_list) < 2:
-        # Single method - use original function
-        job_data = job_data_list[0]
-        post_dict = reconstruct_selective_theta_dict(
-            job_data.mcmc_posterior_samples,
-            job_data.selective_config['sample_params'],
-            {k: jnp.array(v) for k, v in job_data.selective_config['fixed_params'].items()},
-            job_data.plot_config['n_sites']
-        )
-        post_dict_filtered = {k: v for k, v in post_dict.items()
-                             if k in job_data.selective_config['sample_params']}
-        inference_data = az.from_dict(posterior=post_dict_filtered)
-
-        plot_pairplot_with_reference(
-            inference_data=inference_data,
-            theta_truth=job_data.theta_truth,
-            selective_config=job_data.selective_config,
-            plot_config=job_data.plot_config,
-            out_dir=out_dir
-        )
-        return
-
-    # Multi-method comparison
-    reference_job = job_data_list[0]
-    sample_params = reference_job.selective_config['sample_params']
-    n_sites = reference_job.plot_config['n_sites']
     method_colors = get_method_colors()
 
     # Build combined dataset
@@ -590,21 +671,15 @@ def plot_comparative_pairplot(
     reference_values = {}
 
     for job_data in job_data_list:
-        # Reconstruct posterior dictionary
+        # Prepare posterior data for this method
         fixed_params = {k: jnp.array(v) for k, v in job_data.selective_config['fixed_params'].items()}
-        post_dict = reconstruct_selective_theta_dict(
-            job_data.mcmc_posterior_samples,
-            sample_params,
-            fixed_params,
-            n_sites
-        )
-        posterior_dict = {k: v for k, v in post_dict.items() if k in sample_params}
+        post_dict_filtered = prepare_posterior_data(job_data, sample_params, fixed_params, n_sites)
 
         # Create flat data dictionary for this method
         flat_data = {'method': job_data.method_label}
 
         for param in sample_params:
-            param_data = posterior_dict[param]  # Shape: (chains, draws, ...)
+            param_data = post_dict_filtered[param]  # Shape: (chains, draws, ...)
 
             if param in ['beta_0', 'alpha', 'sigma']:
                 # Global parameters
@@ -613,7 +688,7 @@ def plot_comparative_pairplot(
 
                 # Set reference value (only once)
                 if param not in reference_values:
-                    reference_values[param] = float(job_data.theta_truth[param][0, 0, 0])
+                    reference_values[param] = float(theta_truth[param][0, 0, 0])
 
             elif param in ['A', 'T_season', 'phi']:
                 # Site-specific parameters
@@ -626,7 +701,7 @@ def plot_comparative_pairplot(
                     # Set reference value (only once)
                     if col_name not in reference_values:
                         reference_values[col_name] = float(
-                            job_data.theta_truth[param][0, site_idx, 0]
+                            theta_truth[param][0, site_idx, 0]
                         )
 
         # Convert to long format
@@ -641,20 +716,32 @@ def plot_comparative_pairplot(
     # Create DataFrame
     df = pd.DataFrame(all_data)
 
-    # Create method-to-color mapping for seaborn
-    methods_present = df['method'].unique()
-    palette = {method: method_colors.get(method, '#000000') for method in methods_present}
+    if len(job_data_list) > 1:
+        # Multi-method: use hue for different colors
+        methods_present = df['method'].unique()
+        palette = {method: method_colors.get(method, '#000000') for method in methods_present}
 
-    # Create seaborn pairplot with hue
-    g = sns.pairplot(
-        df,
-        hue='method',
-        palette=palette,
-        kind='kde',
-        diag_kind='kde',
-        plot_kws={'alpha': 0.6},
-        diag_kws={'alpha': 0.7}
-    )
+        g = sns.pairplot(
+            df,
+            hue='method',
+            palette=palette,
+            kind='kde',
+            diag_kind='kde',
+            plot_kws={'alpha': 0.6},
+            diag_kws={'alpha': 0.7}
+        )
+    else:
+        # Single method: no hue needed
+        param_columns = [col for col in df.columns if col != 'method']
+        df_single = df[param_columns]
+
+        g = sns.pairplot(
+            df_single,
+            kind='kde',
+            diag_kind='kde',
+            plot_kws={'alpha': 0.6},
+            diag_kws={'alpha': 0.7}
+        )
 
     # Add reference values as red X markers
     param_columns = [col for col in df.columns if col != 'method']
@@ -684,206 +771,9 @@ def plot_comparative_pairplot(
                     label='Truth' if i == 0 else ""
                 )
 
-    plt.savefig(out_dir / "seir_comparative_pairplot.png", dpi=300, bbox_inches='tight')
+    plt.savefig(out_dir / filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-
-def plot_comparative_posterior_predictive_checks(
-    job_data_list: List[JobData],
-    out_dir: Path,
-    n_ppc_samples: int = 0
-) -> None:
-    """
-    Generate comparative posterior predictive check plots from multiple methods.
-
-    Creates separate plots for each site showing:
-    - True trajectory (solid black line) from theta_truth
-    - 95% credible bands from each method (different colors)
-    - Observed data points (crosses) at observation times
-    - Legend identifying all methods
-
-    Parameters
-    ----------
-    job_data_list : List[JobData]
-        List of job data from different methods
-    out_dir : Path
-        Output directory for saving plots
-    n_ppc_samples : int
-        Number of samples to use for predictive checks (0 = use all samples)
-    """
-    if len(job_data_list) < 2:
-        # Single method - use original function
-        job_data = job_data_list[0]
-        key = jr.PRNGKey(42)
-        plot_posterior_predictive_checks(
-            mcmc_posterior_samples=job_data.mcmc_posterior_samples,
-            theta_truth=job_data.theta_truth,
-            y_observed=job_data.y_observed,
-            f_in=job_data.f_in,
-            plot_config=job_data.plot_config,
-            out_dir=out_dir,
-            key=key,
-            selective_config=job_data.selective_config,
-            n_ppc_samples=n_ppc_samples
-        )
-        return
-
-    # Multi-method comparison
-    reference_job = job_data_list[0]
-    plot_config = reference_job.plot_config
-    method_colors = get_method_colors()
-
-    n_sites = plot_config['n_sites']
-    n_timesteps = plot_config['n_timesteps']
-    n_warmup = plot_config['n_warmup']
-    population = plot_config['population']
-    I0_prop = plot_config['I0_prop']
-
-    # Create dense time grids
-    t_dense_full = jnp.linspace(0, n_warmup + n_timesteps, (n_warmup + n_timesteps) * 4)
-    t_dense_plot = jnp.linspace(0, n_timesteps, n_timesteps * 4)
-
-    # Initial conditions
-    I0 = population * I0_prop
-    S0 = population - I0
-    initial_state = jnp.array([S0, 0.0, I0, 0.0])  # [S, E, I, R]
-
-    def solve_trajectory(params_dict: Dict[str, Array], times: Array) -> Array:
-        """Solve SEIR ODE for given parameters and return incidence."""
-        def ode_func(state, t):
-            return seir_dynamics(state, t, params_dict)
-
-        solution = odeint(ode_func, initial_state, times)
-        exposed = solution[:, 1]  # E compartment
-        incidence = params_dict['alpha'] * exposed
-        return jnp.maximum(incidence, 1e-8)
-
-    def solve_trajectory_post_warmup(params_dict: Dict[str, Array]) -> Array:
-        """Solve trajectory over full time including warmup, return post-warmup."""
-        full_solution = solve_trajectory(params_dict, t_dense_full)
-        # Extract post-warmup portion by finding indices after warmup
-        warmup_idx = int(len(t_dense_full) * n_warmup / (n_warmup + n_timesteps))
-        return full_solution[warmup_idx:]
-
-    # Generate true trajectory (using first job's truth - should be same for all)
-    theta_truth = reference_job.theta_truth
-    true_trajectories = []
-    for site_idx in range(n_sites):
-        params_dict = {
-            'beta_0': theta_truth['beta_0'][0, 0, 0],
-            'alpha': theta_truth['alpha'][0, 0, 0],
-            'sigma': theta_truth['sigma'][0, 0, 0],
-            'A': theta_truth['A'][0, site_idx, 0],
-            'T_season': theta_truth['T_season'][0, site_idx, 0],
-            'phi': theta_truth['phi'][0, site_idx, 0]
-        }
-        true_traj = solve_trajectory_post_warmup(params_dict)
-        true_trajectories.append(true_traj)
-
-    # Generate posterior trajectories for each method
-    method_trajectories = {}
-
-    for job_data in job_data_list:
-        # Reconstruct posterior
-        fixed_params = {k: jnp.array(v) for k, v in job_data.selective_config['fixed_params'].items()}
-        sample_params = job_data.selective_config['sample_params']
-
-        post_dict = reconstruct_selective_theta_dict(
-            job_data.mcmc_posterior_samples, sample_params, fixed_params, n_sites
-        )
-
-        # Flatten first two dimensions
-        flattened_post = tree.map(
-            lambda x: x.reshape((x.shape[0] * x.shape[1],) + x.shape[2:]),
-            post_dict
-        )
-
-        n_total_samples = flattened_post['beta_0'].shape[0]
-        if n_ppc_samples == 0:
-            n_ensemble = n_total_samples
-        else:
-            n_ensemble = min(n_ppc_samples, n_total_samples)
-
-        if n_ensemble == n_total_samples:
-            ensemble_indices = jnp.arange(n_total_samples)
-        else:
-            key = jr.PRNGKey(42)
-            ensemble_indices = jr.choice(key, n_total_samples, shape=(n_ensemble,), replace=False)
-
-        # Sample parameters
-        sampled_post = tree.map(
-            lambda x: x[ensemble_indices],
-            flattened_post
-        )
-
-        # Generate trajectories for each site
-        posterior_trajectories = {site_idx: [] for site_idx in range(n_sites)}
-
-        for sample_idx in range(n_ensemble):
-            for site_idx in range(n_sites):
-                params_dict = {
-                    'beta_0': sampled_post['beta_0'][sample_idx, 0],
-                    'alpha': sampled_post['alpha'][sample_idx, 0],
-                    'sigma': sampled_post['sigma'][sample_idx, 0],
-                    'A': sampled_post['A'][sample_idx, site_idx],
-                    'T_season': sampled_post['T_season'][sample_idx, site_idx],
-                    'phi': sampled_post['phi'][sample_idx, site_idx]
-                }
-
-                traj = solve_trajectory_post_warmup(params_dict)
-                posterior_trajectories[site_idx].append(traj)
-
-        # Convert to arrays
-        for site_idx in range(n_sites):
-            posterior_trajectories[site_idx] = jnp.array(posterior_trajectories[site_idx])
-
-        method_trajectories[job_data.method_label] = posterior_trajectories
-
-    # Create plots for each site
-    for site_idx in range(n_sites):
-        plt.figure(figsize=(12, 8))
-
-        # Convert to cases per 100,000
-        scale_factor = 100000.0 / population
-
-        # Plot true trajectory
-        true_scaled = true_trajectories[site_idx] * scale_factor
-        plt.plot(t_dense_plot, true_scaled, 'k-', linewidth=3, label='True trajectory', zorder=10)
-
-        # Plot posterior credible bands for each method
-        for method_label, trajectories in method_trajectories.items():
-            color = method_colors.get(method_label, '#000000')
-            post_traj = trajectories[site_idx]
-            post_scaled = post_traj * scale_factor
-            percentiles = jnp.percentile(
-                post_scaled,
-                jnp.array([2.5, 97.5]),
-                axis=0
-            )
-            plt.fill_between(
-                t_dense_plot, percentiles[0], percentiles[1],
-                alpha=0.3, color=color, label=f'{method_label} (95% CI)'
-            )
-
-        # Plot observed data points (using first job's observations - should be same for all)
-        y_observed = reference_job.y_observed
-        f_in = reference_job.f_in
-        obs_times = f_in['obs'][0, site_idx, :, 0]  # Extract times for this site
-        obs_values = y_observed['obs'][0, site_idx, :, 0]  # Extract observations
-        obs_scaled = obs_values * scale_factor
-        plt.scatter(obs_times, obs_scaled, marker='x', s=50, color='red',
-                   linewidth=2, label='Observations', zorder=10)
-
-        plt.xlabel('Time since warmup (days)')
-        plt.ylabel('Incidence per 100,000')
-        plt.title(f'Comparative Posterior Predictive Check - Site {site_idx + 1} (Post-warmup)')
-        plt.legend(loc='upper right')
-        plt.grid(True, alpha=0.3)
-
-        # Save plot
-        plt.savefig(out_dir / f"seir_comparative_ppc_site_{site_idx + 1}.png",
-                   dpi=300, bbox_inches='tight')
-        plt.close()
 
 
 def main():
@@ -982,11 +872,27 @@ def main():
 
         # Generate comparative plots
         logger.info("Generating comparative pairplot")
-        plot_comparative_pairplot(job_data_list, out_dir)
+        plot_pairplot_with_reference(
+            job_data_list=job_data_list,
+            theta_truth=theta_truth,
+            selective_config=selective_config,
+            plot_config=plot_config,
+            out_dir=out_dir,
+            filename="seir_comparative_pairplot.png"
+        )
 
         logger.info("Generating comparative posterior predictive checks")
-        plot_comparative_posterior_predictive_checks(
-            job_data_list, out_dir, args.n_ppc_samples
+        plot_posterior_predictive_checks(
+            job_data_list=job_data_list,
+            theta_truth=theta_truth,
+            y_observed=y_observed,
+            f_in=f_in,
+            plot_config=plot_config,
+            out_dir=out_dir,
+            selective_config=selective_config,
+            title_prefix="Posterior",
+            filename_prefix="seir_ppc",
+            n_ppc_samples=args.n_ppc_samples
         )
 
         # Generate individual method plots for comparison
@@ -1023,11 +929,12 @@ def main():
 
             # Individual pairplot
             plot_pairplot_with_reference(
-                inference_data=job_inference_data,
+                job_data_list=[job_data],
                 theta_truth=theta_truth,
                 selective_config=selective_config,
                 plot_config=plot_config,
-                out_dir=method_dir
+                out_dir=method_dir,
+                filename="seir_mcmc_pairplot.png"
             )
 
     else:
@@ -1081,41 +988,42 @@ def main():
         # Generate pairplot
         logger.info("Generating pairplot with reference values")
         plot_pairplot_with_reference(
-            inference_data=inference_data,
+            job_data_list=[job_data],
             theta_truth=theta_truth,
             selective_config=selective_config,
             plot_config=plot_config,
-            out_dir=out_dir
+            out_dir=out_dir,
+            filename="seir_mcmc_pairplot.png"
         )
 
         # Generate posterior predictive checks
         logger.info("Generating posterior predictive check plots")
-        key = jr.PRNGKey(42)
         plot_posterior_predictive_checks(
-            mcmc_posterior_samples=job_data.mcmc_posterior_samples,
+            job_data_list=[job_data],
             theta_truth=theta_truth,
             y_observed=y_observed,
             f_in=f_in,
             plot_config=plot_config,
             out_dir=out_dir,
-            key=key,
             selective_config=selective_config,
-            n_ppc_samples=args.n_ppc_samples
+            title_prefix="Posterior",
+            filename_prefix="seir_ppc",
+            n_ppc_samples=args.n_ppc_samples,
+            key=jr.PRNGKey(42)
         )
 
         # Generate prior predictive checks
         logger.info("Generating prior predictive check plots")
-        prior_key = jr.PRNGKey(43)
         plot_prior_predictive_checks(
-            prior_samples=job_data.prior_samples,
+            job_data_list=[job_data],
             theta_truth=theta_truth,
             y_observed=y_observed,
             f_in=f_in,
             plot_config=plot_config,
             out_dir=out_dir,
-            key=prior_key,
             selective_config=selective_config,
-            n_ppc_samples=args.n_ppc_samples
+            n_ppc_samples=args.n_ppc_samples,
+            key=jr.PRNGKey(43)
         )
 
     logger.info("SEIR visualization completed successfully!")
