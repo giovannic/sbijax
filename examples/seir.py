@@ -289,7 +289,7 @@ def run(cfg: DictConfig) -> None:
     # Compute true posterior log probabilities for SFMPE posterior samples (constrained space)
     sfmpe_posterior_log_probs = compute_true_posterior_log_prob_sfmpe(
         posterior, y_processed, selective_prior_fn, simulator_dist,
-        n_sites, f_in, sample_params
+        n_sites, f_in, sample_params, fixed_params
     )
 
     # Compute CNF density estimates for SFMPE posterior samples
@@ -704,7 +704,8 @@ def compute_true_posterior_log_prob_sfmpe(
     simulator_dist: Callable,
     n_sites: int,
     f_in: PyTree,
-    sample_params: list
+    sample_params: list,
+    fixed_params: dict
     ) -> jnp.ndarray:
     """
     Compute true posterior log probability for SFMPE samples with selective
@@ -726,6 +727,8 @@ def compute_true_posterior_log_prob_sfmpe(
         Functional input data
     sample_params : list
         List of parameters being sampled
+    fixed_params : dict
+        Fixed parameter values
 
     Returns
     -------
@@ -739,8 +742,19 @@ def compute_true_posterior_log_prob_sfmpe(
         f_in
     )
 
+    # Reconstruct full parameter dictionary by adding fixed parameters
+    # Start with the sampled parameters
+    theta_full = dict(posterior_samples)
+
+    # Add fixed parameters, broadcasting to match batch shape
+    for param_name, param_value in fixed_params.items():
+        theta_full[param_name] = jnp.broadcast_to(
+            param_value[None, ...],
+            (n_samples,) + param_value.shape
+        )
+
     # Compute likelihood
-    log_likelihood = simulator_dist(posterior_samples, f_in_matched).log_prob(y_observed['obs'])
+    log_likelihood = simulator_dist(theta_full, f_in_matched).log_prob(y_observed['obs'])
 
     # Compute prior log probability using selective prior
     selective_prior = create_selective_prior_fn(n_sites, sample_params, {})
@@ -796,7 +810,7 @@ def compute_true_posterior_log_prob_fmpe(
     # Call SFMPE version with reconstructed structure
     return compute_true_posterior_log_prob_sfmpe(
         theta_dict, y_observed, prior_fn, simulator_dist,
-        n_sites, f_in, sample_params
+        n_sites, f_in, sample_params, {}
     )
 
 
@@ -813,8 +827,6 @@ def create_fmpe_calibration_dataset(
     y = simulator_fn(sim_key, prior)
     post_estimate = vmap(sample_posterior)(jr.split(post_key, n), y)
     return y, prior, post_estimate
-
-
 
 @hydra.main(version_base=None, config_path="conf", config_name="seir_config")
 def main(cfg: DictConfig) -> None:
