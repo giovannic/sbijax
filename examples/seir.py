@@ -755,13 +755,15 @@ def compute_true_posterior_log_prob_sfmpe(
 
     # Compute likelihood
     log_likelihood = simulator_dist(theta_full, f_in_matched).log_prob(y_observed['obs'])
+    log_likelihood = jnp.sum(log_likelihood, axis=(1, 2))
 
     # Compute prior log probability using selective prior
     selective_prior = create_selective_prior_fn(n_sites, sample_params, {})
     prior_dist = selective_prior(n_sites)
     log_prior = prior_dist.log_prob(posterior_samples)
+    log_prior = jnp.sum(log_prior, axis=1)
 
-    return jnp.sum(log_likelihood + log_prior, axis=-1)
+    return log_likelihood + log_prior
 
 
 def compute_true_posterior_log_prob_fmpe(

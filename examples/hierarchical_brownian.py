@@ -28,6 +28,7 @@ from sfmpe.metrics.lc2st import (
     MultiBinaryMLPClassifier
 )
 from sfmpe.metrics.lc2stnf import lc2st_quant_plot
+from sfmpe.util.dataloader import decode_theta
 
 def run(cfg: DictConfig):
     logger = logging.getLogger(__name__)
@@ -223,7 +224,6 @@ def run(cfg: DictConfig):
     )
 
     # Decode the samples to structured format
-    from sfmpe.util.dataloader import decode_theta
     posterior = decode_theta(
         theta=posterior_encoded,
         theta_slices=slices,
@@ -241,7 +241,8 @@ def run(cfg: DictConfig):
         posterior_encoded,
         context_flattened,
         labels, #type:ignore
-        masks=masks
+        masks=masks,
+        index=f_in_flattened
     )
 
     logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
