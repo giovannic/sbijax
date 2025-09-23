@@ -635,7 +635,8 @@ def plot_pairplot_with_reference(
     selective_config: Dict,
     plot_config: Dict,
     out_dir: Path,
-    filename: str = "seir_mcmc_pairplot.png"
+    filename: str = "seir_mcmc_pairplot.png",
+    n_pair_samples: int = 100
 ) -> None:
     """
     Create pairplot with KDE density plots and reference values from truth.
@@ -661,6 +662,8 @@ def plot_pairplot_with_reference(
         Output directory for saving plots
     filename : str
         Filename for saved plot
+    n_pair_samples : int
+        Number of samples to use for pairplot (default: 100)
     """
     sample_params = selective_config['sample_params']
     n_sites = plot_config['n_sites']
@@ -669,6 +672,9 @@ def plot_pairplot_with_reference(
     # Build combined dataset
     all_data = []
     reference_values = {}
+
+    # Set random seed for reproducible sub-sampling across jobs
+    rng_key = jr.PRNGKey(42)
 
     for job_data in job_data_list:
         # Prepare posterior data for this method
@@ -704,8 +710,24 @@ def plot_pairplot_with_reference(
                             theta_truth[param][0, site_idx, 0]
                         )
 
-        # Convert to long format
+        # Sub-sample to ensure equal sample sizes across jobs
         n_samples = len(list(flat_data.values())[1])  # Length of first parameter array
+        n_target_samples = min(n_pair_samples, n_samples)
+
+        if n_target_samples < n_samples:
+            # Generate sub-sampling indices
+            rng_key, subkey = jr.split(rng_key)
+            sample_indices = jr.choice(subkey, n_samples, shape=(n_target_samples,), replace=False)
+
+            # Apply sub-sampling to all parameter arrays
+            for param_name in flat_data:
+                if param_name != 'method':
+                    flat_data[param_name] = flat_data[param_name][sample_indices]
+
+        # Update n_samples after sub-sampling
+        n_samples = n_target_samples
+
+        # Convert to long format
         for i in range(n_samples):
             row = {'method': job_data.method_label}
             for key, values in flat_data.items():
@@ -787,6 +809,8 @@ def main():
                         help='Directory to save plots (default: examples/outputs)')
     parser.add_argument('--n_ppc_samples', type=int, default=0,
                         help='Number of samples to use for predictive checks (0 = use all samples)')
+    parser.add_argument('--n_pair_samples', type=int, default=100,
+                        help='Number of samples to use for pairplot (default: 100)')
     args = parser.parse_args()
 
     # Handle backward compatibility: if no job_dirs provided, look for old-style positional arg
@@ -878,7 +902,8 @@ def main():
             selective_config=selective_config,
             plot_config=plot_config,
             out_dir=out_dir,
-            filename="seir_comparative_pairplot.png"
+            filename="seir_comparative_pairplot.png",
+            n_pair_samples=args.n_pair_samples
         )
 
         logger.info("Generating comparative posterior predictive checks")
@@ -934,7 +959,8 @@ def main():
                 selective_config=selective_config,
                 plot_config=plot_config,
                 out_dir=method_dir,
-                filename="seir_mcmc_pairplot.png"
+                filename="seir_mcmc_pairplot.png",
+                n_pair_samples=args.n_pair_samples
             )
 
     else:
@@ -993,7 +1019,8 @@ def main():
             selective_config=selective_config,
             plot_config=plot_config,
             out_dir=out_dir,
-            filename="seir_mcmc_pairplot.png"
+            filename="seir_mcmc_pairplot.png",
+            n_pair_samples=args.n_pair_samples
         )
 
         # Generate posterior predictive checks
