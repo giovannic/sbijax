@@ -187,7 +187,7 @@ def validate_job_compatibility(job_data_list: List[JobData]) -> None:
             )
 
 
-def get_method_colors() -> Dict[str, str]:
+def get_method_colours() -> Dict[str, str]:
     """
     Get consistent color mapping for different methods.
 
@@ -435,11 +435,11 @@ def plot_posterior_predictive_checks(
     Generate posterior predictive check plots showing incidence trajectories.
     Supports both single and multiple methods.
 
-    Creates separate plots for each site showing:
+    Creates a single figure with vertical subplots for each site showing:
     - True trajectory (solid black line) from theta_truth
     - 95% credible bands from each method (different colors)
     - Observed data points (crosses) at observation times
-    - Legend identifying all methods (if multiple)
+    - Unified legend identifying all methods and data types
 
     Parameters
     ----------
@@ -469,7 +469,7 @@ def plot_posterior_predictive_checks(
     n_sites = plot_config['n_sites']
     n_timesteps = plot_config['n_timesteps']
     population = plot_config['population']
-    method_colors = get_method_colors()
+    method_colours = get_method_colours()
 
     # Create plotting grid (post-warmup only)
     t_dense_plot = jnp.linspace(0, n_timesteps, n_timesteps * 4)
@@ -495,22 +495,38 @@ def plot_posterior_predictive_checks(
         )
         method_trajectories[job_data.method_label] = posterior_trajectories
 
+    # Create single figure with vertical subplots for all sites
+    figheight = max(8, 4 * n_sites)
+    fig, axes = plt.subplots(n_sites, 1, figsize=(12, figheight), sharex=True)
+
+    # Ensure axes is always iterable (handle single site case)
+    if n_sites == 1:
+        axes = [axes]
+
+    # Convert to cases per 100,000
+    scale_factor = 100000.0 / population
+
+    # Track legend handles for unified legend
+    legend_handles = []
+    legend_labels = []
+    legend_collected = False
+
     # Create plots for each site
     for site_idx in range(n_sites):
-        plt.figure(figsize=(12, 8) if len(job_data_list) > 1 else (10, 6))
-
-        # Convert to cases per 100,000
-        scale_factor = 100000.0 / population
+        ax = axes[site_idx]
 
         # Plot true trajectory
         true_scaled = true_trajectories[site_idx] * scale_factor
-        plt.plot(t_dense_plot, true_scaled, 'k-', linewidth=3,
-                label='True trajectory', zorder=10)
+        line = ax.plot(t_dense_plot, true_scaled, 'k-', linewidth=3,
+                      zorder=10)
+        if not legend_collected:
+            legend_handles.append(line[0])
+            legend_labels.append('True trajectory')
 
         if len(job_data_list) > 1:
             # Multi-method: plot credible bands for each method
             for method_label, trajectories in method_trajectories.items():
-                color = method_colors.get(method_label, '#000000')
+                color = method_colours.get(method_label, '#000000')
                 post_traj = trajectories[site_idx]
                 post_scaled = post_traj * scale_factor
                 percentiles = jnp.percentile(
@@ -518,10 +534,13 @@ def plot_posterior_predictive_checks(
                     jnp.array([2.5, 97.5]),
                     axis=0
                 )
-                plt.fill_between(
+                fill = ax.fill_between(
                     t_dense_plot, percentiles[0], percentiles[1],
-                    alpha=0.3, color=color, label=f'{method_label} (95% CI)'
+                    alpha=0.3, color=color
                 )
+                if not legend_collected:
+                    legend_handles.append(fill)
+                    legend_labels.append(f'{method_label} (95% CI)')
         else:
             # Single method: use blue credible band
             method_label = list(method_trajectories.keys())[0]
@@ -532,38 +551,50 @@ def plot_posterior_predictive_checks(
                 jnp.array([2.5, 97.5]),
                 axis=0
             )
-            plt.fill_between(
+            fill = ax.fill_between(
                 t_dense_plot, percentiles[0], percentiles[1],
-                alpha=0.3, color='blue', label='95% Credible interval'
+                alpha=0.3, color='blue'
             )
+            if not legend_collected:
+                legend_handles.append(fill)
+                legend_labels.append('95% Credible interval')
 
         # Plot observed data points
         obs_times = f_in['obs'][0, site_idx, :, 0]  # Extract times for this site
         obs_values = y_observed['obs'][0, site_idx, :, 0]  # Extract observations
         obs_scaled = obs_values * scale_factor
-        plt.scatter(obs_times, obs_scaled, marker='x', s=50, color='red',
-                   linewidth=2, label='Observations', zorder=10)
+        scatter = ax.scatter(obs_times, obs_scaled, marker='o', s=50, color='black',
+                           linewidth=2, zorder=10)
+        if not legend_collected:
+            legend_handles.append(scatter)
+            legend_labels.append('Observations')
+            legend_collected = True
 
-        plt.xlabel('Time since warmup (days)')
-        plt.ylabel('Incidence per 100,000')
+        if site_idx == n_sites - 1:  # Only bottom subplot gets x-label
+            ax.set_xlabel('Time (days)')
+        ax.set_ylabel('Incidence per 100,000')
 
-        if len(job_data_list) > 1:
-            plt.title(f'Comparative {title_prefix} Predictive Check - Site {site_idx + 1} (Post-warmup)')
-        else:
-            plt.title(f'{title_prefix} Predictive Check - Site {site_idx + 1} (Post-warmup)')
+        ax.set_title(f'Site {site_idx + 1}')
+        ax.grid(True, alpha=0.3)
 
-        plt.legend(loc='upper right')
-        plt.grid(True, alpha=0.3)
+    # Add unified legend and overall title
+    if len(job_data_list) > 1:
+        fig.suptitle(f'Comparative {title_prefix} Predictive Check',
+                     fontsize=14, y=0.98)
+        save_filename = f"seir_comparative_{filename_prefix}.png"
+    else:
+        fig.suptitle(f'{title_prefix} Predictive Check',
+                     fontsize=14, y=0.98)
+        save_filename = f"{filename_prefix}.png"
 
-        # Save plot
-        if len(job_data_list) > 1:
-            save_filename = f"seir_comparative_{filename_prefix}_site_{site_idx + 1}.png"
-        else:
-            save_filename = f"{filename_prefix}_site_{site_idx + 1}.png"
+    # Create unified legend outside the plot area
+    fig.legend(legend_handles, legend_labels, loc='center left',
+               bbox_to_anchor=(1.02, 0.5))
 
-        plt.savefig(out_dir / save_filename, dpi=300, bbox_inches='tight')
-        plt.close()
-
+    plt.tight_layout()
+    plt.subplots_adjust(right=0.85)  # Make room for legend
+    plt.savefig(out_dir / save_filename, dpi=300, bbox_inches='tight')
+    plt.close()
 
 def plot_prior_posterior_comparison(
     inference_data: az.InferenceData,
@@ -667,7 +698,7 @@ def plot_pairplot_with_reference(
     """
     sample_params = selective_config['sample_params']
     n_sites = plot_config['n_sites']
-    method_colors = get_method_colors()
+    method_colours = get_method_colours()
 
     # Build combined dataset
     all_data = []
@@ -741,7 +772,7 @@ def plot_pairplot_with_reference(
     if len(job_data_list) > 1:
         # Multi-method: use hue for different colors
         methods_present = df['method'].unique()
-        palette = {method: method_colors.get(method, '#000000') for method in methods_present}
+        palette = {method: method_colours.get(method, '#000000') for method in methods_present}
 
         g = sns.pairplot(
             df,
@@ -777,7 +808,7 @@ def plot_pairplot_with_reference(
                         reference_values[var2],
                         reference_values[var1],
                         marker='x',
-                        color='red',
+                        color='black',
                         s=100,
                         linewidths=3,
                         zorder=10,
@@ -787,7 +818,7 @@ def plot_pairplot_with_reference(
                 ax = g.axes[i, j]
                 ax.axvline(
                     reference_values[var1],
-                    color='red',
+                    color='black',
                     linestyle='--',
                     linewidth=2,
                     alpha=0.8,
