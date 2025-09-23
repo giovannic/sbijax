@@ -197,10 +197,10 @@ def get_method_colors() -> Dict[str, str]:
         Method name to color mapping
     """
     return {
-        'SFMPE': '#1f77b4',      # Blue
-        'MCMC-slice': '#ff7f0e',  # Orange
-        'MCMC-nuts': '#2ca02c',   # Green
-        'MCMC-ess': '#d62728',    # Red
+        'SFMPE': '#1f77b4',
+        'MCMC-slice': '#ff7f0e',
+        'MCMC-nuts': '#2ca02c',
+        'MCMC-ess': '#d62728',
     }
 
 
@@ -749,7 +749,8 @@ def plot_pairplot_with_reference(
             palette=palette,
             kind='kde',
             diag_kind='kde',
-            plot_kws={'alpha': 0.6},
+            corner=True,
+            plot_kws={'alpha': 0.6, 'levels': 2},
             diag_kws={'alpha': 0.7}
         )
     else:
