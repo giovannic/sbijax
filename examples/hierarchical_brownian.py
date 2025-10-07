@@ -137,14 +137,19 @@ def run(cfg: DictConfig):
                 batch_ndims=1
             )
 
-    key = jr.PRNGKey(cfg.seed)
+    # Initialize three separate keys for different purposes
+    data_key = jr.PRNGKey(cfg.data_seed)
+    estim_key = jr.PRNGKey(cfg.estim_seed)
+    eval_key = jr.PRNGKey(cfg.eval_seed)
 
-    theta_key, y_key, f_in_key, key = jr.split(key, 4)
+    # Generate ground truth using data_key
+    theta_key, y_key, f_in_key, data_key = jr.split(data_key, 4)
     theta_truth = prior_fn(n_theta).sample((1,), seed=theta_key)
     f_in: dict = f_in_fn(n_theta).sample((1,), seed=f_in_key) #type:ignore
     y_observed = simulator_fn(y_key, theta_truth, f_in)
 
-    rngs = nnx.Rngs(key)
+    # Initialize model RNGs using estim_key
+    rngs = nnx.Rngs(estim_key)
     transformer_config = {
         'latent_dim': cfg.sfmpe.transformer.latent_dim,
         'label_dim': cfg.sfmpe.transformer.label_dim,
@@ -169,7 +174,7 @@ def run(cfg: DictConfig):
 
     estim = SFMPE(model, rngs=rngs)
 
-    train_key, key = jr.split(key)
+    train_key, estim_key = jr.split(estim_key)
     logger.info("Starting SFMPE bottom-up training")
     if cfg.f_in_sample == 'observed':
         f_in_fn_train = f_in_fn_observed
@@ -290,7 +295,7 @@ def run(cfg: DictConfig):
     fmpe_y_observed = y_observed['obs'].reshape(-1) # type: ignore
     
     # Train using round-based approach
-    train_key, key = jr.split(key)
+    train_key, estim_key = jr.split(estim_key)
     logger.info("Starting FMPE round-based training")
     start_time = time.time()
     fmpe_estim = train_fmpe_rounds(
@@ -373,8 +378,8 @@ def run(cfg: DictConfig):
         ).reshape((dim,))
     
     n_cal_epochs = cfg.analysis.n_cal_epochs
-    analyse_key, key = jr.split(key)
-    
+    analyse_key, eval_key = jr.split(eval_key)
+
     # Use Hydra's output directory
     hydra_cfg = HydraConfig.get()
     out_dir = Path(hydra_cfg.runtime.output_dir)

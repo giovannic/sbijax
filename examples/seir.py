@@ -86,14 +86,17 @@ def run(cfg: DictConfig) -> None:
     else:
         logger.info("No fixed parameters")
     
-    key = jr.PRNGKey(cfg.seed)
-    
+    # Initialize three separate keys for different purposes
+    data_key = jr.PRNGKey(cfg.data_seed)
+    estim_key = jr.PRNGKey(cfg.estim_seed)
+    eval_key = jr.PRNGKey(cfg.eval_seed)
+
     # Create functions
     simulator_dist = create_simulator_dist(n_timesteps, cfg.dt, cfg.population, cfg.I0_prop, n_warmup)
     simulator_fn = create_simulator_fn(simulator_dist)
-    
-    # Generate ground truth and observations
-    theta_key, obs_key, f_in_key, key = jr.split(key, 4)
+
+    # Generate ground truth and observations using data_key
+    theta_key, obs_key, f_in_key, data_key = jr.split(data_key, 4)
 
     theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
 
@@ -115,12 +118,12 @@ def run(cfg: DictConfig) -> None:
     if fixed_params:
         logger.info(f"Fixed parameter values: {tree.map(lambda x: jnp.squeeze(x), fixed_params)}")
     
-    # Apply dequantization  
-    deq_key, key = jr.split(key)
+    # Apply dequantization using data_key
+    deq_key, data_key = jr.split(data_key)
     y_processed = apply_dequantization(y_observed, deq_key)
-    
-    # Generate representative data for consistent Z-scaling across all bijectors
-    repr_key, key = jr.split(key)
+
+    # Generate representative data for consistent Z-scaling using data_key
+    repr_key, data_key = jr.split(data_key)
 
     # Always use selective functions for representative data generation
     selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names = create_selective_sfmpe_functions(
@@ -190,8 +193,8 @@ def run(cfg: DictConfig) -> None:
         'cross_local': cross_local_connections
     }
 
-    # SFMPE Neural Network Setup (dynamic n_labels)
-    rngs = nnx.Rngs(key)
+    # SFMPE Neural Network Setup (dynamic n_labels) using estim_key
+    rngs = nnx.Rngs(estim_key)
     n_labels = len(global_names) + len(local_names) + 1  # sampled parameters + obs
     logger.info(f"Using {n_labels} labels: {len(global_names)} global + {len(local_names)} local + 1 obs")
 
@@ -218,8 +221,8 @@ def run(cfg: DictConfig) -> None:
     model = StructuredCNF(nn, rngs=rngs)
     estim = SFMPE(model, rngs=rngs)
 
-    # Training
-    train_key, key = jr.split(key)
+    # Training using estim_key
+    train_key, estim_key = jr.split(estim_key)
     logger.info("Starting SFMPE bottom-up training")
 
     # Set up f_in function arguments based on configuration
@@ -367,8 +370,8 @@ def run(cfg: DictConfig) -> None:
     # Flatten observed data for FMPE (use transformed observations)
     fmpe_y_observed = y_unconstrained['obs'].reshape(-1)
     
-    # Train using round-based approach
-    train_key, key = jr.split(key)
+    # Train using round-based approach with estim_key
+    train_key, estim_key = jr.split(estim_key)
     logger.info("Starting FMPE round-based training")
     start_time = time.time()
     
@@ -470,8 +473,8 @@ def run(cfg: DictConfig) -> None:
         return fmpe_theta_bijector.inverse(theta_unconstrained)
     
     n_cal_epochs = cfg.analysis.n_cal_epochs
-    analyse_key, key = jr.split(key)
-    
+    analyse_key, eval_key = jr.split(eval_key)
+
     # Use Hydra's output directory
     hydra_cfg = HydraConfig.get()
     out_dir = Path(hydra_cfg.runtime.output_dir)

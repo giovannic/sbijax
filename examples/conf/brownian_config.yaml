@@ -40,5 +40,7 @@ analysis:
     latent_dim: 16
     n_layers: 2
 
-# Random seed
-seed: 42
+# Random seeds
+data_seed: 42    # Seed for ground truth generation
+estim_seed: 123  # Seed for model initialization, training, and sampling
+eval_seed: 456   # Seed for LC2ST evaluation
