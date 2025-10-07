@@ -8,11 +8,7 @@ with the number of simulations for different estimation methods.
 
 import argparse
 from pathlib import Path
-from typing import Optional
 from plotting_utils import collect_metrics, plot_metrics
-
-
-
 
 def main() -> None:
     """Main function with command-line interface."""
