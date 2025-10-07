@@ -35,21 +35,28 @@ def load_config_from_run(run_dir: Path) -> Optional[Dict[str, Any]]:
 
 
 def collect_metrics(
-    base_dir: Path, 
+    base_dir: Path,
     target_variable: str,
-    filters: Optional[Dict[str, int]] = None
+    filters: Optional[Dict[str, int]] = None,
+    metric: str = 'lc2st'
 ) -> Dict[Tuple[str, str], List[Tuple[int, List[float], List[List[float]]]]]:
     """
-    Collect LC2ST metrics from all Hydra runs, grouped by task and method.
-    
+    Collect metrics from all Hydra runs, grouped by task and method.
+
     Args:
         base_dir: Base directory containing Hydra outputs
-        target_variable: Variable to use as x-axis (e.g., 'n_simulations', 'n_theta')
-        filters: Dictionary of config filters to apply (e.g., {'n_rounds': 10})
-        
+        target_variable: Variable to use as x-axis
+            (e.g., 'n_simulations', 'n_theta')
+        filters: Dictionary of config filters to apply
+            (e.g., {'n_rounds': 10})
+        metric: Metric to extract ('lc2st', 'cnf_log_prob',
+            'kl_divergence')
+
     Returns:
-        Dictionary mapping (task, method) tuples to list of (target_value, [seed_stats], [null_stats_per_seed])
-        where task is 'Gaussian', 'Brownian', or 'SEIR' and method is 'FMPE', 'TFMPE (prior)', or 'TFMPE (observed)'
+        Dictionary mapping (task, method) tuples to list of
+        (target_value, [seed_stats], [null_stats_per_seed])
+        where task is 'Gaussian', 'Brownian', or 'SEIR' and
+        method is 'FMPE', 'TFMPE (prior)', or 'TFMPE (observed)'
     """
     if filters is None:
         filters = {}
@@ -129,16 +136,34 @@ def collect_metrics(
             try:
                 with open(stats_file, 'r') as f:
                     stats = json.load(f)
-                    
-                main_stat = stats.get('main_stat')
-                null_stats = stats.get('null_stats', [])
+
+                # Extract metric based on type
+                if metric == 'lc2st':
+                    main_stat = stats.get('main_stat')
+                    null_stats = stats.get('null_stats', [])
+                elif metric == 'cnf_log_prob':
+                    cnf_log_probs = stats.get('cnf_log_probs')
+                    if cnf_log_probs is not None:
+                        main_stat = np.mean(cnf_log_probs)
+                    else:
+                        main_stat = None
+                    null_stats = []
+                elif metric == 'kl_divergence':
+                    main_stat = stats.get('kl_divergence')
+                    null_stats = []
+                else:
+                    raise ValueError(
+                        f"Unknown metric: {metric}"
+                    )
+
                 if main_stat is not None:
-                    # Store in raw_data grouped by (task, method, target_value)
+                    # Store in raw_data grouped by
+                    # (task, method, target_value)
                     key = (task, method_name, target_value)
                     if key not in raw_data:
                         raw_data[key] = []
                     raw_data[key].append((main_stat, null_stats))
-                    
+
             except (json.JSONDecodeError, KeyError) as e:
                 print(f"Warning: Failed to parse {stats_file}: {e}")
                 continue
@@ -283,7 +308,8 @@ def scan_multirun_directories(
 def collect_metrics_from_multirun(
     multirun_dir: Path,
     target_variable: str,
-    filters: Optional[Dict[str, int]] = None
+    filters: Optional[Dict[str, int]] = None,
+    metric: str = 'lc2st'
 ) -> Dict[Tuple[str, str], List[Tuple[int, List[float],
                                       List[List[float]]]]]:
     """
@@ -293,28 +319,39 @@ def collect_metrics_from_multirun(
         multirun_dir: Directory containing a Hydra multirun
         target_variable: Variable to use as x-axis
         filters: Dictionary of config filters to apply
+        metric: Metric to extract ('lc2st', 'cnf_log_prob',
+            'kl_divergence')
 
     Returns:
         Dictionary mapping (task, method) tuples to metrics data
     """
     # Use existing collect_metrics but point it at the multirun dir
-    return collect_metrics(multirun_dir, target_variable, filters)
+    return collect_metrics(
+        multirun_dir, target_variable, filters, metric
+    )
 
 
 def plot_metrics(
-    metrics: Dict[Tuple[str, str], List[Tuple[int, List[float], List[List[float]]]]], 
+    metrics: Dict[Tuple[str, str], List[Tuple[int, List[float],
+                                               List[List[float]]]]],
     output_path: Path,
     x_label: str,
-    title: str
+    title: str,
+    metric: str = 'lc2st'
 ) -> None:
     """
-    Create separate plots for each task comparing LC2ST statistics with confidence intervals.
-    
+    Create separate plots for each task comparing statistics with
+    confidence intervals.
+
     Args:
-        metrics: Dictionary mapping (task, method) to (x_value, [seed_stats], [null_stats_per_seed]) tuples
-        output_path: Base path to save the plots (will be modified for each task)
+        metrics: Dictionary mapping (task, method) to
+            (x_value, [seed_stats], [null_stats_per_seed]) tuples
+        output_path: Base path to save the plots (will be modified for
+            each task)
         x_label: Label for the x-axis
         title: Base title for the plots
+        metric: Metric being plotted ('lc2st', 'cnf_log_prob',
+            'kl_divergence')
     """
     # Color scheme for methods
     method_colors = {
@@ -322,7 +359,15 @@ def plot_metrics(
         'TFMPE (prior)': '#ff7f0e',  # Orange
         'TFMPE (observed)': '#2ca02c' # Green
     }
-    
+
+    # Y-axis labels for each metric type
+    y_labels = {
+        'lc2st': 'LC2ST Statistic',
+        'cnf_log_prob': 'Mean CNF Log Probability',
+        'kl_divergence': 'KL Divergence'
+    }
+    y_label = y_labels.get(metric, 'Metric')
+
     # Group metrics by task
     tasks_data = {}
     for (task, method), data in metrics.items():
@@ -365,22 +410,33 @@ def plot_metrics(
                     label=method, linewidth=2, markersize=6, marker='o')
             
             # Plot confidence interval (mean ± std)
-            plt.fill_between(x_values, y_means - y_stds, y_means + y_stds, 
-                            color=color, alpha=0.2)
-            
-            # Plot 95% quantile of null statistics as dotted line
-            null_95_quantiles = []
-            for x_value, seed_stats, null_stats_per_seed in data:
-                # Flatten all null stats for this parameter value across all seeds
-                all_null_stats = [stat for seed_null_stats in null_stats_per_seed 
-                                for stat in seed_null_stats]
-                null_95_quantiles.append(np.percentile(all_null_stats, 95))
-            
-            plt.plot(x_values, null_95_quantiles, '--', color=color, 
-                    linewidth=1.5, alpha=0.7, label=f'{method} (95% null)')
-        
+            plt.fill_between(
+                x_values, y_means - y_stds, y_means + y_stds,
+                color=color, alpha=0.2
+            )
+
+            # Plot 95% quantile of null statistics (only for LC2ST)
+            if metric == 'lc2st':
+                null_95_quantiles = []
+                for x_value, seed_stats, null_stats_per_seed in data:
+                    # Flatten all null stats for this parameter value
+                    # across all seeds
+                    all_null_stats = [
+                        stat for seed_null_stats in null_stats_per_seed
+                        for stat in seed_null_stats
+                    ]
+                    null_95_quantiles.append(
+                        np.percentile(all_null_stats, 95)
+                    )
+
+                plt.plot(
+                    x_values, null_95_quantiles, '--', color=color,
+                    linewidth=1.5, alpha=0.7,
+                    label=f'{method} (95% null)'
+                )
+
         plt.xlabel(x_label)
-        plt.ylabel('LC2ST Statistic')
+        plt.ylabel(y_label)
         plt.title(f'{title}: {task} Task')
         plt.legend()
         plt.grid(True, alpha=0.3)
@@ -388,10 +444,24 @@ def plot_metrics(
         # Set discrete x-axis ticks
         sorted_x_values = sorted(all_x_values)
         plt.xticks(sorted_x_values)
-        
-        # Set reasonable axis limits
-        max_val = max(np.array(all_means) + np.array(all_stds))
-        plt.ylim(0, max_val * 1.1)
+
+        # Set reasonable axis limits based on metric type
+        if all_means and all_stds:
+            means_arr = np.array(all_means)
+            stds_arr = np.array(all_stds)
+            upper_bound = np.max(means_arr + stds_arr)
+            lower_bound = np.min(means_arr - stds_arr)
+
+            if metric == 'lc2st':
+                # LC2ST is bounded [0, 1], always start from 0
+                plt.ylim(0, upper_bound * 1.1)
+            else:
+                # For other metrics, use full range with padding
+                range_padding = (upper_bound - lower_bound) * 0.1
+                plt.ylim(
+                    lower_bound - range_padding,
+                    upper_bound + range_padding
+                )
         
         plt.tight_layout()
         
@@ -410,7 +480,8 @@ def plot_metrics(
 def plot_combined_metrics(
     categorized_multiruns: Dict[Tuple[SweepType, str], List[Path]],
     output_path: Path,
-    filters: Optional[Dict[str, int]] = None
+    filters: Optional[Dict[str, int]] = None,
+    metric: str = 'lc2st'
 ) -> None:
     """
     Create a combined figure with subplots for each task and sweep type.
@@ -420,6 +491,7 @@ def plot_combined_metrics(
                                list of multirun directories
         output_path: Path to save the combined figure
         filters: Dictionary of config filters to apply
+        metric: Metric to plot ('lc2st', 'cnf_log_prob', 'kl_divergence')
     """
     # Color scheme for methods
     method_colors = {
@@ -427,6 +499,14 @@ def plot_combined_metrics(
         'TFMPE (prior)': '#ff7f0e',  # Orange
         'TFMPE (observed)': '#2ca02c' # Green
     }
+
+    # Y-axis labels for each metric type
+    y_labels = {
+        'lc2st': 'LC2ST Statistic',
+        'cnf_log_prob': 'Mean CNF Log Probability',
+        'kl_divergence': 'KL Divergence'
+    }
+    y_label = y_labels.get(metric, 'Metric')
 
     # Determine which tasks are present
     tasks = sorted(set(task for (_, task) in categorized_multiruns.keys()))
@@ -484,11 +564,12 @@ def plot_combined_metrics(
                 # Use n_sites for SEIR, n_theta for others
                 target_var = 'n_sites' if task == 'SEIR' else 'n_theta'
 
-            # Collect metrics from all multirun directories for this combo
+            # Collect metrics from all multirun directories for this
+            # combo
             combined_metrics = {}
             for multirun_dir in categorized_multiruns[key]:
                 metrics = collect_metrics_from_multirun(
-                    multirun_dir, target_var, filters
+                    multirun_dir, target_var, filters, metric
                 )
                 # Merge metrics
                 for (mtask, method), data in metrics.items():
@@ -545,39 +626,51 @@ def plot_combined_metrics(
                     color=color, alpha=0.2
                 )
 
-                # Plot 95% quantile of null statistics
-                null_95_quantiles = []
-                for x_value, seed_stats, null_stats_per_seed in data:
-                    all_null_stats = [
-                        stat for seed_null_stats in null_stats_per_seed
-                        for stat in seed_null_stats
-                    ]
-                    null_95_quantiles.append(
-                        np.percentile(all_null_stats, 95)
-                    )
+                # Plot 95% quantile of null statistics (only for LC2ST)
+                if metric == 'lc2st':
+                    null_95_quantiles = []
+                    for x_value, seed_stats, null_stats_per_seed in data:
+                        all_null_stats = [
+                            stat for seed_null_stats in null_stats_per_seed
+                            for stat in seed_null_stats
+                        ]
+                        null_95_quantiles.append(
+                            np.percentile(all_null_stats, 95)
+                        )
 
-                ax.plot(
-                    x_values, null_95_quantiles, '--',
-                    color=color, linewidth=1.5, alpha=0.7
-                )
+                    ax.plot(
+                        x_values, null_95_quantiles, '--',
+                        color=color, linewidth=1.5, alpha=0.7
+                    )
 
             # Set x-axis ticks
             if all_x_values:
                 sorted_x_values = sorted(all_x_values)
                 ax.set_xticks(sorted_x_values)
 
-            # Set y-axis limits
+            # Set y-axis limits based on metric type
             if all_means and all_stds:
-                max_val = max(
-                    np.array(all_means) + np.array(all_stds)
-                )
-                ax.set_ylim(0, max_val * 1.1)
+                means_arr = np.array(all_means)
+                stds_arr = np.array(all_stds)
+                upper_bound = np.max(means_arr + stds_arr)
+                lower_bound = np.min(means_arr - stds_arr)
+
+                if metric == 'lc2st':
+                    # LC2ST is bounded [0, 1], always start from 0
+                    ax.set_ylim(0, upper_bound * 1.1)
+                else:
+                    # For other metrics, use full range with padding
+                    range_padding = (upper_bound - lower_bound) * 0.1
+                    ax.set_ylim(
+                        lower_bound - range_padding,
+                        upper_bound + range_padding
+                    )
 
             # Labels - only show x-label on bottom row
             if row_idx == n_tasks - 1:
                 ax.set_xlabel(col_config[col_idx]['label'])
             if col_idx == 0:
-                ax.set_ylabel('LC2ST Statistic')
+                ax.set_ylabel(y_label)
 
             # Title only on top row
             if row_idx == 0:
@@ -612,14 +705,15 @@ def plot_combined_metrics(
                 )
             )
             labels.append(method)
-            # Dashed line for null
-            handles.append(
-                plt.Line2D(
-                    [0], [0], color=method_colors[method],
-                    linewidth=1.5, linestyle='--', alpha=0.7
+            # Dashed line for null (only for LC2ST)
+            if metric == 'lc2st':
+                handles.append(
+                    plt.Line2D(
+                        [0], [0], color=method_colors[method],
+                        linewidth=1.5, linestyle='--', alpha=0.7
+                    )
                 )
-            )
-            labels.append(f'{method} (95% null)')
+                labels.append(f'{method} (95% null)')
 
     fig.legend(
         handles, labels,
