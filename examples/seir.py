@@ -306,8 +306,7 @@ def run(cfg: DictConfig) -> None:
     )
     # Apply change of variables: add inverse log det jacobian to convert to constrained space
     log_det_jacobian = sfmpe_theta_bijector.inverse_log_det_jacobian(
-        posterior_unconstrained,
-        event_ndims=1
+        posterior_unconstrained
     )
     sfmpe_cnf_log_probs = sfmpe_cnf_log_probs_unconstrained + log_det_jacobian
 
@@ -421,9 +420,9 @@ def run(cfg: DictConfig) -> None:
     )
     # Apply change of variables for FMPE bijector
     log_det_jacobian = fmpe_theta_bijector.inverse_log_det_jacobian(
-        fmpe_posterior_samples_unconstrained,
-        event_ndims=1
+        fmpe_posterior_samples_unconstrained
     )
+
     fmpe_cnf_log_probs = fmpe_cnf_log_probs_unconstrained + log_det_jacobian
 
     # Compute KL divergences

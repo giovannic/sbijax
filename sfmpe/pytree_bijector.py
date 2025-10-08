@@ -106,31 +106,39 @@ class PyTreeBijector(tfb.Bijector):
         return self._inverse(y)
     
     def forward_log_det_jacobian(
-        self, 
-        x: PyTree, 
-        event_ndims: Optional[PyTree] = None, 
+        self,
+        x: PyTree,
+        event_ndims: Optional[PyTree] = None,
         name: str = 'forward_log_det_jacobian',
         **kwargs
     ) -> Array:
         """Compute forward log det jacobian, bypassing tensor conversion."""
         if event_ndims is None:
-            # Use default event_ndims of 0 for all leaves
-            x_leaves, x_treedef = tree.flatten(x)
-            event_ndims = tree.unflatten(x_treedef, [0] * len(x_leaves))
+            # Use each bijector's forward_min_event_ndims
+            x_with_paths, x_treedef = tree_util.tree_flatten_with_path(x)
+            event_ndims_leaves = [
+                self._path_to_bijector[path].forward_min_event_ndims
+                for path, _ in x_with_paths
+            ]
+            event_ndims = tree.unflatten(x_treedef, event_ndims_leaves)
         return self._forward_log_det_jacobian(x, event_ndims)
     
     def inverse_log_det_jacobian(
-        self, 
-        y: PyTree, 
-        event_ndims: Optional[PyTree] = None, 
+        self,
+        y: PyTree,
+        event_ndims: Optional[PyTree] = None,
         name: str = 'inverse_log_det_jacobian',
         **kwargs
     ) -> Array:
         """Compute inverse log det jacobian, bypassing tensor conversion."""
         if event_ndims is None:
-            # Use default event_ndims of 0 for all leaves  
-            y_leaves, y_treedef = tree.flatten(y)
-            event_ndims = tree.unflatten(y_treedef, [0] * len(y_leaves))
+            # Use each bijector's inverse_min_event_ndims
+            y_with_paths, y_treedef = tree_util.tree_flatten_with_path(y)
+            event_ndims_leaves = [
+                self._path_to_bijector[path].inverse_min_event_ndims
+                for path, _ in y_with_paths
+            ]
+            event_ndims = tree.unflatten(y_treedef, event_ndims_leaves)
         return self._inverse_log_det_jacobian(y, event_ndims)
     
     
@@ -163,42 +171,70 @@ class PyTreeBijector(tfb.Bijector):
         return tree.unflatten(y_treedef, transformed_leaves)
     
     def _forward_log_det_jacobian(
-        self, 
-        x: PyTree, 
+        self,
+        x: PyTree,
         event_ndims: PyTree
     ) -> Array:
         """Compute forward log determinant Jacobian."""
         # Get input trees with paths
         x_with_paths, _ = tree_util.tree_flatten_with_path(x)
-        event_ndims_with_paths, _ = tree_util.tree_flatten_with_path(event_ndims)
-        
-        # Apply forward_log_det_jacobian to each element
-        log_dets = [
-            jnp.sum(self._path_to_bijector[x_path].forward_log_det_jacobian(x_val, ndims_val))
-            for (x_path, x_val), (_, ndims_val) in zip(x_with_paths, event_ndims_with_paths)
-        ]
-        
-        # Sum all log determinants
-        return jnp.sum(jnp.array(log_dets)) if log_dets else jnp.array(0.0)
+        event_ndims_with_paths, _ = (
+            tree_util.tree_flatten_with_path(event_ndims)
+        )
+
+        # Apply forward_log_det_jacobian to each element and sum over
+        # all non-batch dimensions that remain after bijector reduction
+        log_dets = []
+        for (x_path, x_val), (_, ndims_val) in zip(
+            x_with_paths, event_ndims_with_paths
+        ):
+            ldj = self._path_to_bijector[x_path].forward_log_det_jacobian(
+                x_val, ndims_val
+            )
+            # Sum over all dimensions except the first (batch) dimension
+            if ldj.ndim > 1:
+                ldj = jnp.sum(ldj, axis=tuple(range(1, ldj.ndim)))
+            # Ensure at least 1D for stacking (handles scalar case)
+            ldj = jnp.atleast_1d(ldj)
+            log_dets.append(ldj)
+
+        # Sum all log determinants across leaves, preserving batch dimension
+        if not log_dets:
+            return jnp.array(0.0)
+        return jnp.sum(jnp.stack(log_dets, axis=0), axis=0)
     
     def _inverse_log_det_jacobian(
-        self, 
-        y: PyTree, 
+        self,
+        y: PyTree,
         event_ndims: PyTree
     ) -> Array:
         """Compute inverse log determinant Jacobian."""
         # Get input trees with paths
         y_with_paths, _ = tree_util.tree_flatten_with_path(y)
-        event_ndims_with_paths, _ = tree_util.tree_flatten_with_path(event_ndims)
-        
-        # Apply inverse_log_det_jacobian to each element
-        log_dets = [
-            jnp.sum(self._path_to_bijector[y_path].inverse_log_det_jacobian(y_val, ndims_val))
-            for (y_path, y_val), (_, ndims_val) in zip(y_with_paths, event_ndims_with_paths)
-        ]
-        
-        # Sum all log determinants
-        return jnp.sum(jnp.array(log_dets)) if log_dets else jnp.array(0.0)
+        event_ndims_with_paths, _ = (
+            tree_util.tree_flatten_with_path(event_ndims)
+        )
+
+        # Apply inverse_log_det_jacobian to each element and sum over
+        # all non-batch dimensions that remain after bijector reduction
+        log_dets = []
+        for (y_path, y_val), (_, ndims_val) in zip(
+            y_with_paths, event_ndims_with_paths
+        ):
+            ldj = self._path_to_bijector[y_path].inverse_log_det_jacobian(
+                y_val, ndims_val
+            )
+            # Sum over all dimensions except the first (batch) dimension
+            if ldj.ndim > 1:
+                ldj = jnp.sum(ldj, axis=tuple(range(1, ldj.ndim)))
+            # Ensure at least 1D for stacking (handles scalar case)
+            ldj = jnp.atleast_1d(ldj)
+            log_dets.append(ldj)
+
+        # Sum all log determinants across leaves, preserving batch dimension
+        if not log_dets:
+            return jnp.array(0.0)
+        return jnp.sum(jnp.stack(log_dets, axis=0), axis=0)
     
     def forward_dtype(self, dtype=None, name='forward_dtype', **kwargs) -> PyTree:
         """Returns the dtype returned by forward for the provided input."""
