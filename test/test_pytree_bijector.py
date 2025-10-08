@@ -65,80 +65,20 @@ class TestPyTreeBijector:
             'a': tfb.Identity(),
             'b': tfb.Sigmoid()
         }
-        
+
         x = {
             'a': jnp.array([1.0, 2.0]),
             'b': jnp.array([0.2, 0.8])  # Valid sigmoid outputs
         }
         path_to_bijector = create_bijector_map(x, bijector_specs)
         pytree_bij = PyTreeBijector(path_to_bijector, x)
-        
+
         # Forward then inverse should recover original
         y = pytree_bij.forward(x)
         x_recovered = pytree_bij.inverse(y)
-        
+
         assert jnp.allclose(x_recovered['a'], x['a'])
         assert jnp.allclose(x_recovered['b'], x['b'], atol=1e-6)
-    
-    def test_log_det_jacobian(self):
-        """Test log determinant Jacobian computation."""
-        bijector_specs = {
-            'a': tfb.Identity(),
-            'b': tfb.Sigmoid()
-        }
-        
-        x = {
-            'a': jnp.array([1.0, 2.0]),
-            'b': jnp.array([0.5, -0.5])
-        }
-        path_to_bijector = create_bijector_map(x, bijector_specs)
-        pytree_bij = PyTreeBijector(path_to_bijector, x)
-        
-        event_ndims = {
-            'a': 0,
-            'b': 0
-        }
-        
-        # Compute forward log det jacobian
-        fldj = pytree_bij.forward_log_det_jacobian(x, event_ndims)
-        
-        # Should be sum of individual log det jacobians
-        expected_fldj = (
-            tfb.Identity().forward_log_det_jacobian(x['a'], 0).sum() +
-            tfb.Sigmoid().forward_log_det_jacobian(x['b'], 0).sum()
-        )
-        
-        assert jnp.allclose(fldj, expected_fldj)
-    
-    def test_inverse_log_det_jacobian(self):
-        """Test inverse log determinant Jacobian."""
-        bijector_specs = {
-            'a': tfb.Identity(),
-            'b': tfb.Sigmoid()
-        }
-        
-        y = {
-            'a': jnp.array([1.0, 2.0]),
-            'b': jnp.array([0.2, 0.8])  # Valid sigmoid outputs
-        }
-        path_to_bijector = create_bijector_map(y, bijector_specs)
-        pytree_bij = PyTreeBijector(path_to_bijector, y)
-        
-        event_ndims = {
-            'a': 0,
-            'b': 0
-        }
-        
-        # Compute inverse log det jacobian
-        ildj = pytree_bij.inverse_log_det_jacobian(y, event_ndims)
-        
-        # Should be sum of individual inverse log det jacobians
-        expected_ildj = (
-            tfb.Identity().inverse_log_det_jacobian(y['a'], 0).sum() +
-            tfb.Sigmoid().inverse_log_det_jacobian(y['b'], 0).sum()
-        )
-        
-        assert jnp.allclose(ildj, expected_ildj)
     
     def test_empty_tree(self):
         """Test with empty PyTree."""
@@ -704,9 +644,270 @@ class TestPyTreeBijectorVariableEventSizes:
         assert jnp.allclose(x_recovered['identity'], x_modified['identity'])
 
 
+class TestPyTreeBijectorLogDeterminants:
+    """Test PyTreeBijector log determinant computation."""
+
+    def test_forward_log_det_none_uses_min_event_ndims(self):
+        """Test that event_ndims=None uses forward_min_event_ndims."""
+        # Use bijectors with non-zero min_event_ndims
+        bijector_specs = {
+            'a': tfb.Identity(),  # min_event_ndims = 0
+            'b': tfb.ScaleMatvecDiag(jnp.array([1.0, 2.0]))  # min = 1
+        }
+
+        # Shape: (batch=3, event=2)
+        example_tree = {
+            'a': jnp.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]),
+            'b': jnp.array([[0.5, 0.6], [0.7, 0.8], [0.9, 1.0]])
+        }
+
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
+
+        # PyTreeBijector should have forward_min_event_ndims = 1
+        assert pytree_bij.forward_min_event_ndims == 1
+
+        x = example_tree
+
+        # Call with None - should use min_event_ndims
+        fldj_none = pytree_bij.forward_log_det_jacobian(x, event_ndims=None)
+
+        # Call explicitly with the min_event_ndims structure
+        explicit_event_ndims = {
+            'a': 1,
+            'b': 1
+        }
+        fldj_explicit = pytree_bij.forward_log_det_jacobian(
+            x, event_ndims=explicit_event_ndims
+        )
+
+        # These should match
+        assert jnp.allclose(fldj_none, fldj_explicit)
+
+    def test_inverse_log_det_none_uses_min_event_ndims(self):
+        """Test that event_ndims=None uses inverse_min_event_ndims."""
+        bijector_specs = {
+            'a': tfb.Identity(),
+            'b': tfb.ScaleMatvecDiag(jnp.array([1.0, 2.0]))
+        }
+
+        # Shape: (batch=3, event=2)
+        example_tree = {
+            'a': jnp.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]),
+            'b': jnp.array([[0.5, 0.6], [0.7, 0.8], [0.9, 1.0]])
+        }
+
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
+
+        assert pytree_bij.inverse_min_event_ndims == 1
+
+        y = pytree_bij.forward(example_tree)
+
+        # Call with None
+        ildj_none = pytree_bij.inverse_log_det_jacobian(y, event_ndims=None)
+
+        # Call explicitly
+        explicit_event_ndims = {
+            'a': 1,
+            'b': 1
+        }
+        ildj_explicit = pytree_bij.inverse_log_det_jacobian(
+            y, event_ndims=explicit_event_ndims
+        )
+
+        assert jnp.allclose(ildj_none, ildj_explicit)
+
+    @pytest.mark.parametrize("batch_size", [1, 5, 100])
+    def test_forward_log_det_batching(self, batch_size):
+        """Test forward log det returns one value per batch sample."""
+        bijector_specs = {
+            'a': tfb.Exp(),
+            'b': tfb.Sigmoid()
+        }
+
+        # Shape: (batch, event=3)
+        example_tree = {
+            'a': jnp.ones((batch_size, 3)),
+            'b': jnp.ones((batch_size, 3)) * 0.5
+        }
+
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
+
+        x = {
+            'a': jr.normal(jr.PRNGKey(0), (batch_size, 3)),
+            'b': jr.normal(jr.PRNGKey(1), (batch_size, 3))
+        }
+
+        event_ndims = {'a': 0, 'b': 0}
+        fldj = pytree_bij.forward_log_det_jacobian(x, event_ndims)
+
+        # Should return (batch_size,) not scalar
+        assert fldj.shape == (batch_size,)
+
+    @pytest.mark.parametrize("batch_size", [1, 5, 100])
+    def test_inverse_log_det_batching(self, batch_size):
+        """Test inverse log det returns one value per batch sample."""
+        bijector_specs = {
+            'a': tfb.Exp(),
+            'b': tfb.Sigmoid()
+        }
+
+        example_tree = {
+            'a': jnp.ones((batch_size, 3)),
+            'b': jnp.ones((batch_size, 3)) * 0.5
+        }
+
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
+
+        x = {
+            'a': jr.normal(jr.PRNGKey(0), (batch_size, 3)),
+            'b': jr.uniform(jr.PRNGKey(1), (batch_size, 3)) * 0.8 + 0.1
+        }
+        y = pytree_bij.forward(x)
+
+        event_ndims = {'a': 0, 'b': 0}
+        ildj = pytree_bij.inverse_log_det_jacobian(y, event_ndims)
+
+        # Should return (batch_size,) not scalar
+        assert ildj.shape == (batch_size,)
+
+    @pytest.mark.parametrize("event_ndims", [0, 1, 2])
+    def test_log_det_varying_event_ndims(self, event_ndims):
+        """Test log det with different event_ndims values."""
+        bijector_specs = {
+            'param': tfb.Exp()
+        }
+
+        # Shape: (batch=4, dim1=3, dim2=5)
+        example_tree = {
+            'param': jnp.ones((4, 3, 5))
+        }
+
+        path_to_bijector = create_bijector_map(example_tree, bijector_specs)
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
+
+        x = {
+            'param': jr.normal(jr.PRNGKey(0), (4, 3, 5))
+        }
+
+        event_ndims_tree = {'param': event_ndims}
+        fldj = pytree_bij.forward_log_det_jacobian(x, event_ndims_tree)
+
+        # Should always have shape (4,) - batch dimension preserved
+        assert fldj.shape == (4,)
+
+        # Manually compute expected value
+        # For Exp, log_det = sum(x) over event dims
+        if event_ndims == 0:
+            # Sum over all non-batch dims
+            expected = jnp.sum(x['param'], axis=(1, 2))
+        elif event_ndims == 1:
+            # Sum over last dim only
+            expected = jnp.sum(x['param'], axis=-1)
+            expected = jnp.sum(expected, axis=-1)  # Still sum non-event
+        elif event_ndims == 2:
+            # Sum over last 2 dims
+            expected = jnp.sum(x['param'], axis=(1, 2))
+
+        assert jnp.allclose(fldj, expected)
+
+    def test_log_det_different_event_ndims_per_key(self):
+        """Test with different event_ndims for different keys."""
+        bijector_specs = {
+            'scalar_params': tfb.Exp(),
+            'vector_params': tfb.Exp()
+        }
+
+        # Shape: batch=10, different dims
+        example_tree = {
+            'scalar_params': jnp.ones((10, 2)),
+            'vector_params': jnp.ones((10, 3))
+        }
+
+        path_to_bijector = create_bijector_map(
+            example_tree, bijector_specs
+        )
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
+
+        x = {
+            'scalar_params': jr.normal(jr.PRNGKey(0), (10, 2)),
+            'vector_params': jr.normal(jr.PRNGKey(1), (10, 3))
+        }
+
+        event_ndims = {
+            'scalar_params': 0,  # Each element is independent
+            'vector_params': 1   # Vector is single event
+        }
+
+        fldj = pytree_bij.forward_log_det_jacobian(x, event_ndims)
+
+        # Should return (10,)
+        assert fldj.shape == (10,)
+
+        # Manual computation
+        # scalar_params: event_ndims=0, sum over all
+        # vector_params: event_ndims=1, sum over last dim only
+        expected = (
+            jnp.sum(x['scalar_params'], axis=-1) +
+            jnp.sum(x['vector_params'], axis=-1)
+        )
+        assert jnp.allclose(fldj, expected)
+
+    def test_log_det_matches_sum_of_components(self):
+        """Test total log det equals sum of individual bijector log dets."""
+        bijector_specs = {
+            'a': tfb.Sigmoid(),
+            'b': tfb.Exp(),
+            'c': tfb.Softplus()
+        }
+
+        example_tree = {
+            'a': jnp.ones((5, 2)),
+            'b': jnp.ones((5, 2)),
+            'c': jnp.ones((5, 2))
+        }
+
+        path_to_bijector = create_bijector_map(
+            example_tree, bijector_specs
+        )
+        pytree_bij = PyTreeBijector(path_to_bijector, example_tree)
+
+        x = {
+            'a': jr.normal(jr.PRNGKey(0), (5, 2)),
+            'b': jr.normal(jr.PRNGKey(1), (5, 2)),
+            'c': jr.normal(jr.PRNGKey(2), (5, 2))
+        }
+
+        event_ndims = {'a': 0, 'b': 0, 'c': 0}
+
+        # Get total log det
+        total_fldj = pytree_bij.forward_log_det_jacobian(x, event_ndims)
+
+        # Compute individual log dets
+        fldj_a = jnp.sum(
+            tfb.Sigmoid().forward_log_det_jacobian(x['a'], 0),
+            axis=-1
+        )
+        fldj_b = jnp.sum(
+            tfb.Exp().forward_log_det_jacobian(x['b'], 0),
+            axis=-1
+        )
+        fldj_c = jnp.sum(
+            tfb.Softplus().forward_log_det_jacobian(x['c'], 0),
+            axis=-1
+        )
+
+        expected = fldj_a + fldj_b + fldj_c
+
+        assert jnp.allclose(total_fldj, expected)
+
+
 class TestPyTreeBijectorMissingKeys:
     """Test PyTreeBijector when input pytrees have missing keys."""
-    
+
     def test_missing_first_key(self):
         """Test with first key missing to catch flattening/unflattening issues."""
         # Example tree has keys ['a', 'b', 'c']
