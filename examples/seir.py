@@ -213,8 +213,6 @@ def run(cfg: DictConfig) -> None:
 
     labeller = Labeller.for_keys(list(repr_theta.keys()) + ['obs'])
 
-    
-
     repr_tokens = Tokens.from_pytree(
         repr_theta,
         independence=independence,
@@ -295,7 +293,7 @@ def run(cfg: DictConfig) -> None:
 
     param_tokens = Tokens.from_pytree(
         tree.map(
-            lambda leaf: jnp.zeros((n_post_samples, 1) + leaf.shape[1:]),
+            lambda leaf: jnp.zeros((n_post_samples,) + leaf.shape[1:]),
             repr_theta
         ),
         independence=independence,
@@ -312,12 +310,12 @@ def run(cfg: DictConfig) -> None:
         functional_inputs=f_in_for_samples(n_post_samples)
     )
 
-    posterior = estim.sample_posterior(
+    posterior_tokens = estim.sample_posterior(
         context=context_tokens,
         params=param_tokens
     )
 
-    posterior_unconstrained = posterior.decode()
+    posterior_unconstrained = posterior_tokens.decode()
 
     # Transform to constrained space for true posterior evaluation
     posterior = sfmpe_theta_bijector.inverse(posterior_unconstrained)
@@ -331,8 +329,8 @@ def run(cfg: DictConfig) -> None:
     # Compute CNF density estimates for SFMPE posterior samples
     logger.info("Computing SFMPE CNF density estimates")
     sfmpe_cnf_log_probs_unconstrained = estim.log_prob_posterior_samples(
-        posterior,
-        context_tokens,
+        theta=posterior_tokens,
+        context=context_tokens,
     )
     # Apply change of variables: add inverse log det jacobian to convert to constrained space
     log_det_jacobian = sfmpe_theta_bijector.inverse_log_det_jacobian(

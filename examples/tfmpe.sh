@@ -1,0 +1,1 @@
+JAX_ENABLE_X64=1 PYTHONPATH=. python examples/seir_mcmc.py n_epochs=1000 n_simulations=1000 n_post_samples=100 method=SFMPE n_obs=10 n_timesteps=730 n_warmup=730 n_sites=2 'inference.sample_params=["beta_0", "A"]'
