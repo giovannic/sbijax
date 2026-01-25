@@ -11,6 +11,8 @@ This script implements a modern epidemiological model with:
 
 Updated to use latest package interfaces following hierarchical_brownian.py pattern.
 """
+import jax
+print(f"The jax default backend is: {jax.default_backend()}")
 
 import json
 import logging
@@ -27,15 +29,19 @@ from hydra.core.hydra_config import HydraConfig
 from jax import numpy as jnp, random as jr, tree, vmap
 from tensorflow_probability.substrates.jax import distributions as tfd
 
-from sfmpe.sfmpe import SFMPE
+from tfmpe.estimators.tfmpe import TFMPE, NormalDistribution
+from tfmpe.estimators.training import fit_bottom_up
+from tfmpe.preprocessing.tokens import Tokens
+from tfmpe.preprocessing.utils import Independence, Labeller
+from tfmpe.nn.transformer import Transformer, TransformerConfig
+
+
+import diffrax
 from sfmpe.fmpe import FMPE
-from sfmpe.bottom_up import train_bottom_up
-from sfmpe.structured_cnf import StructuredCNF
 from sfmpe.cnf import CNF
-from sfmpe.nn.transformer.transformer import Transformer
 from sfmpe.nn.mlp import MLPVectorField
 from sfmpe.train_rounds import train_fmpe_rounds
-from sfmpe.util.dataloader import decode_theta
+
 from sfmpe.metrics.lc2st import (
     train_lc2st_classifiers,
     evaluate_lc2st,
@@ -108,7 +114,7 @@ def run(cfg: DictConfig) -> None:
             broadcasted_value = jnp.broadcast_to(single_value, (n_sites, 1))
             theta_truth[param_name] = theta_truth[param_name].at[0].set(broadcasted_value)
 
-    f_in = f_in_fn(n_obs, n_sites, n_timesteps).sample((1,), seed=f_in_key)
+    f_in = f_in_fn(f_in_key, 1, n_obs, n_sites, n_timesteps)
     y_observed = simulator_fn(obs_key, theta_truth, f_in)
 
     # Extract fixed parameter values
@@ -148,25 +154,26 @@ def run(cfg: DictConfig) -> None:
     y_unconstrained = sfmpe_y_bijector.forward(y_processed)
     
     # Create wrapped functions for train_bottom_up
-    def wrapped_prior_fn(n):
+    def wrapped_prior_fn(rng, n, n_samples, f_in):
         """Prior function that returns TransformedDistribution."""
         base_prior = selective_prior_fn(n)
         return tfd.TransformedDistribution(
             base_prior,
             sfmpe_theta_bijector,
             name="transformed_prior"
-        )
+        ).sample(n_samples, seed=rng)
 
-    def wrapped_p_local(g, n):
+    def wrapped_p_local(rng, g, n, f_in):
         """Local prior function that returns TransformedDistribution."""
         base_local = selective_local_fn(g, n)
-        return tfd.TransformedDistribution(
+        samples = tfd.TransformedDistribution(
             base_local,
             sfmpe_theta_bijector,
             name="transformed_local"
-        )
+            ).sample(1, seed=rng)
+        return {k: v[0] for k, v in samples.items()}
     
-    def wrapped_simulator_fn_for_training(seed, theta, f_in_sample):
+    def wrapped_simulator_fn_for_training(seed, theta, n, f_in_sample):
         """Simulator function that handles bijector transformations."""
         # Transform parameters back to constrained space
         theta_constrained = sfmpe_theta_bijector.inverse(theta)
@@ -185,41 +192,49 @@ def run(cfg: DictConfig) -> None:
     logger.info(f"Transformed incidence range: {jnp.min(y_unconstrained['obs'])} to {jnp.max(y_unconstrained['obs'])}")
     
     # Independence structure for structured inference (dynamic based on sampled parameters)
-    local_independence = ['obs'] + local_names
-    cross_local_connections = [(param, 'obs', (0, 0)) for param in local_names]
-    independence = {
-        'local': local_independence,  # Observations independent across time/sites
-        'cross': [],
-        'cross_local': cross_local_connections
-    }
+    independence = Independence()
 
     # SFMPE Neural Network Setup (dynamic n_labels) using estim_key
-    rngs = nnx.Rngs(estim_key)
+    param_key, dropout_key, estim_key = jr.split(estim_key, 3)
+    rngs = nnx.Rngs(params=param_key, dropout=dropout_key)
     n_labels = len(global_names) + len(local_names) + 1  # sampled parameters + obs
     logger.info(f"Using {n_labels} labels: {len(global_names)} global + {len(local_names)} local + 1 obs")
 
-    transformer_config = {
-        'latent_dim': cfg.sfmpe.transformer.latent_dim,
-        'label_dim': cfg.sfmpe.transformer.label_dim,
-        'index_out_dim': cfg.sfmpe.transformer.index_out_dim,
-        'n_encoder': cfg.sfmpe.transformer.n_encoder,
-        'n_decoder': cfg.sfmpe.transformer.n_decoder,
-        'n_heads': cfg.sfmpe.transformer.n_heads,
-        'n_ff': cfg.sfmpe.transformer.n_ff,
-        'dropout': cfg.sfmpe.transformer.dropout,
-        'activation': nnx.relu,
-    }
+    transformer_config = TransformerConfig(
+        latent_dim = cfg.sfmpe.transformer.latent_dim,
+        n_encoder = cfg.sfmpe.transformer.n_encoder,
+        n_decoder = cfg.sfmpe.transformer.n_decoder,
+        n_heads = cfg.sfmpe.transformer.n_heads,
+        n_ff = cfg.sfmpe.transformer.n_ff,
+        label_dim = cfg.sfmpe.transformer.label_dim,
+        dropout = cfg.sfmpe.transformer.dropout,
+        index_out_dim = cfg.sfmpe.transformer.index_out_dim,
+    )
+
+    labeller = Labeller.for_keys(list(repr_theta.keys()) + ['obs'])
+
+    
+
+    repr_tokens = Tokens.from_pytree(
+        repr_theta,
+        independence=independence,
+        labeller=labeller,
+        functional_inputs=repr_f_in
+    )
+
+    base_dist = NormalDistribution(rngs=rngs)
 
     nn = Transformer(
-        transformer_config,
-        value_dim=1,
-        n_labels=n_labels,
-        index_dim=1,  # Temporal indexing
+        config=transformer_config,
+        tokens=repr_tokens,
         rngs=rngs
     )
 
-    model = StructuredCNF(nn, rngs=rngs)
-    estim = SFMPE(model, rngs=rngs)
+    estim = TFMPE(
+        vf_network=nn,
+        base_dist=base_dist,
+        solver=diffrax.Dopri5(),
+    )
 
     # Training using estim_key
     train_key, estim_key = jr.split(estim_key)
@@ -238,26 +253,30 @@ def run(cfg: DictConfig) -> None:
         raise ValueError(f"Invalid f_in_sample: {cfg.f_in_sample}")
 
     start_time = time.time()
-    labels, slices, masks = train_bottom_up(
-        train_key,
-        estim,
-        wrapped_prior_fn,
-        wrapped_p_local,
-        wrapped_simulator_fn_for_training,  # Use training-specific wrapped simulator
-        global_names,  # Dynamic global parameters
-        local_names,   # Dynamic local parameters
-        n_sites,
-        n_rounds,
-        n_simulations,
-        n_epochs,
-        y_unconstrained,  # Use unconstrained data
-        independence,
-        optimiser=optax.adam(cfg.training.learning_rate),
-        batch_size=int(n_simulations * cfg.training.batch_size_fraction),
-        f_in=f_in_fn_train,
-        f_in_args=f_in_args,
-        f_in_args_global=f_in_args_global,
-        f_in_target=f_in
+    estim, losses = fit_bottom_up(
+        tfmpe=estim,
+        y_obs=y_unconstrained,  # Use unconstrained data
+        simulator_fn=wrapped_simulator_fn_for_training,  # Use training-specific wrapped simulator
+        prior_fn=wrapped_prior_fn,
+        local_fn=wrapped_p_local,
+        global_names=global_names,  # Dynamic global parameters
+        n_groups=n_sites,
+        n_rounds=n_rounds,
+        n_samples_per_round=n_simulations,
+        n_val_samples=100,
+        opt=nnx.Optimizer(
+            estim,
+            optax.adam(cfg.training.learning_rate),
+            wrt=nnx.Param
+        ),
+        n_iter_per_round=n_epochs,
+        batch_size=100,
+        rng=train_key,
+        independence=independence,
+        labeller=labeller,
+        f_in_fn = f_in_fn_train,
+        f_in_args = f_in_args,
+        f_in_args_global = f_in_args_global,
     )
     logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
@@ -265,26 +284,40 @@ def run(cfg: DictConfig) -> None:
     logger.info("Sampling SFMPE posterior")
     start_time = time.time()
 
-    # Create flattened f_in index for posterior sampling
-    f_in_flattened = flatten_f_in(f_in, sample_params=sample_params)
+    def f_in_for_samples(n_samples):
+        return tree.map(
+            lambda leaf: jnp.broadcast_to(
+                leaf,
+                (n_samples,) + leaf.shape[1:]
+            ),
+            f_in
+        )
 
-    # Sample in encoded format and then decode
-    context_flattened = _flatten(y_processed)[..., None]
-    posterior_encoded = estim.sample_posterior_encoded(
-        context_flattened,
-        labels,
-        slices,
-        masks=masks,
-        n_samples=n_post_samples,
-        index=f_in_flattened
+    param_tokens = Tokens.from_pytree(
+        tree.map(
+            lambda leaf: jnp.zeros((n_post_samples, 1) + leaf.shape[1:]),
+            repr_theta
+        ),
+        independence=independence,
+        labeller=labeller,
+        functional_inputs=f_in_for_samples(n_post_samples),
+    )
+    context_tokens = Tokens.from_pytree(
+        tree.map(
+            lambda leaf: jnp.broadcast_to(leaf, (n_post_samples,) + leaf.shape[1:]),
+            y_unconstrained
+        ),
+        independence=independence,
+        labeller=labeller,
+        functional_inputs=f_in_for_samples(n_post_samples)
     )
 
-    # Decode the samples to structured format (still in unconstrained space)
-    posterior_unconstrained = decode_theta(
-        theta=posterior_encoded,
-        theta_slices=slices,
-        sample_shape=(n_post_samples,),
+    posterior = estim.sample_posterior(
+        context=context_tokens,
+        params=param_tokens
     )
+
+    posterior_unconstrained = posterior.decode()
 
     # Transform to constrained space for true posterior evaluation
     posterior = sfmpe_theta_bijector.inverse(posterior_unconstrained)
@@ -298,11 +331,8 @@ def run(cfg: DictConfig) -> None:
     # Compute CNF density estimates for SFMPE posterior samples
     logger.info("Computing SFMPE CNF density estimates")
     sfmpe_cnf_log_probs_unconstrained = estim.log_prob_posterior_samples(
-        posterior_encoded,
-        context_flattened,
-        labels,
-        masks=masks,
-        index=f_in_flattened
+        posterior,
+        context_tokens,
     )
     # Apply change of variables: add inverse log det jacobian to convert to constrained space
     log_det_jacobian = sfmpe_theta_bijector.inverse_log_det_jacobian(

@@ -348,7 +348,7 @@ def apply_dequantization(
     return obs_dequant
 
 
-def f_in_fn(n_obs: int, n_sites: int, n_timesteps: int):
+def f_in_fn(rng: Array, n_samples: int, n_obs: int, n_sites: int, n_timesteps: int):
     """Function input sampler for observation indices."""
     return tfd.JointDistributionNamed(
         dict(
@@ -369,7 +369,7 @@ def f_in_fn(n_obs: int, n_sites: int, n_timesteps: int):
             )
         ),
         batch_ndims=1
-    )
+    ).sample((n_samples,), seed=rng)
 
 
 def f_in_fn_observed(n_obs: int, n_sites: int, f_in):
