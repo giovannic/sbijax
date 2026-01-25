@@ -10,6 +10,9 @@ Updated to use latest package interfaces following hierarchical_brownian.py patt
 This version performs estimation only and saves results to .npy files.
 """
 
+import jax
+print(f"The jax default backend is: {jax.default_backend()}")
+
 import json
 import logging
 import time
@@ -160,15 +163,20 @@ def run(cfg: DictConfig) -> None:
         n_burnin = cfg.n_simulations - cfg.n_post_samples
         sample_key, init_key, key = jr.split(key, 3)
 
-        if cfg.mcmc.sampler == "slice":
-            init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
-            kernel = tfp.mcmc.TransformedTransitionKernel(
-                inner_kernel=tfp.mcmc.SliceSampler(
-                    target_log_prob_fn=flat_simulator_log_prob,
-                    step_size=cfg.mcmc.step_size,
-                    max_doublings=cfg.mcmc.max_doublings
-                ),
-                bijector=flat_theta_bijector
+        if cfg.mcmc.sampler == "nuts_tfp":
+            if cfg.mcmc.init_to_truth:
+                flat_truth = flatten_selective_theta_dict(theta_truth, sample_params)
+                init_state = jnp.broadcast_to(
+                    flat_truth,
+                    (cfg.mcmc.n_chains, flat_truth.shape[-1])
+                )
+            else:
+                init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+
+            kernel = tfp.mcmc.NoUTurnSampler(
+                target_log_prob_fn=flat_simulator_log_prob,
+                step_size=cfg.mcmc.step_size,
+                max_tree_depth=2
             )
 
             mcmc_posterior_samples = tfp.mcmc.sample_chain(
@@ -188,6 +196,7 @@ def run(cfg: DictConfig) -> None:
         elif cfg.mcmc.sampler in ["nuts", "ess"]:
             from numpyro.infer import MCMC, NUTS
             from numpyro.infer.ensemble import ESS
+            from numpyro.infer.initialization import init_to_value, init_to_uniform
 
             if cfg.mcmc.use_numpyro_model:
                 # Use NumPyro model approach
@@ -198,16 +207,35 @@ def run(cfg: DictConfig) -> None:
                     simulator_fn, n_sites, f_in, sample_params, fixed_params
                 )
 
+                if cfg.mcmc.init_to_truth:
+                    truth_for_sampling = {
+                        name: value[0, ..., 0]
+                        if name in {'A', 'T_season', 'phi'} else value[0, 0, 0]
+                        for name, value in theta_truth.items()
+                    }
+                    init_strategy = init_to_value(
+                        values = truth_for_sampling
+                    )
+                else:
+                    init_strategy = init_to_uniform
+
                 if cfg.mcmc.sampler == "ess":
-                    kernel = ESS(numpyro_model)
+                    kernel = ESS(
+                        numpyro_model,
+                        randomize_split=True,
+                        moves={
+                            AIES.DEMove() : 0.5,
+                            AIES.StretchMove() : 0.5
+                        },
+                        init_strategy=init_strategy)
                     chain_method = "vectorized"
                 else:
                     kernel = NUTS(
                         numpyro_model,
+                        init_strategy=init_strategy,
                         step_size=cfg.mcmc.step_size,
                         max_tree_depth=cfg.mcmc.max_tree_depth,
-                        adapt_step_size=True,
-                        forward_mode_differentiation=True
+                        adapt_step_size=True
                     )
                     chain_method = "parallel"
 
@@ -253,7 +281,14 @@ def run(cfg: DictConfig) -> None:
             else:
                 # Use existing manual log_prob approach
                 logger.info(f"Using manual log_prob with {cfg.mcmc.sampler} sampler")
-                init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
+                if cfg.mcmc.init_to_truth:
+                    flat_truth = flatten_selective_theta_dict(theta_truth, sample_params)
+                    init_state = jnp.broadcast_to(
+                        flat_truth,
+                        (cfg.mcmc.n_chains, flat_truth.shape[-1])
+                    )
+                else:
+                    init_state = flat_prior_fn(init_key, cfg.mcmc.n_chains)
 
                 def transformed_log_prob(theta: Array) -> Array:
                     batched_theta = theta[None, ...]
@@ -275,7 +310,6 @@ def run(cfg: DictConfig) -> None:
                         step_size=cfg.mcmc.step_size,
                         max_tree_depth=cfg.mcmc.max_tree_depth,
                         adapt_step_size=True,
-                        forward_mode_differentiation=True
                     )
                     chain_method = "parallel"
 

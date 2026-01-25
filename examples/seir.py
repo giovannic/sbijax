@@ -459,6 +459,23 @@ def run(cfg: DictConfig) -> None:
         )
         return flatten_selective_theta_dict(posterior, sample_params)[...,0,:]
 
+    def sample_multiple_sfmpe_posterior(key, x, n):
+        # Use the correct dimensions for selective inference
+        n_selective_params = len(global_names) + len(local_names) * n_sites
+        theta_0 = jr.normal(key, (n, n_selective_params, 1))
+        x = tree.map(lambda leaf: leaf[None, ...], x)
+        context = _flatten(x)[..., None]
+        posterior = estim.sample_posterior(
+            context,
+            labels, #type:ignore
+            slices,
+            masks=masks,
+            n_samples=n,
+            theta_0 = theta_0,
+            index=f_in_flattened
+        )
+        return flatten_selective_theta_dict(posterior, sample_params)[...,0,:]
+
     def sample_single_fmpe_posterior(key, x):
         dim = total_params
         theta_0 = jr.normal(key, (1, dim))
@@ -556,6 +573,17 @@ def run(cfg: DictConfig) -> None:
     logger.info(f"FMPE C2ST-NF analysis completed in {time.time() - start_time:.2f} seconds")
     
     logger.info("SEIR experiment completed successfully!")
+
+def compute_sbc_hist(
+    key: jnp.ndarray,
+    compute_rank: Callable[[Array, Array, int], Array],
+    prior_fn: Callable,
+    simulator_fn: Callable,
+    observation: jnp.ndarray,
+    n_bins: int,
+    n_reps: int = 100
+    ):
+    pass
 
 
 def apply_lc2st(
@@ -655,6 +683,21 @@ def save_lc2st_results(
     with open(out_dir / 'stats.json', 'w') as f:
         json.dump(stats, f)
 
+def compute_sfmpe_rank_with_sample_params(
+    key: jnp.ndarray,
+    sample_n_posterior: Callable[[Array, PyTree, int], PyTree],
+    prior_fn: Callable[[], tfd.Distribution],
+    simulator_fn: Callable[[Array, PyTree], PyTree],
+    sample_params: list,
+    n: int
+    ) -> Tuple[Array, Array, Array]:
+    """Create calibration dataset for SFMPE."""
+    prior_key, post_key, sim_key = jr.split(key, 3)
+    prior = prior_fn().sample((1,), seed=prior_key)
+    y = simulator_fn(sim_key, prior)
+    post_estimate = sample_n_posterior(post_key, y, n)
+    x = flatten_selective_theta_dict(prior, sample_params)
+    return jnp.sum(post_estimate < x[None,...], axis=0)
 
 def create_sfmpe_calibration_dataset_with_sample_params(
     key: jnp.ndarray,

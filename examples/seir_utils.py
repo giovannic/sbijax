@@ -13,7 +13,7 @@ from typing import Callable, Dict
 from jaxtyping import PyTree, Array
 import jax.numpy as jnp
 from jax import random as jr, vmap, tree
-from diffrax import diffeqsolve, ODETerm, Dopri5, SaveAt, ForwardMode
+from diffrax import diffeqsolve, ODETerm, Dopri5, SaveAt, ForwardMode, RecursiveCheckpointAdjoint
 from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import bijectors as tfb
 from sfmpe.pytree_bijector import (
@@ -285,8 +285,8 @@ def create_simulator_dist(
                 dt0=0.1,
                 y0=initial_state, 
                 saveat=saveat,
-                adjoint=ForwardMode(),
-                max_steps=None
+                adjoint=RecursiveCheckpointAdjoint(),
+                max_steps=100_000
             )
             
             # Reorder solution to match original time sequence
