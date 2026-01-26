@@ -17,7 +17,9 @@ import json
 import logging
 import time
 from pathlib import Path
-from jaxtyping import Array
+from jaxtyping import Array, PyTree
+from typing import Callable
+
 import hydra
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
@@ -46,8 +48,9 @@ from seir_utils import (
     create_selective_prior_fn,
     create_selective_flat_bijector, flatten_selective_theta_dict,
     reconstruct_selective_theta_dict, create_selective_numpyro_seir_model,
-    create_selective_sfmpe_functions
+    create_selective_sfmpe_functions, sbc_plot
 )
+import matplotlib.pyplot as plt
 
 
 def run(cfg: DictConfig) -> None:
@@ -531,6 +534,71 @@ def run(cfg: DictConfig) -> None:
         # Convert SFMPE posterior to the same format as MCMC for downstream analysis
         mcmc_posterior_samples = flatten_selective_theta_dict(posterior, sample_params)[None, ...]
         
+
+        # Perform SBC
+        def sample_multiple_sfmpe_posterior(key, x, n):
+            # Use the correct dimensions for selective inference
+            params = Tokens.from_pytree(
+                {
+                    k: jnp.zeros(
+                        (n,) + v.shape[1:]
+                    )
+                    for k, v in repr_theta.items()
+                },
+                independence=independence,
+                labeller=labeller,
+                functional_inputs=f_in_for_samples(n)
+            )
+            context = Tokens.from_pytree(
+                x,
+                independence=independence,
+                labeller=labeller,
+                functional_inputs=f_in_for_samples(1)
+            )
+            posterior = estim.sample_posterior(
+                context=context,
+                params=params
+            )
+            return flatten_selective_theta_dict(posterior.decode(), sample_params)
+
+        def compute_sfmpe_rank_with_sample_params(
+            key: jnp.ndarray,
+            sample_n_posterior: Callable[[Array, PyTree, int], PyTree],
+            prior_fn: Callable[[Array], PyTree],
+            simulator_fn: Callable[[Array, PyTree], PyTree],
+            sample_params: list,
+            n: int
+            ) -> Array:
+            """Create calibration dataset for SFMPE."""
+            prior_key, post_key, sim_key = jr.split(key, 3)
+            prior = prior_fn(prior_key)
+            y = simulator_fn(sim_key, prior)
+            post_estimate = sample_n_posterior(post_key, y, n)
+            x = flatten_selective_theta_dict(prior, sample_params)
+            return jnp.sum(post_estimate < x[None,...], axis=1)
+
+        max_rank = 100
+        n_tests = 100
+        ranks = jax.vmap(
+            compute_sfmpe_rank_with_sample_params,
+            in_axes=(0, None, None, None, None, None)
+        )(
+            jnp.stack(jr.split(key, n_tests)),
+            sample_multiple_sfmpe_posterior,
+            lambda k: selective_prior_fn(n_sites).sample((1,), seed=k),
+            lambda seed, theta: apply_dequantization(wrapped_simulator_fn(seed, theta, f_in), seed),  # Use constrained simulator with dequantization
+            sample_params,
+            max_rank
+        )
+        # plot SBC rank plot
+        fig = sbc_plot(ranks, max_rank, sample_params, n_sites)
+
+        # save figure to sbc.png
+        sbc_out_dir = Path(HydraConfig.get().runtime.output_dir)
+        fig.savefig(sbc_out_dir / "sbc.png", dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        logger.info(f"SBC plot saved to {sbc_out_dir / 'sbc.png'}")
+
         logger.info(f'SFMPE posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
         logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
     else:

@@ -12,6 +12,7 @@ and visualization scripts, including:
 from typing import Callable, Dict
 from jaxtyping import PyTree, Array
 import jax.numpy as jnp
+import numpy as np
 from jax import random as jr, vmap, tree
 from diffrax import diffeqsolve, ODETerm, Dopri5, SaveAt, ForwardMode, RecursiveCheckpointAdjoint
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -22,6 +23,8 @@ from sfmpe.pytree_bijector import (
 )
 import numpyro
 import numpyro.distributions as dist
+import matplotlib.pyplot as plt
+from scipy.stats import binom
 
 
 def seir_dynamics(
@@ -1006,3 +1009,91 @@ def create_selective_sfmpe_functions(
     local_names = [p for p in all_local if p in sample_params]
 
     return selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names
+
+
+# Parameter ordering constants for SBC plotting
+PARAM_ORDER = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+GLOBAL_PARAMS = {'beta_0', 'alpha', 'sigma'}
+LOCAL_PARAMS = {'A', 'T_season', 'phi'}
+
+
+def sbc_plot(
+    ranks: jnp.ndarray,
+    max_rank: int,
+    sample_params: list[str],
+    n_sites: int,
+    num_bins: int | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> plt.Figure:
+    """Plot SBC rank histograms with uniformity bands.
+
+    Args:
+        ranks: Shape (n_tests, n_flat_dims) - SBC ranks
+        max_rank: Maximum rank value (number of posterior samples)
+        sample_params: List of parameter names being sampled
+        n_sites: Number of sites (for local parameter dimensions)
+        num_bins: Number of histogram bins (default: n_tests // 20)
+        figsize: Figure size tuple
+
+    Returns:
+        matplotlib Figure
+    """
+    # Convert to numpy
+    ranks_np = np.asarray(ranks)
+    n_tests, n_flat_dims = ranks_np.shape
+
+    if num_bins is None:
+        num_bins = max(n_tests // 20, 10)
+
+    # Build mapping from param name to flat indices
+    param_indices: Dict[str, list[int]] = {}
+    offset = 0
+    for param in PARAM_ORDER:
+        if param not in sample_params:
+            continue
+        if param in GLOBAL_PARAMS:
+            param_indices[param] = [offset]
+            offset += 1
+        else:  # LOCAL_PARAMS
+            param_indices[param] = list(range(offset, offset + n_sites))
+            offset += n_sites
+
+    # Create figure
+    n_params = len(sample_params)
+    fig, axes = plt.subplots(1, n_params, figsize=figsize or (4 * n_params, 3))
+    if n_params == 1:
+        axes = [axes]
+
+    for ax, param in zip(axes, sample_params):
+        indices = param_indices[param]
+        # Pool ranks for this parameter (concatenate across sites for local params)
+        pooled_ranks = ranks_np[:, indices].flatten()
+        n_samples = len(pooled_ranks)
+
+        # Plot histogram
+        ax.hist(
+            pooled_ranks,
+            bins=num_bins,
+            range=(0, max_rank),
+            color='firebrick',
+            alpha=0.7,
+            edgecolor='black',
+            linewidth=0.5
+        )
+
+        # Compute and plot uniformity band
+        p = 1.0 / num_bins
+        expected = n_samples * p
+        lower = binom(n_samples, p).ppf(0.005)
+        upper = binom(n_samples, p).ppf(0.995)
+
+        ax.axhspan(lower, upper, color='gray', alpha=0.3, label='95% CI')
+        ax.axhline(expected, color='black', linestyle='--', linewidth=1, label='Expected')
+
+        ax.set_xlabel('Rank')
+        ax.set_ylabel('Count')
+        ax.set_title(param)
+        ax.set_xlim(0, max_rank)
+
+    fig.tight_layout()
+    return fig
