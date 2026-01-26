@@ -534,62 +534,111 @@ def run(cfg: DictConfig) -> None:
         # Convert SFMPE posterior to the same format as MCMC for downstream analysis
         mcmc_posterior_samples = flatten_selective_theta_dict(posterior, sample_params)[None, ...]
         
-
-        # Perform SBC
-        def sample_multiple_sfmpe_posterior(key, x, n):
-            # Use the correct dimensions for selective inference
-            params = Tokens.from_pytree(
-                {
-                    k: jnp.zeros(
-                        (n,) + v.shape[1:]
-                    )
-                    for k, v in repr_theta.items()
-                },
-                independence=independence,
-                labeller=labeller,
-                functional_inputs=f_in_for_samples(n)
-            )
-            context = Tokens.from_pytree(
-                x,
-                independence=independence,
-                labeller=labeller,
-                functional_inputs=f_in_for_samples(1)
-            )
-            posterior = estim.sample_posterior(
-                context=context,
-                params=params
-            )
-            return flatten_selective_theta_dict(posterior.decode(), sample_params)
-
-        def compute_sfmpe_rank_with_sample_params(
+        def compute_sfmpe_ranks_batched(
             key: jnp.ndarray,
-            sample_n_posterior: Callable[[Array, PyTree, int], PyTree],
-            prior_fn: Callable[[Array], PyTree],
-            simulator_fn: Callable[[Array, PyTree], PyTree],
-            sample_params: list,
-            n: int
-            ) -> Array:
-            """Create calibration dataset for SFMPE."""
-            prior_key, post_key, sim_key = jr.split(key, 3)
-            prior = prior_fn(prior_key)
-            y = simulator_fn(sim_key, prior)
-            post_estimate = sample_n_posterior(post_key, y, n)
-            x = flatten_selective_theta_dict(prior, sample_params)
-            return jnp.sum(post_estimate < x[None,...], axis=1)
+            n_tests: int,
+            n_posterior_samples: int,
+        ) -> Array:
+            """
+            Compute SBC ranks for multiple test cases in a single batch.
+
+            Parameters
+            ----------
+            key : jnp.ndarray
+                PRNG key
+            n_tests : int
+                Number of SBC test cases
+            n_posterior_samples : int
+                Number of posterior samples per test case
+
+            Returns
+            -------
+            Array of shape (n_tests, param_dim) containing ranks
+            """
+            prior_key, sim_key = jr.split(key)
+
+            # 1. Generate n_tests prior samples (batched)
+            priors = selective_prior_fn(n_sites).sample((n_tests,), seed=prior_key)
+            # Shape: {param: (n_tests, ...)} for each param
+
+            # 2. Generate n_tests observations using vmap
+            def simulate_single(sim_key: Array, prior_sample: PyTree) -> PyTree:
+                # prior_sample: {param: (...)} without batch dim
+                # Add batch dim back for simulator
+                prior_batched = tree.map(lambda x: x[None, ...], prior_sample)
+                y = wrapped_simulator_fn(sim_key, prior_batched, f_in)
+                return apply_dequantization(y, sim_key)
+
+            sim_keys = jr.split(sim_key, n_tests)
+            # vmap over test cases
+            observations = jax.vmap(simulate_single)(
+                sim_keys,
+                priors  # Tree of {param: (n_tests, ...)}
+            )
+            # Shape: (n_tests, 1, n_obs, n_sites, n_timesteps)
+
+            # Transform to unconstrained space
+            observations_unconstrained = sfmpe_y_bijector.forward(observations)
+
+            # 3. Prepare for sample_posterior - replicate each observation n times
+            total_samples = n_tests * n_posterior_samples
+            context_repeated = tree.map(
+                lambda x: jnp.repeat(x, n_posterior_samples, axis=0),
+                observations_unconstrained
+            )
+            # Shape: (n_tests * n, 1, n_obs, n_sites, n_timesteps)
+
+            # Create f_in for all samples
+            f_in_all = f_in_for_samples(total_samples)
+
+            # Create context tokens
+            context_tokens = Tokens.from_pytree(
+                context_repeated,
+                independence=independence,
+                labeller=labeller,
+                functional_inputs=f_in_all
+            )
+
+            # Create param tokens (template for posterior samples)
+            param_tokens = Tokens.from_pytree(
+                {k: jnp.zeros((total_samples,) + v.shape[1:])
+                 for k, v in repr_theta.items()},
+                independence=independence,
+                labeller=labeller,
+                functional_inputs=f_in_all
+            )
+
+            # 4. Single call to sample_posterior for all samples
+            posterior_tokens = estim.sample_posterior_batched(
+                context=context_tokens,
+                params=param_tokens,
+                batch_size=1000
+            )
+            posterior_unconstrained = posterior_tokens.decode()
+
+            # Transform to constrained space
+            posterior_constrained = sfmpe_theta_bijector.inverse(posterior_unconstrained)
+
+            # 5. Reshape and compute ranks
+            # Flatten posterior to (n_tests * n, param_dim)
+            posterior_flat = flatten_selective_theta_dict(posterior_constrained, sample_params)
+            # Reshape to (n_tests, n, param_dim)
+            param_dim = posterior_flat.shape[-1]
+            posterior_reshaped = posterior_flat.reshape(n_tests, n_posterior_samples, param_dim)
+
+            # Flatten priors to (n_tests, param_dim)
+            priors_flat = flatten_selective_theta_dict(priors, sample_params)
+
+            # Compute ranks: count posterior samples < prior value
+            # priors_flat[:, None, :] broadcasts to (n_tests, 1, param_dim)
+            ranks = jnp.sum(posterior_reshaped < priors_flat[:, None, :], axis=1)
+            # Shape: (n_tests, param_dim)
+
+            return ranks
 
         max_rank = 100
         n_tests = 100
-        ranks = jax.vmap(
-            compute_sfmpe_rank_with_sample_params,
-            in_axes=(0, None, None, None, None, None)
-        )(
-            jnp.stack(jr.split(key, n_tests)),
-            sample_multiple_sfmpe_posterior,
-            lambda k: selective_prior_fn(n_sites).sample((1,), seed=k),
-            lambda seed, theta: apply_dequantization(wrapped_simulator_fn(seed, theta, f_in), seed),  # Use constrained simulator with dequantization
-            sample_params,
-            max_rank
-        )
+        ranks = compute_sfmpe_ranks_batched(key, n_tests, max_rank)
         # plot SBC rank plot
         fig = sbc_plot(ranks, max_rank, sample_params, n_sites)
 
