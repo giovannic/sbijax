@@ -612,7 +612,7 @@ def run(cfg: DictConfig) -> None:
             posterior_tokens = estim.sample_posterior_batched(
                 context=context_tokens,
                 params=param_tokens,
-                batch_size=1000
+                batch_size=10
             )
             posterior_unconstrained = posterior_tokens.decode()
 
@@ -637,7 +637,7 @@ def run(cfg: DictConfig) -> None:
             return ranks
 
         max_rank = 100
-        n_tests = 100
+        n_tests = 200
         ranks = compute_sfmpe_ranks_batched(key, n_tests, max_rank)
         # plot SBC rank plot
         fig = sbc_plot(ranks, max_rank, sample_params, n_sites)
