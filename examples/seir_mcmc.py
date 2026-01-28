@@ -517,17 +517,24 @@ def run(cfg: DictConfig) -> None:
                     y_unconstrained
                 )
             },
+            condition=list(y_unconstrained.keys()),
             independence=independence,
             labeller=labeller,
             functional_inputs=f_in_for_samples(n_post_samples),
             return_decoder = True
         )
 
-        posterior_tokens = estim.sample_posterior(
+        posterior_tokens = estim.sample_posterior_batched(
             tokens=tokens,
+            batch_size=1000
         )
 
-        posterior_unconstrained = decoder(posterior_tokens)
+        posterior_unconstrained = {
+            k: v
+            for k, v
+            in decoder(posterior_tokens).items()
+            if k in repr_theta.keys()
+        }
 
         # Transform to constrained space for true posterior evaluation
         posterior = sfmpe_theta_bijector.inverse(posterior_unconstrained)
@@ -603,6 +610,7 @@ def run(cfg: DictConfig) -> None:
             # Create param tokens (template for posterior samples)
             tokens, decoder = Tokens.from_pytree(
                 data,
+                condition=list(context_repeated.keys()),
                 independence=independence,
                 labeller=labeller,
                 functional_inputs=f_in_all,
@@ -612,9 +620,14 @@ def run(cfg: DictConfig) -> None:
             # 4. Single call to sample_posterior for all samples
             posterior_tokens = estim.sample_posterior_batched(
                 tokens=tokens,
-                batch_size=100
+                batch_size=1000
             )
-            posterior_unconstrained = decoder(posterior_tokens)
+            posterior_unconstrained = {
+                k: v
+                for k, v
+                in decoder(posterior_tokens).items()
+                if k in repr_theta.keys()
+            }
 
             # Transform to constrained space
             posterior_constrained = sfmpe_theta_bijector.inverse(posterior_unconstrained)
