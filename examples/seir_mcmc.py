@@ -413,7 +413,6 @@ def run(cfg: DictConfig) -> None:
         transformer_config = TransformerConfig(
             latent_dim = cfg.sfmpe.transformer.latent_dim,
             n_encoder = cfg.sfmpe.transformer.n_encoder,
-            n_decoder = cfg.sfmpe.transformer.n_decoder,
             n_heads = cfg.sfmpe.transformer.n_heads,
             n_ff = cfg.sfmpe.transformer.n_ff,
             label_dim = cfg.sfmpe.transformer.label_dim,
@@ -424,10 +423,14 @@ def run(cfg: DictConfig) -> None:
         labeller = Labeller.for_keys(list(repr_theta.keys()) + ['obs'])
 
         repr_tokens = Tokens.from_pytree(
-            repr_theta,
+            {
+                **tree.map(lambda x: x[0:1], repr_theta),
+                **y_unconstrained
+            },
+            condition=list(y_unconstrained.keys()),
             independence=independence,
             labeller=labeller,
-            functional_inputs=repr_f_in
+            functional_inputs=tree.map(lambda x: x[0:1], repr_f_in)
         )
 
         base_dist = NormalDistribution(rngs=rngs)
@@ -486,6 +489,7 @@ def run(cfg: DictConfig) -> None:
             f_in_fn = f_in_fn_train,
             f_in_args = f_in_args,
             f_in_args_global = f_in_args_global,
+            prior_log_prob = None
         )
         logger.info(f"SFMPE bottom-up training completed in {time.time() - start_time:.2f} seconds")
 
@@ -502,31 +506,28 @@ def run(cfg: DictConfig) -> None:
                 f_in
             )
 
-        param_tokens = Tokens.from_pytree(
-            tree.map(
-                lambda leaf: jnp.zeros((n_post_samples,) + leaf.shape[1:]),
-                repr_theta
-            ),
+        tokens, decoder = Tokens.from_pytree(
+            {
+                **tree.map(
+                    lambda leaf: jnp.zeros((n_post_samples,) + leaf.shape[1:]),
+                    repr_theta
+                ),
+                **tree.map(
+                    lambda leaf: jnp.broadcast_to(leaf, (n_post_samples,) + leaf.shape[1:]),
+                    y_unconstrained
+                )
+            },
             independence=independence,
             labeller=labeller,
             functional_inputs=f_in_for_samples(n_post_samples),
-        )
-        context_tokens = Tokens.from_pytree(
-            tree.map(
-                lambda leaf: jnp.broadcast_to(leaf, (n_post_samples,) + leaf.shape[1:]),
-                y_unconstrained
-            ),
-            independence=independence,
-            labeller=labeller,
-            functional_inputs=f_in_for_samples(n_post_samples)
+            return_decoder = True
         )
 
         posterior_tokens = estim.sample_posterior(
-            context=context_tokens,
-            params=param_tokens
+            tokens=tokens,
         )
 
-        posterior_unconstrained = posterior_tokens.decode()
+        posterior_unconstrained = decoder(posterior_tokens)
 
         # Transform to constrained space for true posterior evaluation
         posterior = sfmpe_theta_bijector.inverse(posterior_unconstrained)
@@ -592,29 +593,28 @@ def run(cfg: DictConfig) -> None:
             f_in_all = f_in_for_samples(total_samples)
 
             # Create context tokens
-            context_tokens = Tokens.from_pytree(
-                context_repeated,
-                independence=independence,
-                labeller=labeller,
-                functional_inputs=f_in_all
-            )
+            param_template = {
+                k: jnp.zeros((total_samples,) + v.shape[1:])
+                for k, v in repr_theta.items()
+            }
+
+            data = {**context_repeated, **param_template}
 
             # Create param tokens (template for posterior samples)
-            param_tokens = Tokens.from_pytree(
-                {k: jnp.zeros((total_samples,) + v.shape[1:])
-                 for k, v in repr_theta.items()},
+            tokens, decoder = Tokens.from_pytree(
+                data,
                 independence=independence,
                 labeller=labeller,
-                functional_inputs=f_in_all
+                functional_inputs=f_in_all,
+                return_decoder=True
             )
 
             # 4. Single call to sample_posterior for all samples
             posterior_tokens = estim.sample_posterior_batched(
-                context=context_tokens,
-                params=param_tokens,
-                batch_size=10
+                tokens=tokens,
+                batch_size=100
             )
-            posterior_unconstrained = posterior_tokens.decode()
+            posterior_unconstrained = decoder(posterior_tokens)
 
             # Transform to constrained space
             posterior_constrained = sfmpe_theta_bijector.inverse(posterior_unconstrained)
