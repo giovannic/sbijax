@@ -587,12 +587,11 @@ def plot_posterior_predictive_checks(
                      fontsize=14, y=0.98)
         save_filename = f"{filename_prefix}.png"
 
-    # Create unified legend outside the plot area
-    fig.legend(legend_handles, legend_labels, loc='center left',
-               bbox_to_anchor=(1.02, 0.5))
+    # Create unified legend inside the first subplot
+    axes[0].legend(legend_handles, legend_labels, loc='upper right',
+                   fontsize=12, framealpha=0.9)
 
     plt.tight_layout()
-    plt.subplots_adjust(right=0.85)  # Make room for legend
     plt.savefig(out_dir / save_filename, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -824,6 +823,30 @@ def plot_pairplot_with_reference(
                     alpha=0.8,
                     label='Truth' if i == 0 else ""
                 )
+
+    # Adjust legend to be inside axes and larger
+    if g.legend is not None:
+        g.legend.remove()
+    # Add legend to the empty upper-right area of the corner plot
+    if len(job_data_list) > 1:
+        # For multi-method, include method colors and truth marker
+        handles, labels = [], []
+        for method in df['method'].unique():
+            color = method_colours.get(method, '#000000')
+            handles.append(plt.Line2D([0], [0], color=color, linewidth=3))
+            labels.append(method)
+        handles.append(plt.Line2D([0], [0], marker='x', color='black', linestyle='None',
+                                   markersize=10, markeredgewidth=3))
+        labels.append('Truth')
+        g.figure.legend(handles, labels, loc='center', fontsize=12,
+                        framealpha=0.9, bbox_to_anchor=(0.7, 0.85))
+    else:
+        # For single method, just show truth marker
+        handles = [plt.Line2D([0], [0], marker='x', color='black', linestyle='None',
+                              markersize=10, markeredgewidth=3)]
+        labels = ['Truth']
+        g.figure.legend(handles, labels, loc='center', fontsize=12,
+                        framealpha=0.9, bbox_to_anchor=(0.7, 0.85))
 
     plt.savefig(out_dir / filename, dpi=300, bbox_inches='tight')
     plt.close()

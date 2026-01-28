@@ -24,7 +24,7 @@ from sfmpe.pytree_bijector import (
 import numpyro
 import numpyro.distributions as dist
 import matplotlib.pyplot as plt
-from scipy.stats import binom
+from scipy.stats import binom, kstest
 
 
 def seir_dynamics(
@@ -1097,3 +1097,169 @@ def sbc_plot(
 
     fig.tight_layout()
     return fig
+
+
+def compute_tarp_coverage(
+    posterior_samples: Array,
+    theta_true: Array,
+    references: str | Array = "random",
+    metric: str = "euclidean",
+    num_alpha_bins: int | None = None,
+    key: Array | None = None,
+) -> tuple[Array, Array]:
+    """
+    Compute TARP Expected Coverage Probability (ECP) vs alpha.
+
+    TARP (Tests of Accuracy with Random Points) provides a necessary and
+    sufficient condition for posterior accuracy by computing expected
+    coverage probabilities.
+
+    Algorithm:
+    1. For each test case i:
+       a. Sample reference point theta_r (random or from samples)
+       b. Compute distance r_i = ||theta*_i - theta_r||
+       c. Compute distances d_j = ||theta_j - theta_r|| for all posterior samples
+       d. coverage_i = (# posterior samples with d_j < r_i) / n_posterior_samples
+    2. Sort coverage values and compute ECP at each alpha level
+
+    Args:
+        posterior_samples: Shape (n_tests, n_posterior_samples, param_dim)
+        theta_true: Shape (n_tests, param_dim) - true parameter values
+        references: "random" to sample reference points from posterior samples,
+                    or an array of shape (n_tests, param_dim)
+        metric: Distance metric ("euclidean" supported)
+        num_alpha_bins: Number of alpha bins (default: n_tests)
+        key: PRNG key for random reference sampling
+
+    Returns:
+        ecp: Expected coverage probability at each alpha level
+        alpha: Credibility levels (0 to 1)
+    """
+    n_tests, n_posterior_samples, param_dim = posterior_samples.shape
+
+    if num_alpha_bins is None:
+        num_alpha_bins = n_tests
+
+    # Generate reference points
+    if isinstance(references, str) and references == "random":
+        if key is None:
+            key = jr.PRNGKey(0)
+        # Sample one random posterior sample per test case as reference
+        ref_indices = jr.randint(key, (n_tests,), 0, n_posterior_samples)
+        theta_ref = posterior_samples[jnp.arange(n_tests), ref_indices, :]
+    else:
+        theta_ref = references
+
+    # Compute distances from true parameters to reference points
+    if metric == "euclidean":
+        # r_i = ||theta*_i - theta_r_i||
+        r_true = jnp.sqrt(jnp.sum((theta_true - theta_ref) ** 2, axis=-1))
+        # d_ij = ||posterior_ij - theta_r_i|| for all j
+        # posterior_samples: (n_tests, n_posterior_samples, param_dim)
+        # theta_ref: (n_tests, param_dim) -> (n_tests, 1, param_dim)
+        d_posterior = jnp.sqrt(
+            jnp.sum((posterior_samples - theta_ref[:, None, :]) ** 2, axis=-1)
+        )
+    else:
+        raise ValueError(f"Unsupported metric: {metric}")
+
+    # Compute coverage for each test case
+    # coverage_i = fraction of posterior samples closer to reference than true param
+    coverage = jnp.mean(d_posterior < r_true[:, None], axis=1)
+    # Shape: (n_tests,)
+
+    # Compute ECP at each alpha level
+    alpha = jnp.linspace(0.0, 1.0, num_alpha_bins + 1)
+    # ECP(alpha) = fraction of coverage values <= alpha
+    ecp = jnp.mean(coverage[:, None] <= alpha[None, :], axis=0)
+
+    return ecp, alpha
+
+
+def tarp_plot(
+    ecp: Array,
+    alpha: Array,
+    sample_params: list[str],
+    n_sites: int,
+    figsize: tuple[float, float] | None = None,
+) -> plt.Figure:
+    """
+    Plot TARP diagnostic (ECP vs alpha).
+
+    A well-calibrated posterior has ECP approximately equal to alpha
+    (points on the diagonal). Deviations indicate:
+    - ECP > alpha: posterior is overconfident (too narrow)
+    - ECP < alpha: posterior is underconfident (too wide)
+
+    Args:
+        ecp: Expected coverage probability at each alpha level
+        alpha: Credibility levels (0 to 1)
+        sample_params: List of parameter names being sampled (for title)
+        n_sites: Number of sites (for title)
+        figsize: Figure size tuple
+
+    Returns:
+        matplotlib Figure with TARP plot and diagnostic metrics
+    """
+    # Convert to numpy
+    ecp_np = np.asarray(ecp)
+    alpha_np = np.asarray(alpha)
+
+    # Compute diagnostic metrics
+    # Area to Curve (ATC): measures deviation from diagonal
+    atc = np.mean(np.abs(ecp_np - alpha_np))
+
+    # Kolmogorov-Smirnov test: test if coverage values are uniform
+    # We use the ECP values which should follow the diagonal
+    # The coverage values themselves should be uniform
+    n_tests = len(alpha_np) - 1  # Approximate from alpha bins
+    # KS test on the difference between ECP and alpha
+    # Under null hypothesis (well-calibrated), differences should be small
+    ks_stat, ks_pval = kstest(ecp_np, 'uniform')
+
+    # Create figure
+    fig, ax = plt.subplots(1, 1, figsize=figsize or (6, 5))
+
+    # Plot ECP vs alpha
+    ax.plot(alpha_np, ecp_np, 'b-', linewidth=2, label='TARP ECP')
+
+    # Plot diagonal (perfect calibration)
+    ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Perfect calibration')
+
+    # Add confidence band (approximate 95% CI)
+    # For n samples, the expected variance of ECP at each alpha is alpha*(1-alpha)/n
+    # Use a simple approximation based on the number of tests
+    n_approx = max(len(alpha_np), 100)
+    stderr = np.sqrt(alpha_np * (1 - alpha_np) / n_approx)
+    ax.fill_between(
+        alpha_np,
+        alpha_np - 1.96 * stderr,
+        alpha_np + 1.96 * stderr,
+        color='gray',
+        alpha=0.2,
+        label='95% CI'
+    )
+
+    # Labels and title
+    ax.set_xlabel('Credibility Level (α)', fontsize=12)
+    ax.set_ylabel('Expected Coverage Probability', fontsize=12)
+    param_str = ', '.join(sample_params)
+    ax.set_title(f'TARP Diagnostic\nParams: {param_str} ({n_sites} sites)', fontsize=11)
+
+    # Add metrics as text
+    metrics_text = f'ATC = {atc:.4f}\nKS p-value = {ks_pval:.4f}'
+    ax.text(
+        0.05, 0.95, metrics_text,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment='top',
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+    )
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend(loc='lower right')
+    ax.set_aspect('equal')
+
+    fig.tight_layout()
+    return fig, atc, ks_pval

@@ -48,7 +48,7 @@ from seir_utils import (
     create_selective_prior_fn,
     create_selective_flat_bijector, flatten_selective_theta_dict,
     reconstruct_selective_theta_dict, create_selective_numpyro_seir_model,
-    create_selective_sfmpe_functions, sbc_plot
+    create_selective_sfmpe_functions, sbc_plot, compute_tarp_coverage, tarp_plot
 )
 import matplotlib.pyplot as plt
 
@@ -651,7 +651,8 @@ def run(cfg: DictConfig) -> None:
 
         max_rank = 100
         n_tests = 200
-        ranks = compute_sfmpe_ranks_batched(key, n_tests, max_rank)
+        sbc_key, tarp_key, key = jr.split(key, 3)
+        ranks = compute_sfmpe_ranks_batched(sbc_key, n_tests, max_rank)
         # plot SBC rank plot
         fig = sbc_plot(ranks, max_rank, sample_params, n_sites)
 
@@ -660,6 +661,117 @@ def run(cfg: DictConfig) -> None:
         fig.savefig(sbc_out_dir / "sbc.png", dpi=150, bbox_inches='tight')
         plt.close(fig)
         logger.info(f"SBC plot saved to {sbc_out_dir / 'sbc.png'}")
+
+        # Compute TARP diagnostic
+        logger.info("Computing TARP diagnostic")
+
+        def compute_tarp_data(
+            key: jnp.ndarray,
+            n_tests: int,
+            n_posterior_samples: int,
+        ) -> tuple[Array, Array]:
+            """
+            Generate posterior samples and true parameters for TARP computation.
+
+            Returns
+            -------
+            posterior_samples: Array of shape (n_tests, n_posterior_samples, param_dim)
+            theta_true: Array of shape (n_tests, param_dim)
+            """
+            prior_key, sim_key = jr.split(key)
+
+            # 1. Generate n_tests prior samples (batched)
+            priors = selective_prior_fn(n_sites).sample((n_tests,), seed=prior_key)
+
+            # 2. Generate n_tests observations using vmap
+            def simulate_single(sim_key: Array, prior_sample: PyTree) -> PyTree:
+                prior_batched = tree.map(lambda x: x[None, ...], prior_sample)
+                y = wrapped_simulator_fn(sim_key, prior_batched, f_in)
+                return apply_dequantization(y, sim_key)
+
+            sim_keys = jr.split(sim_key, n_tests)
+            observations = jax.vmap(simulate_single)(sim_keys, priors)
+
+            # Transform to unconstrained space
+            observations_unconstrained = sfmpe_y_bijector.forward(observations)
+
+            # 3. Prepare for sample_posterior - replicate each observation n times
+            total_samples = n_tests * n_posterior_samples
+            context_repeated = tree.map(
+                lambda x: jnp.repeat(x, n_posterior_samples, axis=0),
+                observations_unconstrained
+            )
+
+            # Create f_in for all samples
+            f_in_all = f_in_for_samples(total_samples)
+
+            # Create context tokens
+            param_template = {
+                k: jnp.zeros((total_samples,) + v.shape[1:])
+                for k, v in repr_theta.items()
+            }
+
+            data = {**context_repeated, **param_template}
+
+            tokens, decoder = Tokens.from_pytree(
+                data,
+                condition=list(context_repeated.keys()),
+                independence=independence,
+                labeller=labeller,
+                functional_inputs=f_in_all,
+                return_decoder=True
+            )
+
+            # 4. Single call to sample_posterior for all samples
+            posterior_tokens = estim.sample_posterior_batched(
+                tokens=tokens,
+                batch_size=1000
+            )
+            posterior_unconstrained = {
+                k: v
+                for k, v
+                in decoder(posterior_tokens).items()
+                if k in repr_theta.keys()
+            }
+
+            # Transform to constrained space
+            posterior_constrained = sfmpe_theta_bijector.inverse(posterior_unconstrained)
+
+            # 5. Reshape for TARP
+            posterior_flat = flatten_selective_theta_dict(posterior_constrained, sample_params)
+            param_dim = posterior_flat.shape[-1]
+            posterior_reshaped = posterior_flat.reshape(n_tests, n_posterior_samples, param_dim)
+
+            # Flatten priors to (n_tests, param_dim)
+            priors_flat = flatten_selective_theta_dict(priors, sample_params)
+
+            return posterior_reshaped, priors_flat
+
+        # Generate TARP data
+        n_tarp_tests = 200
+        n_tarp_posterior = 100
+        posterior_samples_tarp, theta_true_tarp = compute_tarp_data(
+            tarp_key, n_tarp_tests, n_tarp_posterior
+        )
+
+        # Compute TARP coverage
+        ecp, alpha = compute_tarp_coverage(
+            posterior_samples_tarp,
+            theta_true_tarp,
+            references="random",
+            key=jr.PRNGKey(42)
+        )
+
+        # Save TARP results
+        jnp.save(sbc_out_dir / "tarp_ecp.npy", ecp)
+        jnp.save(sbc_out_dir / "tarp_alpha.npy", alpha)
+
+        # Generate and save TARP plot
+        tarp_fig, atc, ks_pval = tarp_plot(ecp, alpha, sample_params, n_sites)
+        tarp_fig.savefig(sbc_out_dir / "tarp.png", dpi=150, bbox_inches='tight')
+        plt.close(tarp_fig)
+        logger.info(f"TARP plot saved to {sbc_out_dir / 'tarp.png'}")
+        logger.info(f"TARP metrics: ATC = {atc:.4f}, KS p-value = {ks_pval:.4f}")
 
         logger.info(f'SFMPE posterior mean: {jnp.mean(mcmc_posterior_samples, axis=(0, 1))}')
         logger.info(f"SFMPE posterior sampling completed in {time.time() - start_time:.2f} seconds")
