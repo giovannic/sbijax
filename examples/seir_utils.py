@@ -9,7 +9,7 @@ and visualization scripts, including:
 - Data preprocessing functions
 """
 
-from typing import Callable, Dict
+from typing import Any, Callable, Dict
 from jaxtyping import PyTree, Array
 import jax.numpy as jnp
 import numpy as np
@@ -25,6 +25,70 @@ import numpyro
 import numpyro.distributions as dist
 import matplotlib.pyplot as plt
 from scipy.stats import binom, kstest
+
+PARAM_ORDER = ['beta_0', 'alpha', 'sigma', 'mu_A', 'A', 'T_season', 'phi']
+GLOBAL_PARAMS = {'beta_0', 'alpha', 'sigma', 'mu_A'}
+LOCAL_PARAMS = {'A', 'T_season', 'phi'}
+
+
+def _normalize_a_prior_config(a_prior_config: Dict[str, Any] | None = None) -> Dict[str, float]:
+    """Return normalized SEIR amplitude prior settings."""
+    cfg = {} if a_prior_config is None else dict(a_prior_config)
+    return {
+        'mu_loc': float(cfg.get('mu_loc', 0.35)),
+        'mu_scale': float(cfg.get('mu_scale', 0.05)),
+        'sigma': float(cfg.get('sigma', 0.05)),
+        'low': float(cfg.get('low', 0.2)),
+        'high': float(cfg.get('high', 0.5)),
+    }
+
+
+def _broadcast_mu_a(mu_a: Array, target_shape: tuple[int, ...]) -> Array:
+    """Broadcast `mu_A` to match local-site tensor shape."""
+    if mu_a.ndim > len(target_shape):
+        target_shape = mu_a.shape[:-2] + target_shape
+    return jnp.broadcast_to(mu_a, target_shape)
+
+
+def _truncated_normal_a(mu_a: Array, target_shape: tuple[int, ...], a_prior_config: Dict[str, Any] | None = None) -> tfd.Distribution:
+    """Create the bounded hierarchical prior for local seasonal amplitudes."""
+    cfg = _normalize_a_prior_config(a_prior_config)
+    loc = _broadcast_mu_a(mu_a, target_shape)
+    scale = jnp.full(target_shape, cfg['sigma'])
+    return tfd.TruncatedNormal(
+        loc=loc,
+        scale=scale,
+        low=cfg['low'],
+        high=cfg['high'],
+    )
+
+
+def _numpyro_truncated_normal_a(mu_a: Array, n_sites: int, a_prior_config: Dict[str, Any] | None = None) -> dist.Distribution:
+    """NumPyro version of the bounded hierarchical prior for local amplitudes."""
+    cfg = _normalize_a_prior_config(a_prior_config)
+    loc = jnp.broadcast_to(mu_a, (n_sites,))
+    scale = jnp.full((n_sites,), cfg['sigma'])
+    return dist.TruncatedNormal(
+        loc=loc,
+        scale=scale,
+        low=cfg['low'],
+        high=cfg['high'],
+    )
+
+
+def _infer_batch_shape_and_n_sites(theta_dict: Dict[str, Array]) -> tuple[tuple[int, ...], int]:
+    """Infer batch shape and site count from the first available parameter."""
+    for param_name in ['A', 'T_season', 'phi']:
+        if param_name not in theta_dict:
+            continue
+        value = theta_dict[param_name]
+        return value.shape[:-2], value.shape[-2]
+    for param_name in ['beta_0', 'alpha', 'sigma', 'mu_A']:
+        if param_name not in theta_dict:
+            continue
+        value = theta_dict[param_name]
+        return value.shape[:-2], 1
+    raise ValueError("theta_dict must contain at least one parameter")
 
 
 def seir_dynamics(
@@ -77,18 +141,23 @@ def seir_dynamics(
     return jnp.array([dS, dE, dI, dR])
 
 
-def prior_fn(n):
+def prior_fn(n, a_prior_config: Dict[str, Any] | None = None):
     """Global prior distribution."""
     t_season_spread = 1./7.
+    cfg = _normalize_a_prior_config(a_prior_config)
     return tfd.JointDistributionNamed(
         dict(
             # Global parameters (independent of obs by exchangeability)
             beta_0 = tfd.Uniform(jnp.full((1, 1), 0.1), jnp.full((1, 1), 2.0)),
             alpha = tfd.Uniform(jnp.full((1, 1), 1/30), jnp.full((1, 1), 1/7)),
             sigma = tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
-
-            # Local parameters are independent of global parameters
-            A = tfd.Uniform(jnp.full((n, 1), .2), jnp.full((n, 1), .5)),
+            mu_A = tfd.TruncatedNormal(
+                loc=jnp.full((1, 1), cfg['mu_loc']),
+                scale=jnp.full((1, 1), cfg['mu_scale']),
+                low=cfg['low'],
+                high=cfg['high'],
+            ),
+            A = lambda mu_A: _truncated_normal_a(mu_A, (n, 1), cfg),
             T_season = tfd.Gamma(
                 jnp.full((n, 1), 365.0 * t_season_spread),
                 jnp.full((n, 1), t_season_spread)
@@ -103,7 +172,9 @@ def prior_fn(n):
 
 
 def create_selective_structured_prior_fn(
-    sample_params: list[str]
+    sample_params: list[str],
+    fixed_params: Dict[str, Array] | None = None,
+    a_prior_config: Dict[str, Any] | None = None,
 ) -> Callable:
     """
     Create structured prior function that returns distribution over specified parameters.
@@ -116,6 +187,9 @@ def create_selective_structured_prior_fn(
     """
     assert len(sample_params) > 0, "Must specify at least one parameter to sample"
 
+    cfg = _normalize_a_prior_config(a_prior_config)
+    fixed_params = {} if fixed_params is None else fixed_params
+
     def selective_structured_prior_fn(n):
         """Return distribution over only the specified parameters."""
         t_season_spread = 1./7.
@@ -125,7 +199,12 @@ def create_selective_structured_prior_fn(
             'beta_0': tfd.Uniform(jnp.full((1, 1), 0.1), jnp.full((1, 1), 2.0)),
             'alpha': tfd.Uniform(jnp.full((1, 1), 1/30), jnp.full((1, 1), 1/7)),
             'sigma': tfd.Uniform(jnp.full((1, 1), 1/21), jnp.full((1, 1), 1/7)),
-            'A': tfd.Uniform(jnp.full((n, 1), .2), jnp.full((n, 1), .5)),
+            'mu_A': tfd.TruncatedNormal(
+                loc=jnp.full((1, 1), cfg['mu_loc']),
+                scale=jnp.full((1, 1), cfg['mu_scale']),
+                low=cfg['low'],
+                high=cfg['high'],
+            ),
             'T_season': tfd.Gamma(
                 jnp.full((n, 1), 365.0 * t_season_spread),
                 jnp.full((n, 1), t_season_spread)
@@ -133,7 +212,17 @@ def create_selective_structured_prior_fn(
             'phi': tfd.Uniform(jnp.zeros((n, 1)), jnp.full((n, 1), jnp.pi))
         }
 
-        prior_dict = {param: all_priors[param] for param in sample_params if param in all_priors}
+        if 'A' in sample_params:
+            if 'mu_A' in sample_params:
+                all_priors['A'] = lambda mu_A: _truncated_normal_a(mu_A, (n, 1), cfg)
+            else:
+                mu_A_fixed = fixed_params.get(
+                    'mu_A',
+                    jnp.full((1, 1), cfg['mu_loc'])
+                )
+                all_priors['A'] = _truncated_normal_a(mu_A_fixed, (n, 1), cfg)
+
+        prior_dict = {param: all_priors[param] for param in PARAM_ORDER if param in sample_params and param in all_priors}
         return tfd.JointDistributionNamed(prior_dict, batch_ndims=1)
 
     return selective_structured_prior_fn
@@ -142,7 +231,8 @@ def create_selective_structured_prior_fn(
 def create_selective_prior_fn(
     n_sites: int,
     sample_params: list[str],
-    fixed_params: Dict[str, Array]
+    fixed_params: Dict[str, Array] | None = None,
+    a_prior_config: Dict[str, Any] | None = None,
 ) -> Callable:
     """
     Create prior distribution that only samples specified parameters.
@@ -156,6 +246,8 @@ def create_selective_prior_fn(
         Prior function that returns distribution over sampled parameters only
     """
     t_season_spread = 1./7.
+    cfg = _normalize_a_prior_config(a_prior_config)
+    fixed_params = {} if fixed_params is None else fixed_params
 
     def selective_prior_fn(n):
         prior_dict = {}
@@ -176,11 +268,22 @@ def create_selective_prior_fn(
                 jnp.full((1, 1), 1/21),
                 jnp.full((1, 1), 1/7)
             )
-        if 'A' in sample_params:
-            prior_dict['A'] = tfd.Uniform(
-                jnp.full((n, 1), .2),
-                jnp.full((n, 1), .5)
+        if 'mu_A' in sample_params:
+            prior_dict['mu_A'] = tfd.TruncatedNormal(
+                loc=jnp.full((1, 1), cfg['mu_loc']),
+                scale=jnp.full((1, 1), cfg['mu_scale']),
+                low=cfg['low'],
+                high=cfg['high'],
             )
+        if 'A' in sample_params:
+            if 'mu_A' in sample_params:
+                prior_dict['A'] = lambda mu_A: _truncated_normal_a(mu_A, (n, 1), cfg)
+            else:
+                mu_A_fixed = fixed_params.get(
+                    'mu_A',
+                    jnp.full((1, 1), cfg['mu_loc'])
+                )
+                prior_dict['A'] = _truncated_normal_a(mu_A_fixed, (n, 1), cfg)
         if 'T_season' in sample_params:
             prior_dict['T_season'] = tfd.Gamma(
                 jnp.full((n, 1), 365.0 * t_season_spread),
@@ -192,19 +295,20 @@ def create_selective_prior_fn(
                 jnp.full((n, 1), jnp.pi)
             )
 
+        prior_dict = {param: prior_dict[param] for param in PARAM_ORDER if param in prior_dict}
         return tfd.JointDistributionNamed(prior_dict, batch_ndims=1)
 
     return selective_prior_fn
 
 
-def p_local(g, n):
+def p_local(g, n, a_prior_config: Dict[str, Any] | None = None):
     """Local prior distribution for site-specific parameters (independent of global)."""
     n_sims = g['beta_0'].shape[0]
     t_season_spread = 1./7.
+    cfg = _normalize_a_prior_config(a_prior_config)
     return tfd.JointDistributionNamed(
         dict(
-            # Site-specific seasonal parameters  
-            A = tfd.Uniform(jnp.full((n_sims, n, 1), .2), jnp.full((n_sims, n, 1), .5)),
+            A = _truncated_normal_a(g['mu_A'], (n_sims, n, 1), cfg),
             T_season = tfd.Gamma(
                 jnp.full((n_sims, n, 1), 365.0 * t_season_spread), 
                 jnp.full((n_sims, n, 1), t_season_spread)
@@ -359,6 +463,7 @@ def f_in_fn(rng: Array, n_samples: int, n_obs: int, n_sites: int, n_timesteps: i
             beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
             alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
             sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+            mu_A = tfd.Deterministic(jnp.zeros((1, 1))),
             
             # Local parameters - dummy entries for structure  
             A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
@@ -384,6 +489,7 @@ def f_in_fn_observed(n_obs: int, n_sites: int, f_in):
                 beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
                 alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
                 sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                mu_A = tfd.Deterministic(jnp.zeros((1, 1))),
                 
                 # Local parameters - dummy entries for structure  
                 A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
@@ -408,6 +514,7 @@ def f_in_fn_observed(n_obs: int, n_sites: int, f_in):
                 beta_0 = tfd.Deterministic(jnp.zeros((1, 1))),
                 alpha = tfd.Deterministic(jnp.zeros((1, 1))), 
                 sigma = tfd.Deterministic(jnp.zeros((1, 1))),
+                mu_A = tfd.Deterministic(jnp.zeros((1, 1))),
                 
                 # Local parameters - dummy entries for structure  
                 A = tfd.Deterministic(jnp.zeros((n_sites, 1))),
@@ -425,8 +532,7 @@ def flatten_theta_dict(theta_dict: Dict[str, Array]) -> Array:
     n_sites = theta_dict['A'].shape[-2]
     flattened_parts = []
 
-    # Global parameters (3 parameters, 1 each)
-    for param_name in ['beta_0', 'alpha', 'sigma']:
+    for param_name in ['beta_0', 'alpha', 'sigma', 'mu_A']:
         flattened_parts.append(
             theta_dict[param_name].reshape(batch_shape + (1,))
         )
@@ -455,30 +561,15 @@ def flatten_selective_theta_dict(
         Flattened array containing only sampled parameters
     """
     # Get dimensions from any site-specific parameter
-    if 'A' in theta_dict:
-        batch_shape = theta_dict['A'].shape[:-2]
-        n_sites = theta_dict['A'].shape[-2]
-    elif 'T_season' in theta_dict:
-        batch_shape = theta_dict['T_season'].shape[:-2]
-        n_sites = theta_dict['T_season'].shape[-2]
-    elif 'phi' in theta_dict:
-        batch_shape = theta_dict['phi'].shape[:-2]
-        n_sites = theta_dict['phi'].shape[-2]
-    else:
-        # Only global parameters
-        batch_shape = theta_dict['beta_0'].shape[:-2]
-        n_sites = 1  # Not used for global-only case
+    batch_shape, n_sites = _infer_batch_shape_and_n_sites(theta_dict)
 
     flattened_parts = []
 
-    # Process parameters in consistent order
-    param_order = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
-
-    for param_name in param_order:
+    for param_name in PARAM_ORDER:
         if param_name not in sample_params or param_name not in theta_dict:
             continue
 
-        if param_name in ['beta_0', 'alpha', 'sigma']:
+        if param_name in GLOBAL_PARAMS:
             # Global parameters
             flattened_parts.append(
                 theta_dict[param_name].reshape(batch_shape + (1,))
@@ -496,8 +587,7 @@ def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs:
     """Create blockwise bijector for FMPE using same Z-scaling as SFMPE."""
     individual_bijectors = []
 
-    # Global parameters (3 parameters, 1 each)
-    for param in ['beta_0', 'alpha', 'sigma']:
+    for param in ['beta_0', 'alpha', 'sigma', 'mu_A']:
         base_bij = bijector_specs[param]
         param_data = repr_theta[param].reshape(-1, 1)
         mean_val = jnp.mean(base_bij.forward(param_data))
@@ -525,7 +615,7 @@ def create_flat_blockwise_bijector(repr_theta: Dict[str, Array], bijector_specs:
     # Create blockwise bijector
     return tfb.Blockwise(
         bijectors=individual_bijectors,
-        block_sizes=[1, 1, 1, n_sites, n_sites, n_sites]
+        block_sizes=[1, 1, 1, 1, n_sites, n_sites, n_sites]
     )
 
 
@@ -550,16 +640,13 @@ def create_selective_flat_bijector(
     individual_bijectors = []
     block_sizes = []
 
-    # Process parameters in the same order as flattening
-    param_order = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
-
-    for param in param_order:
+    for param in PARAM_ORDER:
         if param not in sample_params:
             continue
 
         base_bij = bijector_specs[param]
 
-        if param in ['beta_0', 'alpha', 'sigma']:
+        if param in GLOBAL_PARAMS:
             # Global parameters
             param_data = repr_theta[param].reshape(-1, 1)
             mean_val = jnp.mean(base_bij.forward(param_data))
@@ -592,13 +679,9 @@ def reconstruct_theta_dict(theta_flat: Array, n_sites: int) -> Dict[str, Array]:
     theta_dict = {}
     idx = 0
 
-    # Global parameters (3 parameters, 1 each)
-    theta_dict['beta_0'] = theta_flat[..., idx:idx+1, None]
-    idx += 1
-    theta_dict['alpha'] = theta_flat[..., idx:idx+1, None]
-    idx += 1
-    theta_dict['sigma'] = theta_flat[..., idx:idx+1, None]
-    idx += 1
+    for param_name in ['beta_0', 'alpha', 'sigma', 'mu_A']:
+        theta_dict[param_name] = theta_flat[..., idx:idx+1, None]
+        idx += 1
 
     # Site-specific parameters (3 parameters, n_sites each)
     for param_name in ['A', 'T_season', 'phi']:
@@ -629,13 +712,10 @@ def reconstruct_selective_theta_dict(
     theta_dict = {}
     idx = 0
 
-    # Process parameters in consistent order
-    param_order = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
-
-    for param_name in param_order:
+    for param_name in PARAM_ORDER:
         if param_name in sample_params:
             # Extract sampled parameter from flattened array
-            if param_name in ['beta_0', 'alpha', 'sigma']:
+            if param_name in GLOBAL_PARAMS:
                 # Global parameters
                 theta_dict[param_name] = theta_flat[..., idx:idx+1, None]
                 idx += 1
@@ -651,7 +731,7 @@ def reconstruct_selective_theta_dict(
                 if theta_flat.ndim > 1:
                     # Add batch dimensions to match theta_flat
                     batch_shape = theta_flat.shape[:-1]
-                    if param_name in ['beta_0', 'alpha', 'sigma']:
+                    if param_name in GLOBAL_PARAMS:
                         theta_dict[param_name] = jnp.broadcast_to(
                             fixed_val,
                             batch_shape + (1, 1)
@@ -699,7 +779,7 @@ def flatten_f_in(f_in_data: PyTree, pad_value: float = -1e8,
         theta_keys = [p for p in sample_params if p in f_in_data.keys()]
     else:
         # For standard inference, include all parameters
-        theta_keys = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+        theta_keys = PARAM_ORDER
 
     y_keys = ['obs']              # observations
 
@@ -722,6 +802,7 @@ def get_standard_bijector_specs() -> Dict[str, tfb.Bijector]:
         'beta_0': tfb.Invert(tfb.Sigmoid(low=0.1, high=2.0)),
         'alpha': tfb.Invert(tfb.Sigmoid(low=1/30, high=1/7)),
         'sigma': tfb.Invert(tfb.Sigmoid(low=1/21, high=1/7)),
+        'mu_A': tfb.Invert(tfb.Sigmoid(low=0.2, high=0.5)),
         'A': tfb.Invert(tfb.Sigmoid(low=0.2, high=0.5)),
         'T_season': tfb.Invert(tfb.Softplus()),
         'phi': tfb.Invert(tfb.Sigmoid(low=0.0, high=jnp.pi)),
@@ -756,7 +837,8 @@ def create_pytree_bijectors(
 def create_numpyro_seir_model(
     simulator_fn: Callable,
     n_sites: int,
-    f_in: Dict[str, Array]
+    f_in: Dict[str, Array],
+    a_prior_config: Dict[str, Any] | None = None,
 ) -> Callable:
     """
     Create a NumPyro model for SEIR inference using native NumPyro distributions.
@@ -770,6 +852,7 @@ def create_numpyro_seir_model(
         NumPyro model function compatible with NUTS/ESS kernels
     """
     def seir_model(y_observed: Dict[str, Array] = None):
+        cfg = _normalize_a_prior_config(a_prior_config)
         # Global parameters (shared across sites)
         beta_0 = numpyro.sample(
             'beta_0',
@@ -783,15 +866,20 @@ def create_numpyro_seir_model(
             'sigma',
             dist.Uniform(jnp.array(1/21), jnp.array(1/7))
         )
+        mu_A = numpyro.sample(
+            'mu_A',
+            dist.TruncatedNormal(
+                loc=jnp.array(cfg['mu_loc']),
+                scale=jnp.array(cfg['mu_scale']),
+                low=jnp.array(cfg['low']),
+                high=jnp.array(cfg['high']),
+            )
+        )
 
         # Site-specific parameters
-        # Seasonal amplitude
         A = numpyro.sample(
             'A',
-            dist.Uniform(
-                jnp.full((n_sites,), 0.2),
-                jnp.full((n_sites,), 0.5)
-            )
+            _numpyro_truncated_normal_a(mu_A, n_sites, cfg)
         )
 
         # Seasonal period (using Gamma distribution like TFP version)
@@ -818,6 +906,7 @@ def create_numpyro_seir_model(
             'beta_0': beta_0[None, None],  # Shape: (1, 1)
             'alpha': alpha[None, None],    # Shape: (1, 1)
             'sigma': sigma[None, None],    # Shape: (1, 1)
+            'mu_A': mu_A[None, None],
             'A': A[:, None],               # Shape: (n_sites, 1)
             'T_season': T_season[:, None], # Shape: (n_sites, 1)
             'phi': phi[:, None]            # Shape: (n_sites, 1)
@@ -850,7 +939,8 @@ def create_selective_numpyro_seir_model(
     n_sites: int,
     f_in: Dict[str, Array],
     sample_params: list[str],
-    fixed_params: Dict[str, Array]
+    fixed_params: Dict[str, Array],
+    a_prior_config: Dict[str, Any] | None = None,
 ) -> Callable:
     """
     Create a NumPyro model that only samples specified parameters.
@@ -866,6 +956,7 @@ def create_selective_numpyro_seir_model(
         NumPyro model function that samples only specified parameters
     """
     def selective_seir_model(y_observed: Dict[str, Array] = None):
+        cfg = _normalize_a_prior_config(a_prior_config)
         # Initialize theta dictionary with fixed values
         theta = {}
 
@@ -889,13 +980,24 @@ def create_selective_numpyro_seir_model(
                 'sigma',
                 dist.Uniform(jnp.array(1/21), jnp.array(1/7))
             )[None, None]
+        if 'mu_A' in sample_params:
+            theta['mu_A'] = numpyro.sample(
+                'mu_A',
+                dist.TruncatedNormal(
+                    loc=jnp.array(cfg['mu_loc']),
+                    scale=jnp.array(cfg['mu_scale']),
+                    low=jnp.array(cfg['low']),
+                    high=jnp.array(cfg['high']),
+                )
+            )[None, None]
         if 'A' in sample_params:
+            mu_A_source = theta.get(
+                'mu_A',
+                fixed_params.get('mu_A', jnp.full((1, 1), cfg['mu_loc']))
+            )
             theta['A'] = numpyro.sample(
                 'A',
-                dist.Uniform(
-                    jnp.full((n_sites,), 0.2),
-                    jnp.full((n_sites,), 0.5)
-                )
+                _numpyro_truncated_normal_a(mu_A_source.reshape(()), n_sites, cfg)
             )[:, None]
         if 'T_season' in sample_params:
             t_season_spread = 1./7.
@@ -941,7 +1043,8 @@ def create_selective_sfmpe_functions(
     n_sites: int,
     sample_params: list[str],
     fixed_params: Dict[str, Array],
-    simulator_fn: Callable
+    simulator_fn: Callable,
+    a_prior_config: Dict[str, Any] | None = None,
 ) -> tuple[Callable, Callable, Callable, list[str], list[str]]:
     """
     Create minimal SFMPE primitives for selective parameter inference.
@@ -956,21 +1059,26 @@ def create_selective_sfmpe_functions(
         Tuple of (selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names)
     """
     # Create selective structured prior function
-    selective_prior_fn = create_selective_structured_prior_fn(sample_params)
+    cfg = _normalize_a_prior_config(a_prior_config)
+    selective_prior_fn = create_selective_structured_prior_fn(sample_params, fixed_params, cfg)
 
     # Create selective local prior function consistent with true prior
     def selective_local_fn(g, n):
         """Local prior distribution for site-specific parameters (consistent with true prior)."""
-        n_sims = g[next(iter(g.keys()))].shape[0]  # Get batch size from any global param
+        n_sims = 1 if len(g) == 0 else g[next(iter(g.keys()))].shape[0]
         t_season_spread = 1./7.  # Match true prior, not the outdated 1./50.
         local_dict = {}
 
         # Only include local parameters that are being sampled, with correct specifications
         if 'A' in sample_params:
-            local_dict['A'] = tfd.Uniform(
-                jnp.full((n_sims, n, 1), 0.2),  # Match true prior: 0.2 to 0.5
-                jnp.full((n_sims, n, 1), 0.5)
+            mu_A_source = g.get(
+                'mu_A',
+                jnp.broadcast_to(
+                    fixed_params.get('mu_A', jnp.full((1, 1), cfg['mu_loc'])),
+                    (n_sims, 1, 1)
+                )
             )
+            local_dict['A'] = _truncated_normal_a(mu_A_source, (n_sims, n, 1), cfg)
         if 'T_season' in sample_params:
             local_dict['T_season'] = tfd.Gamma(
                 jnp.full((n_sims, n, 1), 365.0 * t_season_spread),  # Use correct spread
@@ -1002,7 +1110,7 @@ def create_selective_sfmpe_functions(
         return simulator_fn(seed, theta_full, f_in_sample)
 
     # Determine global and local parameter lists based on what's being sampled
-    all_global = ['beta_0', 'alpha', 'sigma']
+    all_global = ['beta_0', 'alpha', 'sigma', 'mu_A']
     all_local = ['A', 'T_season', 'phi']
 
     global_names = [p for p in all_global if p in sample_params]
@@ -1010,11 +1118,6 @@ def create_selective_sfmpe_functions(
 
     return selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names
 
-
-# Parameter ordering constants for SBC plotting
-PARAM_ORDER = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
-GLOBAL_PARAMS = {'beta_0', 'alpha', 'sigma'}
-LOCAL_PARAMS = {'A', 'T_season', 'phi'}
 
 
 def sbc_plot(

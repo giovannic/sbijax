@@ -717,7 +717,7 @@ def plot_pairplot_with_reference(
         for param in sample_params:
             param_data = post_dict_filtered[param]  # Shape: (chains, draws, ...)
 
-            if param in ['beta_0', 'alpha', 'sigma']:
+            if param in ['beta_0', 'alpha', 'sigma', 'mu_A']:
                 # Global parameters
                 flattened = param_data.reshape(-1)
                 flat_data[param] = flattened
@@ -995,7 +995,7 @@ def main():
             )
 
             # Individual posterior plots
-            global_sampled = [p for p in sample_params if p in ['beta_0', 'alpha', 'sigma']]
+            global_sampled = [p for p in sample_params if p in ['beta_0', 'alpha', 'sigma', 'mu_A']]
             if global_sampled:
                 ref_vals = [float(theta_truth[param][0, 0, 0]) for param in global_sampled]
                 az.plot_posterior(job_inference_data, var_names=global_sampled, ref_val=ref_vals)
@@ -1049,7 +1049,7 @@ def main():
         print(az.summary(inference_data))
 
         # Create posterior plots
-        global_sampled = [p for p in sample_params if p in ['beta_0', 'alpha', 'sigma']]
+        global_sampled = [p for p in sample_params if p in ['beta_0', 'alpha', 'sigma', 'mu_A']]
         if global_sampled:
             ref_vals = [float(theta_truth[param][0, 0, 0]) for param in global_sampled]
             az.plot_posterior(inference_data, var_names=global_sampled, ref_val=ref_vals)

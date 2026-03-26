@@ -49,11 +49,20 @@ mcmc:
 # Method selection
 method: "MCMC"  # Options: "MCMC", "SFMPE"
 
+# Hierarchical prior for seasonal amplitude
+a_prior:
+  type: "hierarchical_truncnorm"
+  mu_loc: 0.35
+  mu_scale: 0.05
+  sigma: 0.05
+  low: 0.2
+  high: 0.5
+
 # Inference configuration - selective parameter sampling
 inference:
-  sample_params: null  # List of parameters to sample, e.g. ["beta_0"] for beta-0 only
-                       # If null, samples all parameters (default behavior)
-                       # Available params: ["beta_0", "alpha", "sigma", "A", "T_season", "phi"]
+  sample_params: ["beta_0", "mu_A", "A"]  # Benchmark target under the hierarchical A prior
+                                          # Set to null to sample all parameters
+                                          # Available params: ["beta_0", "alpha", "sigma", "mu_A", "A", "T_season", "phi"]
 
 # SFMPE configuration (used when method: "SFMPE")
 sfmpe:

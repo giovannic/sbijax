@@ -72,10 +72,11 @@ def run(cfg: DictConfig) -> None:
     n_rounds = cfg.n_rounds
     n_epochs = cfg.n_epochs
     n_post_samples = cfg.n_post_samples
+    a_prior_config = dict(cfg.a_prior) if hasattr(cfg, 'a_prior') and cfg.a_prior is not None else None
 
     # Set up parameters for unified selective approach
     # Full inference is just selective inference with all parameters sampled
-    all_params = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+    all_params = ['beta_0', 'alpha', 'sigma', 'mu_A', 'A', 'T_season', 'phi']
 
     if (hasattr(cfg, 'inference') and
         cfg.inference is not None and
@@ -104,7 +105,7 @@ def run(cfg: DictConfig) -> None:
     # Generate ground truth and observations using data_key
     theta_key, obs_key, f_in_key, data_key = jr.split(data_key, 4)
 
-    theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
+    theta_truth = prior_fn(n_sites, a_prior_config).sample((1,), seed=theta_key)
 
     # For selective inference, broadcast fixed local parameters to be identical across sites
     for param_name in fixed_param_names:
@@ -133,7 +134,7 @@ def run(cfg: DictConfig) -> None:
 
     # Always use selective functions for representative data generation
     selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names = create_selective_sfmpe_functions(
-        n_sites, sample_params, fixed_params, simulator_fn
+        n_sites, sample_params, fixed_params, simulator_fn, a_prior_config
     )
     # Sample only the selected parameters for representative data
     repr_theta = selective_prior_fn(n_sites).sample((1000,), seed=repr_key)
@@ -350,7 +351,7 @@ def run(cfg: DictConfig) -> None:
     # Create proxy functions for FMPE training
     def fmpe_prior_fn(key: Array, n_samples: int) -> Array:
         """Prior function compatible with FMPE interface"""
-        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params, a_prior_config)
         theta_samples = selective_prior(n_sites).sample((n_samples,), seed=key)
         # Flatten and transform to unconstrained space
         theta_flat = flatten_selective_theta_dict(theta_samples, sample_params)
@@ -379,7 +380,7 @@ def run(cfg: DictConfig) -> None:
 
     # Create FMPE model
     # Calculate parameter dimensions based on sampled parameters
-    n_global_params = len([p for p in sample_params if p in ['beta_0', 'alpha', 'sigma']])
+    n_global_params = len([p for p in sample_params if p in ['beta_0', 'alpha', 'sigma', 'mu_A']])
     n_local_params = len([p for p in sample_params if p in ['A', 'T_season', 'phi']])
     total_params = n_global_params + n_local_params * n_sites
 
@@ -558,7 +559,7 @@ def run(cfg: DictConfig) -> None:
     # Create constrained FMPE functions for LC2ST evaluation
     def constrained_fmpe_prior_fn(key: Array, n_samples: int) -> Array:
         """Prior function in constrained space for FMPE LC2ST evaluation"""
-        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params, a_prior_config)
         theta_samples = selective_prior(n_sites).sample((n_samples,), seed=key)
         # Flatten but keep in constrained space
         return flatten_selective_theta_dict(theta_samples, sample_params)
@@ -832,8 +833,7 @@ def compute_true_posterior_log_prob_sfmpe(
     log_likelihood = jnp.sum(log_likelihood, axis=(1, 2))
 
     # Compute prior log probability using selective prior
-    selective_prior = create_selective_prior_fn(n_sites, sample_params, {})
-    prior_dist = selective_prior(n_sites)
+    prior_dist = prior_fn(n_sites)
     log_prior = prior_dist.log_prob(posterior_samples)
     log_prior = jnp.sum(log_prior, axis=1)
 

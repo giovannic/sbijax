@@ -45,11 +45,20 @@ analysis:
     latent_dim: 128
     n_layers: 2
 
+# Hierarchical prior for seasonal amplitude
+a_prior:
+  type: "hierarchical_truncnorm"
+  mu_loc: 0.35
+  mu_scale: 0.05
+  sigma: 0.05
+  low: 0.2
+  high: 0.5
+
 # Inference configuration - selective parameter sampling
 inference:
   sample_params: null  # List of parameters to sample, e.g. ["beta_0"] for beta-0 only
                        # If null, samples all parameters (default behavior)
-                       # Available params: ["beta_0", "alpha", "sigma", "A", "T_season", "phi"]
+                       # Available params: ["beta_0", "alpha", "sigma", "mu_A", "A", "T_season", "phi"]
 
 # Random seeds
 data_seed: 42    # Seed for ground truth generation

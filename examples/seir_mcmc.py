@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from jaxtyping import Array, PyTree
 from typing import Callable
+import numpy as np
 
 import hydra
 from omegaconf import DictConfig, ListConfig
@@ -68,10 +69,12 @@ def run(cfg: DictConfig) -> None:
     n_rounds = cfg.n_rounds
     n_epochs = cfg.n_epochs
     n_post_samples = cfg.n_post_samples
+    a_prior_config = dict(cfg.a_prior) if hasattr(cfg, 'a_prior') and cfg.a_prior is not None else None
+    mcmc_extra_fields = {}
 
     # Set up parameters for unified selective approach
     # Full inference is just selective inference with all parameters sampled
-    all_params = ['beta_0', 'alpha', 'sigma', 'A', 'T_season', 'phi']
+    all_params = ['beta_0', 'alpha', 'sigma', 'mu_A', 'A', 'T_season', 'phi']
 
     if (hasattr(cfg, 'inference') and
         cfg.inference is not None and
@@ -97,7 +100,7 @@ def run(cfg: DictConfig) -> None:
     # Generate ground truth and observations
     theta_key, obs_key, f_in_key, key = jr.split(key, 4)
     
-    theta_truth = prior_fn(n_sites).sample((1,), seed=theta_key)
+    theta_truth = prior_fn(n_sites, a_prior_config).sample((1,), seed=theta_key)
 
     # For selective inference, broadcast fixed local parameters to be identical across sites
     for param_name in fixed_param_names:
@@ -119,11 +122,11 @@ def run(cfg: DictConfig) -> None:
 
     # Generate representative data for consistent Z-scaling across all bijectors
     repr_key, key = jr.split(key)
-    repr_theta = prior_fn(n_sites).sample((1000,), seed=repr_key)
+    repr_theta = prior_fn(n_sites, a_prior_config).sample((1000,), seed=repr_key)
 
     # Generate prior samples for comparison plots
     prior_key, key = jr.split(key)
-    selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+    selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params, a_prior_config)
     prior_samples_selective = selective_prior(n_sites).sample((cfg.n_prior_samples,), seed=prior_key)
     prior_samples_flat = flatten_selective_theta_dict(prior_samples_selective, sample_params)[None, ...]
 
@@ -136,7 +139,7 @@ def run(cfg: DictConfig) -> None:
     # Create proxy functions for MCMC sampling
     def flat_prior_fn(key: Array, n_samples: int) -> Array:
         """Prior function compatible with FMPE interface"""
-        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params, a_prior_config)
         theta_samples = selective_prior(n_sites).sample((n_samples,), seed=key)
         return flatten_selective_theta_dict(theta_samples, sample_params)
 
@@ -146,7 +149,7 @@ def run(cfg: DictConfig) -> None:
         # Reconstruct full theta from selective samples + fixed values
         theta_dict = reconstruct_selective_theta_dict(theta_flat, sample_params, fixed_params, n_sites)
         # Create selective prior for log_prob calculation
-        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params)(n_sites)
+        selective_prior = create_selective_prior_fn(n_sites, sample_params, fixed_params, a_prior_config)(n_sites)
         # Extract sampled parameters for prior calculation
         theta_selective = {k: v for k, v in theta_dict.items() if k in sample_params}
         prior_p = selective_prior.log_prob(theta_selective)
@@ -210,7 +213,7 @@ def run(cfg: DictConfig) -> None:
 
                 # Create NumPyro model (always use selective approach)
                 numpyro_model = create_selective_numpyro_seir_model(
-                    simulator_fn, n_sites, f_in, sample_params, fixed_params
+                    simulator_fn, n_sites, f_in, sample_params, fixed_params, a_prior_config
                 )
 
                 if cfg.mcmc.init_to_truth:
@@ -260,6 +263,10 @@ def run(cfg: DictConfig) -> None:
                     jit_model_args=True
                 )
                 mcmc.run(sample_key, y_observed=y_observed)
+                mcmc_extra_fields = tree.map(
+                    lambda x: np.asarray(x).tolist(),
+                    mcmc.get_extra_fields(group_by_chain=True)
+                )
 
                 # Extract samples and convert to expected format
                 samples = mcmc.get_samples(group_by_chain=True)
@@ -267,7 +274,7 @@ def run(cfg: DictConfig) -> None:
                 # Reconstruct theta dictionary from selective NumPyro samples
                 theta_dict = {}
                 for param_name in sample_params:
-                    if param_name in ['beta_0', 'alpha', 'sigma']:
+                    if param_name in ['beta_0', 'alpha', 'sigma', 'mu_A']:
                         theta_dict[param_name] = samples[param_name][:, :, None, None]
                     else:
                         theta_dict[param_name] = samples[param_name][:, :, :, None]
@@ -276,7 +283,7 @@ def run(cfg: DictConfig) -> None:
                 for param_name in fixed_param_names:
                     fixed_val = fixed_params[param_name]
                     batch_shape = samples[sample_params[0]].shape[:2]  # [n_chains, n_samples]
-                    if param_name in ['beta_0', 'alpha', 'sigma']:
+                    if param_name in ['beta_0', 'alpha', 'sigma', 'mu_A']:
                         theta_dict[param_name] = jnp.broadcast_to(
                             fixed_val[None, None, :, :],
                             batch_shape + (1, 1)
@@ -334,6 +341,10 @@ def run(cfg: DictConfig) -> None:
                     jit_model_args=True
                 )
                 mcmc.run(sample_key, init_params=flat_theta_bijector.forward(init_state))
+                mcmc_extra_fields = tree.map(
+                    lambda x: np.asarray(x).tolist(),
+                    mcmc.get_extra_fields(group_by_chain=True)
+                )
                 unconstrained_samples = mcmc.get_samples(group_by_chain=True)
                 mcmc_posterior_samples = flat_theta_bijector.inverse(unconstrained_samples)
         else:
@@ -356,7 +367,7 @@ def run(cfg: DictConfig) -> None:
         repr_key, key = jr.split(key)
         # Always use selective functions for representative data generation
         selective_prior_fn, selective_local_fn, wrapped_simulator_fn, global_names, local_names = create_selective_sfmpe_functions(
-            n_sites, sample_params, fixed_params, simulator_fn
+            n_sites, sample_params, fixed_params, simulator_fn, a_prior_config
         )
         # Sample only the selected parameters for representative data
         repr_theta = selective_prior_fn(n_sites).sample((1000,), seed=repr_key)
@@ -789,7 +800,8 @@ def run(cfg: DictConfig) -> None:
     post_dict = {k: v for k, v in post_dict_full.items() if k in sample_params}
     posterior = az.from_dict(posterior=post_dict)
     logger.info(f"Summarising MCMC posterior")
-    print(az.summary(posterior))
+    posterior_summary = az.summary(posterior)
+    print(posterior_summary)
     logger.info(f"MCMC summarisation completed in {time.time() - start_time:.2f} seconds")
 
     # Use Hydra's output directory
@@ -825,6 +837,10 @@ def run(cfg: DictConfig) -> None:
     }
     with open(out_dir / "selective_inference_config.json", 'w') as f:
         json.dump(selective_config, f, indent=2)
+    if mcmc_extra_fields:
+        with open(out_dir / "mcmc_extra_fields.json", 'w') as f:
+            json.dump(mcmc_extra_fields, f, indent=2)
+    posterior_summary.to_csv(out_dir / "mcmc_summary.csv")
     
     logger.info("SEIR MCMC estimation completed successfully!")
 
