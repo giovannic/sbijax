@@ -43,6 +43,7 @@ mcmc:
   step_size: 1e-1
   max_doublings: 3
   max_tree_depth: 5
+  dense_mass: false
   init_to_truth: true
 
 # Method selection
@@ -60,9 +61,9 @@ sfmpe:
     latent_dim: 64
     label_dim: 16
     index_out_dim: 32
-    n_encoder: 1
+    n_encoder: 2
     n_decoder: 1
-    n_heads: 2
+    n_heads: 4
     n_ff: 2
     dropout: 0.1
 

@@ -77,7 +77,7 @@ def identify_method(job_dir: Path) -> str:
     method = config.get('method', 'UNKNOWN')
 
     if method == 'SFMPE':
-        return 'SFMPE'
+        return 'TFMPE'
     elif method == 'MCMC':
         sampler = config.get('mcmc', {}).get('sampler', 'unknown')
         return f'MCMC-{sampler}'
@@ -197,7 +197,7 @@ def get_method_colours() -> Dict[str, str]:
         Method name to color mapping
     """
     return {
-        'SFMPE': '#1f77b4',
+        'TFMPE': '#1f77b4',
         'MCMC-slice': '#ff7f0e',
         'MCMC-nuts': '#2ca02c',
         'MCMC-ess': '#d62728',

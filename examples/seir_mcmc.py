@@ -21,7 +21,7 @@ from jaxtyping import Array, PyTree
 from typing import Callable
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 from hydra.core.hydra_config import HydraConfig
 
 from jax import numpy as jnp, random as jr, tree, jit
@@ -36,7 +36,7 @@ from flax import nnx
 from tfmpe.estimators.tfmpe import TFMPE, NormalDistribution
 from tfmpe.estimators.training import fit_bottom_up
 from tfmpe.preprocessing.tokens import Tokens
-from tfmpe.preprocessing.utils import Independence, Labeller
+from tfmpe.preprocessing.utils import Labeller
 from tfmpe.nn.transformer import Transformer, TransformerConfig
 import diffrax
 
@@ -236,12 +236,18 @@ def run(cfg: DictConfig) -> None:
                         init_strategy=init_strategy)
                     chain_method = "vectorized"
                 else:
+                    if isinstance(cfg.mcmc.dense_mass, (list, ListConfig)):
+                        dense_mass = [tuple(block) for block in cfg.mcmc.dense_mass]
+                    else:
+                        dense_mass = cfg.mcmc.dense_mass
+
                     kernel = NUTS(
                         numpyro_model,
                         init_strategy=init_strategy,
                         step_size=cfg.mcmc.step_size,
                         max_tree_depth=cfg.mcmc.max_tree_depth,
-                        adapt_step_size=True
+                        adapt_step_size=True,
+                        dense_mass=dense_mass,
                     )
                     chain_method = "parallel"
 
@@ -402,8 +408,6 @@ def run(cfg: DictConfig) -> None:
             # Transform outputs to unconstrained space
             return sfmpe_y_bijector.forward(y_deq)
      
-        independence = Independence()
-
         # SFMPE Neural Network Setup (dynamic n_labels) using estim_key
         param_key, dropout_key = jr.split(key)
         rngs = nnx.Rngs(params=param_key, dropout=dropout_key)
@@ -428,7 +432,6 @@ def run(cfg: DictConfig) -> None:
                 **y_unconstrained
             },
             condition=list(y_unconstrained.keys()),
-            independence=independence,
             labeller=labeller,
             functional_inputs=tree.map(lambda x: x[0:1], repr_f_in)
         )
@@ -484,7 +487,6 @@ def run(cfg: DictConfig) -> None:
             n_iter_per_round=n_epochs,
             batch_size=100,
             rng=train_key,
-            independence=independence,
             labeller=labeller,
             f_in_fn = f_in_fn_train,
             f_in_args = f_in_args,
@@ -506,7 +508,7 @@ def run(cfg: DictConfig) -> None:
                 f_in
             )
 
-        tokens, decoder = Tokens.from_pytree(
+        tokens, decoder = Tokens.from_pytree_with_decoder(
             {
                 **tree.map(
                     lambda leaf: jnp.zeros((n_post_samples,) + leaf.shape[1:]),
@@ -518,10 +520,8 @@ def run(cfg: DictConfig) -> None:
                 )
             },
             condition=list(y_unconstrained.keys()),
-            independence=independence,
             labeller=labeller,
             functional_inputs=f_in_for_samples(n_post_samples),
-            return_decoder = True
         )
 
         posterior_tokens = estim.sample_posterior_batched(
@@ -608,13 +608,11 @@ def run(cfg: DictConfig) -> None:
             data = {**context_repeated, **param_template}
 
             # Create param tokens (template for posterior samples)
-            tokens, decoder = Tokens.from_pytree(
+            tokens, decoder = Tokens.from_pytree_with_decoder(
                 data,
                 condition=list(context_repeated.keys()),
-                independence=independence,
                 labeller=labeller,
                 functional_inputs=f_in_all,
-                return_decoder=True
             )
 
             # 4. Single call to sample_posterior for all samples
@@ -713,13 +711,11 @@ def run(cfg: DictConfig) -> None:
 
             data = {**context_repeated, **param_template}
 
-            tokens, decoder = Tokens.from_pytree(
+            tokens, decoder = Tokens.from_pytree_with_decoder(
                 data,
                 condition=list(context_repeated.keys()),
-                independence=independence,
                 labeller=labeller,
                 functional_inputs=f_in_all,
-                return_decoder=True
             )
 
             # 4. Single call to sample_posterior for all samples
